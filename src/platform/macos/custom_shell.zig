@@ -892,6 +892,31 @@ pub fn pasteboard_write_string(text: []const u8) void {
     if (@intFromPtr(ns) == 0) return; // invalid UTF-8 -> leave the clipboard alone
     _ = objc.msg_send(NSInteger, pb, "clearContents", .{});
     _ = objc.msg_send(bool, pb, "setString:forType:", .{ ns, pasteboard_type() });
+    // Mark this write so the next poll does not report it as an external change.
+    g_pb_own = objc.msg_send(NSInteger, pb, "changeCount", .{});
+}
+
+// macOS has no clipboard-change event, only NSPasteboard.changeCount, so the app
+// polls. These track the last count seen and the count after our own last write.
+var g_pb_last_seen: NSInteger = 0;
+var g_pb_own: NSInteger = 0;
+var g_pb_primed: bool = false;
+
+// True once each time the clipboard changes from outside this app. The first call
+// only baselines (no spurious event for whatever was already on the clipboard); our
+// own writes are recognised via g_pb_own and never reported.
+pub fn clipboard_changed_external() bool {
+    const pb = general_pasteboard() orelse return false;
+    const c: NSInteger = objc.msg_send(NSInteger, pb, "changeCount", .{});
+    std.debug.assert(c >= g_pb_last_seen); // changeCount only ever increases
+    if (!g_pb_primed) {
+        g_pb_primed = true;
+        g_pb_last_seen = c;
+        return false;
+    }
+    if (c == g_pb_last_seen) return false;
+    g_pb_last_seen = c;
+    return c != g_pb_own;
 }
 
 // The mouse dispatch carries no modifier flags, so a shift-click reads live

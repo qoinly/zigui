@@ -7,6 +7,7 @@ const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
 const frame_mod = @import("frame.zig");
 const input_mod = @import("input.zig");
+const custom_shell = @import("custom_shell.zig");
 const renderer = @import("renderer.zig");
 const app_runtime = @import("app_runtime.zig");
 const callbacks = @import("callbacks.zig");
@@ -138,6 +139,20 @@ pub fn grabbed() bool {
 }
 pub fn input_events() []const InputEvent {
     return frame_ctx.get().paint.raw_inputs();
+}
+
+// Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
+// returns true once each time something outside this app changes the clipboard (our
+// own set_clipboard_text writes are not reported), so a remote-control loop can
+// forward it. Call clipboard_changed once a frame.
+pub fn clipboard_text(buf: []u8) []const u8 {
+    return custom_shell.pasteboard_read_into(buf);
+}
+pub fn set_clipboard_text(s: []const u8) void {
+    custom_shell.pasteboard_write_string(s);
+}
+pub fn clipboard_changed() bool {
+    return custom_shell.clipboard_changed_external();
 }
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();

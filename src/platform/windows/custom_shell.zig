@@ -803,3 +803,8 @@ pub fn pasteboard_write_string(text: []const u8) void {
         owned_by_clipboard = true;
     }
 }
+
+// The Windows backend reports no clipboard change; macOS carries the poll.
+pub fn clipboard_changed_external() bool {
+    return false;
+}
