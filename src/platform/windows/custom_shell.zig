@@ -12,6 +12,7 @@ const std = @import("std");
 const win32 = @import("win32.zig");
 const loop = @import("loop.zig");
 const types = @import("../../window/types.zig");
+const input = @import("../../input.zig");
 
 pub const KeyMods = packed struct {
     cmd: bool = false,
@@ -164,6 +165,27 @@ fn scale_for(hwnd: win32.HWND) f32 {
 pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_dispatch = d;
 }
+
+// Raw input capture (grab mode) is macOS-only; these satisfy the shared interface
+// and capture nothing on Windows.
+pub const RawDispatch = struct {
+    on_event: *const fn (ctx: *anyopaque, ev: input.InputEvent) void,
+    ctx: *anyopaque,
+};
+
+pub fn register_raw_dispatch(d: RawDispatch) void {
+    _ = d;
+}
+
+pub fn set_grab(on: bool) void {
+    _ = on;
+}
+
+pub fn is_grabbed() bool {
+    return false;
+}
+
+pub fn release_grab_if_blurred() void {}
 
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
 // an interactive component (-> HTCLIENT) and lets caption hover request a redraw.

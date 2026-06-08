@@ -6,6 +6,7 @@ const kit_nodes = @import("kit_nodes.zig");
 const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
 const frame_mod = @import("frame.zig");
+const input_mod = @import("input.zig");
 const renderer = @import("renderer.zig");
 const app_runtime = @import("app_runtime.zig");
 const callbacks = @import("callbacks.zig");
@@ -120,6 +121,23 @@ pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
 pub const Renderer = renderer.Renderer;
 pub fn renderer_handle() *Renderer {
     return &frame_ctx.get().paint.renderer;
+}
+
+// Raw input capture for a remote-control loop. grab() enters relative capture (the
+// cursor hides + decouples, Escape releases); while grabbed, input arrives through
+// input_events() instead of the widgets, for the app to forward. zigui owns the
+// capture; the app owns what to send.
+pub const InputEvent = input_mod.InputEvent;
+pub const InputButton = input_mod.Button;
+pub const InputMods = input_mod.Mods;
+pub fn grab(enable: bool) void {
+    frame_ctx.get().paint.set_grab(enable);
+}
+pub fn grabbed() bool {
+    return frame_ctx.get().paint.grabbed();
+}
+pub fn input_events() []const InputEvent {
+    return frame_ctx.get().paint.raw_inputs();
 }
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();

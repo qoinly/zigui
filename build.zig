@@ -78,6 +78,22 @@ pub fn build(b: *std.Build) void {
     const frame_demo_step = b.step("frame-demo", "Build + run the external-frame demo");
     frame_demo_step.dependOn(&frame_demo_run.step);
 
+    // Example: input-demo - smoke test for the raw input-capture (grab) path.
+    const input_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/input_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const input_demo_exe = b.addExecutable(.{
+        .name = "input-demo",
+        .root_module = input_demo_mod,
+    });
+    b.installArtifact(input_demo_exe);
+    const input_demo_run = b.addRunArtifact(input_demo_exe);
+    const input_demo_step = b.step("input-demo", "Build + run the input-capture demo");
+    input_demo_step.dependOn(&input_demo_run.step);
+
     // Offline codegen: regenerate src/icon_lucide_data.zig from the Lucide SVG
     // set. The SVG dir lives outside the repo, so it must be passed:
     //   zig build icongen -Dlucide-dir=/path/to/lucide/icons

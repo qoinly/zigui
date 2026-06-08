@@ -12,6 +12,7 @@ const display_link = @import("../display_link.zig");
 const geometry = @import("../geometry.zig");
 const color = @import("../color.zig");
 const label = @import("../render/label.zig");
+const input = @import("../input.zig");
 
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
@@ -43,6 +44,11 @@ fn monotonic_seconds() f64 {
 // Per-frame key queue depth. Generous for human typing + key-repeat between two
 // vsync ticks; excess is dropped (a stuck flood, not real input).
 pub const MAX_KEY_EVENTS = 32;
+
+// Per-frame raw-capture queue depth (grab mode). Mouse motion alone can fire many
+// times between two vsync ticks, so this is larger than the key queue; excess is
+// dropped.
+pub const MAX_RAW_EVENTS = 256;
 
 // Width (points) of the macOS traffic-light cluster (3 buttons + gaps), reserved
 // after content_left so the titlebar content region clears them.
@@ -101,6 +107,10 @@ pub const PaintContext = struct {
     // and key-repeat fires fast. Drained by the paint callback, cleared after.
     key_events: [MAX_KEY_EVENTS]custom_shell.KeyEvent = undefined,
     key_len: u32 = 0,
+    // Raw input captured this frame while grabbed (relative motion, raw keys/
+    // buttons/wheel). Drained by the paint callback, cleared after, same as keys.
+    raw_events: [MAX_RAW_EVENTS]input.InputEvent = undefined,
+    raw_len: u32 = 0,
     // Cursor the consumer wants this frame (resets to .default each frame; set it
     // while hovering a resize edge etc). Applied after the paint callback.
     cursor: custom_shell.CursorKind = .default,
@@ -155,6 +165,7 @@ pub const PaintContext = struct {
         self.wheel_dy = 0;
         self.wheel_dx = 0;
         self.key_len = 0;
+        self.raw_len = 0;
         self.cursor = .default;
         self.animating = false;
         self.base_s = monotonic_seconds();
@@ -234,6 +245,31 @@ pub const PaintContext = struct {
 
     pub fn keys(self: *const PaintContext) []const custom_shell.KeyEvent {
         return self.key_events[0..self.key_len];
+    }
+
+    pub fn on_raw_event(self: *PaintContext, ev: input.InputEvent) void {
+        std.debug.assert(self.raw_len <= self.raw_events.len);
+        if (self.raw_len < self.raw_events.len) {
+            self.raw_events[self.raw_len] = ev;
+            self.raw_len += 1;
+        }
+        self.renderer.request_redraw();
+    }
+
+    pub fn raw_inputs(self: *const PaintContext) []const input.InputEvent {
+        return self.raw_events[0..self.raw_len];
+    }
+
+    // Enter/leave relative capture; while grabbed, input arrives via raw_inputs()
+    // instead of the UI, and Escape releases it.
+    pub fn set_grab(self: *PaintContext, on: bool) void {
+        _ = self;
+        custom_shell.set_grab(on);
+    }
+
+    pub fn grabbed(self: *const PaintContext) bool {
+        _ = self;
+        return custom_shell.is_grabbed();
     }
 
     pub fn set_cursor(self: *PaintContext, kind: custom_shell.CursorKind) void {
@@ -518,6 +554,7 @@ pub const PaintContext = struct {
     }
 
     pub fn deinit(self: *PaintContext) void {
+        custom_shell.set_grab(false); // never tear down with the cursor hidden/decoupled
         self.prims.deinit(self.allocator);
         self.sprites.deinit(self.allocator);
         self.color_sprites.deinit(self.allocator);
@@ -553,10 +590,12 @@ var g_run_state: RunState = undefined;
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     _ = p;
     const s = &g_run_state;
+    custom_shell.release_grab_if_blurred();
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
     s.user_cb(s.user_ctx, s.paint_ctx, frame) catch return;
     s.paint_ctx.key_len = 0;
+    s.paint_ctx.raw_len = 0;
     s.paint_ctx.wheel_dy = 0; // per-frame delta; consumer reads it in the callback above
     s.paint_ctx.wheel_dx = 0;
     custom_shell.apply_cursor(s.paint_ctx.cursor);
@@ -566,6 +605,11 @@ fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
 fn mouse_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_mouse_moved(x, y);
+}
+
+fn raw_event_thunk(ctx: *anyopaque, ev: input.InputEvent) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_raw_event(ev);
 }
 
 fn mouse_exit_thunk(ctx: *anyopaque) void {
@@ -639,6 +683,7 @@ pub fn start_paint_loop(
         .on_key = key_thunk,
         .ctx = @ptrCast(paint),
     });
+    custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
         null,
