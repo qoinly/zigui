@@ -1,0 +1,649 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const custom_shell = @import("../custom_shell.zig");
+const types = @import("types.zig");
+const renderer = @import("../renderer.zig");
+const text_system = @import("../text_system.zig");
+const icon_system = @import("../icon.zig");
+const app_icon = @import("../app_icon.zig");
+const primitives = @import("../primitives.zig");
+const render = @import("../render/root.zig");
+const display_link = @import("../display_link.zig");
+const geometry = @import("../geometry.zig");
+const color = @import("../color.zig");
+const label = @import("../render/label.zig");
+
+pub const CustomShellHandle = custom_shell.CustomShellHandle;
+pub const RenderBuilder = render.RenderBuilder;
+pub const HitBox = types.HitBox;
+const Quad = primitives.Quad;
+const BoundsF = geometry.BoundsF;
+
+// The pinned 0.16.0 std has no Timer/Instant/nanoTimestamp, so read the platform
+// monotonic clock directly. darwin: clock_gettime CLOCK_MONOTONIC_RAW (=4),
+// vDSO-backed and not NTP-slewed. windows: QueryPerformanceCounter (no libc).
+const timespec = extern struct { tv_sec: isize, tv_nsec: isize };
+extern "c" fn clock_gettime(clk: c_int, tp: *timespec) c_int;
+extern "kernel32" fn QueryPerformanceCounter(count: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(freq: *i64) callconv(.winapi) i32;
+fn monotonic_seconds() f64 {
+    if (builtin.os.tag == .windows) {
+        var freq: i64 = 0;
+        var count: i64 = 0;
+        _ = QueryPerformanceFrequency(&freq);
+        _ = QueryPerformanceCounter(&count);
+        if (freq == 0) return 0;
+        return @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(freq));
+    }
+    var ts: timespec = undefined;
+    _ = clock_gettime(4, &ts);
+    return @as(f64, @floatFromInt(ts.tv_sec)) + @as(f64, @floatFromInt(ts.tv_nsec)) * 1e-9;
+}
+
+// Per-frame key queue depth. Generous for human typing + key-repeat between two
+// vsync ticks; excess is dropped (a stuck flood, not real input).
+pub const MAX_KEY_EVENTS = 32;
+
+// Width (points) of the macOS traffic-light cluster (3 buttons + gaps), reserved
+// after content_left so the titlebar content region clears them.
+const TRAFFIC_CLUSTER_W: f32 = 72;
+
+// Point size for the Windows caption-button glyphs (Segoe Fluent Icons).
+const CAPTION_GLYPH_PT: f32 = 10;
+
+pub const Frame = struct {
+    builder: RenderBuilder,
+    width: f32, // full drawable, in points
+    height: f32,
+    // Content area below the titlebar band. With the titlebar enabled,
+    // origin.y = band height and size.height = height - band. Titlebar
+    // disabled => body == {0,0,width,height}.
+    body: BoundsF,
+    // Titlebar content region: the band minus the traffic-light gutter on the
+    // left. The library paints the band chrome (bg + separator) itself; the
+    // consumer fills this rect with its own bar content. Zero-size when the
+    // titlebar is disabled.
+    titlebar: BoundsF,
+};
+
+pub const PaintContext = struct {
+    handle: CustomShellHandle,
+    allocator: std.mem.Allocator,
+    renderer: renderer.Renderer,
+    text_system: text_system.TextSystem,
+    icon_system: icon_system.IconSystem,
+    color_atlas: app_icon.ColorAtlas,
+    app_icon_resolver: app_icon.AppIconResolver,
+    prims: std.ArrayListUnmanaged(primitives.Primitive) = .empty,
+    sprites: std.ArrayListUnmanaged(primitives.MonochromeSprite) = .empty,
+    color_sprites: std.ArrayListUnmanaged(primitives.PolychromeSprite) = .empty,
+    hitboxes: std.ArrayListUnmanaged(HitBox) = .empty,
+    prev_hover_ctx: ?*anyopaque = null,
+    mouse_x: f32 = -1,
+    mouse_y: f32 = -1,
+    mouse_inside: bool = false,
+    // Drag capture: a hitbox with on_point grabs the mouse on press, so a
+    // press-hold-drag keeps feeding it raw points until release (slider rail).
+    drag_cb: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
+    drag_ctx: ?*anyopaque = null,
+    // Fired once on release if the captured hitbox had one (drop / click-end).
+    drag_end_cb: ?*const fn (ctx: ?*anyopaque) void = null,
+    // Vertical scroll offset (points). The consumer sets max_scroll_y each
+    // frame from its content height; onScroll accumulates + clamps here.
+    scroll_y: f32 = 0,
+    max_scroll_y: f32 = 0,
+    // Raw wheel delta since the consumer last read it; lets the app route the
+    // wheel to a transient surface (e.g. an open dropdown) instead of the body.
+    // Consumer drains it each frame. dx drives horizontal surfaces, dy vertical.
+    wheel_dy: f32 = 0,
+    wheel_dx: f32 = 0,
+    // A queue (not one-shot) because an editor can see several keys per frame
+    // and key-repeat fires fast. Drained by the paint callback, cleared after.
+    key_events: [MAX_KEY_EVENTS]custom_shell.KeyEvent = undefined,
+    key_len: u32 = 0,
+    // Cursor the consumer wants this frame (resets to .default each frame; set it
+    // while hovering a resize edge etc). Applied after the paint callback.
+    cursor: custom_shell.CursorKind = .default,
+    // Set by the consumer each frame: keep redrawing at vsync while true
+    // (drives time-based animation; drawFrame otherwise clears dirty and the
+    // loop idles until the next input event).
+    animating: bool = false,
+    // Monotonic seconds since init, for frame-rate-independent time-based
+    // animation (e.g. a caret blink).
+    now_s: f64 = 0,
+    base_s: f64 = 0, // clock value at init; now_s stays small for f64 precision
+    // When set, the renderer blurs all prims/sprites up to the backdrop_* split
+    // and draws the rest crisp on top. Set before emitting the modal layer.
+    blur_modal: bool = false,
+    backdrop_prims: u32 = 0,
+    backdrop_sprites: u32 = 0,
+    backdrop_color: u32 = 0,
+    // Set while drawing a modal's backdrop so is_hovered reports false there: the
+    // frosted layer behind a modal must be inert (no hover), not just blurred.
+    block_hover: bool = false,
+    // A focused text input sets this while showing the native editor; the runtime
+    // hides the singleton editor on a frame where nobody claims it (blur / nav away).
+    text_field_active: bool = false,
+    scale_factor: f32 = 2.0,
+    last_pane_w: f32 = 0,
+    last_pane_h: f32 = 0,
+
+    pub fn init(
+        self: *PaintContext,
+        handle: CustomShellHandle,
+        allocator: std.mem.Allocator,
+    ) !void {
+        self.handle = handle;
+        self.allocator = allocator;
+        self.renderer = try renderer.Renderer.init(handle.metal_layer);
+        self.text_system = text_system.TextSystem.init(allocator, self.renderer.get_device());
+        self.icon_system = icon_system.IconSystem.init(allocator, self.text_system.mono_atlas());
+        self.color_atlas = app_icon.ColorAtlas.init(allocator, self.renderer.get_device());
+        self.app_icon_resolver = app_icon.AppIconResolver.init(allocator, &self.color_atlas);
+        self.prims = .empty;
+        self.sprites = .empty;
+        self.color_sprites = .empty;
+        self.hitboxes = .empty;
+        self.mouse_x = -1;
+        self.mouse_y = -1;
+        self.mouse_inside = false;
+        self.drag_cb = null;
+        self.drag_ctx = null;
+        self.drag_end_cb = null;
+        self.scroll_y = 0;
+        self.max_scroll_y = 0;
+        self.wheel_dy = 0;
+        self.wheel_dx = 0;
+        self.key_len = 0;
+        self.cursor = .default;
+        self.animating = false;
+        self.base_s = monotonic_seconds();
+        self.now_s = 0;
+        self.blur_modal = false;
+        self.backdrop_prims = 0;
+        self.backdrop_sprites = 0;
+        self.backdrop_color = 0;
+        self.block_hover = false;
+        self.text_field_active = false;
+        self.scale_factor = 2.0;
+        self.last_pane_w = 0;
+        self.last_pane_h = 0;
+        self.prev_hover_ctx = null;
+    }
+
+    pub fn request_redraw(self: *PaintContext) void {
+        self.renderer.request_redraw();
+    }
+
+    pub fn add_hitbox(self: *PaintContext, hb: HitBox) !void {
+        try self.hitboxes.append(self.allocator, hb);
+    }
+
+    pub fn is_hovered(self: *const PaintContext, x: f32, y: f32, w: f32, h: f32) bool {
+        if (!self.mouse_inside or self.block_hover) return false;
+        return self.mouse_x >= x and self.mouse_x < x + w and
+            self.mouse_y >= y and self.mouse_y < y + h;
+    }
+
+    // Whether a point (in points) hits an interactive titlebar component
+    // CONTAINED within the band. The Windows custom shell uses this so a click on
+    // a titlebar component reaches it (HTCLIENT) while empty band area drags the
+    // window (HTCAPTION). Band-containment (hb fits in [0, band_h]) excludes any
+    // full-window backstop hitbox the consumer registers, so drag still works.
+    pub fn point_over_titlebar_control(
+        self: *const PaintContext,
+        x: f32,
+        y: f32,
+        band_h: f32,
+    ) bool {
+        for (self.hitboxes.items) |hb| {
+            if (hb.y + hb.h > band_h + 2) continue;
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) return true;
+        }
+        return false;
+    }
+
+    pub fn on_mouse_moved(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        self.renderer.request_redraw();
+    }
+
+    pub fn on_mouse_exited(self: *PaintContext) void {
+        self.mouse_inside = false;
+        self.renderer.request_redraw();
+    }
+
+    // AppKit scrollingDeltaY > 0 = swipe down = content moves down = top of
+    // content revealed, so the offset decreases toward 0.
+    pub fn on_scroll(self: *PaintContext, dx: f32, dy: f32) void {
+        self.scroll_y = std.math.clamp(self.scroll_y - dy, 0, self.max_scroll_y);
+        self.wheel_dy += dy;
+        self.wheel_dx += dx;
+        self.renderer.request_redraw();
+    }
+
+    pub fn on_key(self: *PaintContext, ev: custom_shell.KeyEvent) void {
+        if (self.key_len < self.key_events.len) {
+            self.key_events[self.key_len] = ev;
+            self.key_len += 1;
+        }
+        self.renderer.request_redraw();
+    }
+
+    pub fn keys(self: *const PaintContext) []const custom_shell.KeyEvent {
+        return self.key_events[0..self.key_len];
+    }
+
+    pub fn set_cursor(self: *PaintContext, kind: custom_shell.CursorKind) void {
+        self.cursor = kind;
+    }
+
+    // The native editor (a shared singleton NSTextField); the focused input shows
+    // it over its rect and polls the value. Claiming it keeps the runtime from
+    // hiding it this frame.
+    pub fn show_text_field(
+        self: *PaintContext,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        initial: []const u8,
+        font_size: f32,
+        rgba: types.Rgba,
+        id: u32,
+    ) void {
+        self.text_field_active = true;
+        custom_shell.show_text_field(
+            self.handle,
+            x,
+            y,
+            w,
+            h,
+            initial,
+            font_size,
+            rgba,
+            false,
+            false,
+            id,
+        );
+    }
+    pub fn text_field_value(self: *PaintContext, buf: []u8) []const u8 {
+        _ = self;
+        return custom_shell.text_field_value(buf);
+    }
+    pub fn hide_text_field(self: *PaintContext) void {
+        _ = self;
+        custom_shell.hide_text_field();
+    }
+
+    pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        var i: usize = self.hitboxes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const hb = self.hitboxes.items[i];
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                if (hb.on_point) |cb| {
+                    cb(hb.ctx, x, y);
+                    self.drag_cb = cb;
+                    self.drag_ctx = hb.ctx;
+                    self.drag_end_cb = hb.on_drag_end;
+                } else if (hb.on_click) |cb| {
+                    cb(hb.ctx);
+                }
+                self.renderer.request_redraw();
+                return;
+            }
+        }
+    }
+
+    pub fn on_right_mouse_down(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        var i: usize = self.hitboxes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const hb = self.hitboxes.items[i];
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                if (hb.on_context) |cb| {
+                    cb(hb.ctx, x, y);
+                    self.renderer.request_redraw();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn on_mouse_dragged(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        if (self.drag_cb) |cb| cb(self.drag_ctx, x, y);
+        self.renderer.request_redraw();
+    }
+
+    pub fn on_mouse_up(self: *PaintContext) void {
+        if (self.drag_end_cb) |cb| cb(self.drag_ctx);
+        self.drag_cb = null;
+        self.drag_ctx = null;
+        self.drag_end_cb = null;
+        self.renderer.request_redraw();
+    }
+
+    pub fn tick(self: *PaintContext) ?Frame {
+        // A minimized window has a degenerate client; skip painting it entirely
+        // (its tiny titlebar band would underflow widths and assert in the kit).
+        if (builtin.os.tag == .windows) {
+            if (self.handle.is_minimized()) return null;
+        }
+
+        const size = self.handle.sync_drawable_size();
+        const pane_w: f32 = @floatCast(size.width);
+        const pane_h: f32 = @floatCast(size.height);
+
+        // Skip degenerate frames (minimized / closing window): laying the node
+        // tree out into a zero-size rect underflows widths and asserts in the kit.
+        if (pane_w < 1 or pane_h < 1) return null;
+
+        if (pane_w != self.last_pane_w or pane_h != self.last_pane_h) {
+            self.last_pane_w = pane_w;
+            self.last_pane_h = pane_h;
+            self.renderer.request_redraw();
+        }
+        if (self.animating) self.renderer.request_redraw();
+        self.now_s = monotonic_seconds() - self.base_s;
+        if (!self.renderer.dirty) return null;
+
+        self.prims.clearRetainingCapacity();
+        self.sprites.clearRetainingCapacity();
+        self.color_sprites.clearRetainingCapacity();
+        self.hitboxes.clearRetainingCapacity();
+
+        const tbar = self.handle.titlebar;
+        const top: f32 = if (tbar.enabled) @floatCast(tbar.height) else 0;
+        // macOS reserves a left gutter for the repositioned traffic lights;
+        // Windows window controls live in the native caption, not the band, so
+        // the band's content starts at content_left with no gutter.
+        const tb_content_x: f32 = if (builtin.os.tag == .windows)
+            @floatCast(tbar.content_left)
+        else
+            @floatCast(tbar.content_left + TRAFFIC_CLUSTER_W);
+        // Band chrome first (bg + separator) so the consumer's titlebar content
+        // draws on top. The library owns only the band and the traffic lights.
+        if (tbar.enabled) {
+            const th = self.handle.theme;
+            var band = Quad.init(0, 0, pane_w, top);
+            _ = band.set_background(th.background);
+            self.prims.append(self.allocator, .{ .quad = band }) catch {};
+            if (tbar.separator) {
+                var sep = Quad.init(0, top - 1, pane_w, 1);
+                _ = sep.set_background(th.border);
+                self.prims.append(self.allocator, .{ .quad = sep }) catch {};
+            }
+            // Windows draws its window controls into the band; macOS uses native
+            // traffic lights repositioned by the platform layer.
+            if (builtin.os.tag == .windows) self.draw_caption_buttons(pane_w, top);
+        }
+        return .{
+            .builder = .{
+                .prims = &self.prims,
+                .sprites = &self.sprites,
+                .color_sprites = &self.color_sprites,
+                .text_system = &self.text_system,
+                .icon_system = &self.icon_system,
+                .app_icon_resolver = &self.app_icon_resolver,
+                .allocator = self.allocator,
+                .scale_factor = self.scale_factor,
+            },
+            .width = pane_w,
+            .height = pane_h,
+            .body = .{
+                .origin = .{ .x = 0, .y = top },
+                .size = .{ .width = pane_w, .height = pane_h - top },
+            },
+            // Windows reserves the right cluster for the window-control buttons so
+            // consumer titlebar content does not draw under them.
+            .titlebar = if (tbar.enabled) .{
+                .origin = .{ .x = tb_content_x, .y = 0 },
+                .size = .{
+                    .width = @max(pane_w - tb_content_x - custom_shell.CAPTION_CLUSTER_W, 0),
+                    .height = top,
+                },
+            } else .{ .origin = .{}, .size = .{} },
+        };
+    }
+
+    pub fn draw_frame(self: *PaintContext, frame: Frame) void {
+        _ = frame;
+        // macOS clears transparent so the glass chrome shows through; Windows has
+        // no glass here, so clear to the opaque theme background instead.
+        const clear = if (builtin.os.tag == .windows) blk: {
+            const bg = self.handle.theme.background;
+            break :blk renderer.ClearColor.init(bg.r, bg.g, bg.b, 1);
+        } else renderer.ClearColor.init(0, 0, 0, 0);
+        const color_atlas_tex: ?*anyopaque = self.color_atlas.get_texture();
+        if (self.blur_modal) {
+            const tbar = self.handle.titlebar;
+            const crisp_top: f32 = if (tbar.enabled) @floatCast(tbar.height) else 0;
+            self.renderer.draw_frame_modal(
+                clear,
+                self.prims.items,
+                self.sprites.items,
+                self.text_system.mono_atlas_texture(),
+                self.color_sprites.items,
+                color_atlas_tex,
+                @intCast(self.backdrop_prims),
+                @intCast(self.backdrop_sprites),
+                @intCast(self.backdrop_color),
+                crisp_top,
+            );
+        } else {
+            self.renderer.draw_frame(
+                clear,
+                self.prims.items,
+                self.sprites.items,
+                self.text_system.mono_atlas_texture(),
+                self.color_sprites.items,
+                color_atlas_tex,
+            );
+        }
+    }
+
+    // Draws the minimize / maximize / close controls right-aligned in the band
+    // (Windows custom chrome). WM_NCHITTEST routes clicks on these to native
+    // window behavior; here we only draw the glyphs + hover highlight.
+    fn draw_caption_buttons(self: *PaintContext, pane_w: f32, top: f32) void {
+        const fg = self.handle.theme.foreground;
+        const hovered = custom_shell.hovered_caption_button();
+        const bw = custom_shell.CAPTION_BTN_W;
+        const cy = top / 2;
+        // Segoe Fluent Icons caption glyphs (same codepoints as Segoe MDL2):
+        // minimize E921, maximize E922, restore E923, close E8BB.
+        const fid = self.text_system.get_font_id("Segoe Fluent Icons", .normal);
+        const max_glyph: u21 = if (self.handle.is_maximized()) 0xE923 else 0xE922;
+        const Btn = struct { kind: custom_shell.CaptionButton, cx: f32, glyph: u21 };
+        const buttons = [_]Btn{
+            .{ .kind = .close, .cx = pane_w - bw * 0.5, .glyph = 0xE8BB },
+            .{ .kind = .maximize, .cx = pane_w - bw * 1.5, .glyph = max_glyph },
+            .{ .kind = .minimize, .cx = pane_w - bw * 2.5, .glyph = 0xE921 },
+        };
+        for (buttons) |btn| {
+            const is_hover = hovered == btn.kind;
+            if (is_hover) {
+                // Win11 feel: subtle light wash for min/max, red for close.
+                const bg = if (btn.kind == .close)
+                    color.Rgba.init(0.79, 0.16, 0.12, 1.0)
+                else
+                    color.Rgba.init(1, 1, 1, 0.08);
+                var q = Quad.init(btn.cx - bw / 2, 0, bw, top);
+                _ = q.set_background(bg);
+                self.prims.append(self.allocator, .{ .quad = q }) catch {};
+            }
+            const col = if (is_hover and btn.kind == .close) color.Rgba.init(1, 1, 1, 1) else fg;
+            var ubuf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(btn.glyph, &ubuf) catch continue;
+            const line = self.text_system.shape_text(ubuf[0..n], CAPTION_GLYPH_PT, fid);
+            if (line.runs.len == 0 or line.runs[0].glyphs.len == 0) continue;
+            // Center on the glyph's real ink box, not the font ascent/descent -
+            // Fluent symbol glyphs sit centered in the em box, not on the text
+            // baseline, so the metric centering leaves them riding high.
+            const rb = self.text_system.platform().glyph_raster_bounds(.{
+                .font_id = fid,
+                .glyph_id = line.runs[0].glyphs[0].id,
+                .font_size = CAPTION_GLYPH_PT,
+                .subpixel_variant = .{ .x = 0, .y = 0 },
+                .scale_factor = self.scale_factor,
+                .is_emoji = false,
+            });
+            const ink_oy = @as(f32, @floatFromInt(rb.origin.y));
+            const ink_h = @as(f32, @floatFromInt(rb.size.height));
+            const ink_cy = (ink_oy + ink_h / 2.0) / self.scale_factor;
+            const ox = btn.cx - line.width / 2;
+            const oy = cy - ink_cy;
+            self.text_system.sprites_for_line(
+                line,
+                ox,
+                oy,
+                col,
+                self.scale_factor,
+                &self.sprites,
+                self.allocator,
+            ) catch {};
+        }
+    }
+
+    pub fn deinit(self: *PaintContext) void {
+        self.prims.deinit(self.allocator);
+        self.sprites.deinit(self.allocator);
+        self.color_sprites.deinit(self.allocator);
+        self.hitboxes.deinit(self.allocator);
+        // Release the GPU/text subsystems (reverse init order). macOS never
+        // returns from run_forever so this only runs on Windows, but it is
+        // correct on both - it frees the shape cache + atlas maps.
+        self.app_icon_resolver.deinit();
+        self.color_atlas.deinit();
+        self.icon_system.deinit();
+        self.text_system.deinit();
+        self.renderer.deinit();
+    }
+};
+
+// The only failure the per-frame callback can surface is the render pass running
+// the arena out of memory; keep the boundary a closed set, not anyerror.
+pub const PaintError = error{OutOfMemory};
+pub const PaintCallback = *const fn (
+    ctx: *anyopaque,
+    paint: *PaintContext,
+    frame: Frame,
+) PaintError!void;
+
+const RunState = struct {
+    paint_ctx: *PaintContext,
+    user_ctx: *anyopaque,
+    user_cb: PaintCallback,
+};
+
+var g_run_state: RunState = undefined;
+
+fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
+    _ = p;
+    const s = &g_run_state;
+    const frame = s.paint_ctx.tick() orelse return;
+    s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
+    s.user_cb(s.user_ctx, s.paint_ctx, frame) catch return;
+    s.paint_ctx.key_len = 0;
+    s.paint_ctx.wheel_dy = 0; // per-frame delta; consumer reads it in the callback above
+    s.paint_ctx.wheel_dx = 0;
+    custom_shell.apply_cursor(s.paint_ctx.cursor);
+    s.paint_ctx.draw_frame(frame);
+}
+
+fn mouse_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_mouse_moved(x, y);
+}
+
+fn mouse_exit_thunk(ctx: *anyopaque) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_mouse_exited();
+}
+
+fn mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_mouse_down(x, y);
+}
+
+fn mouse_drag_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_mouse_dragged(x, y);
+}
+
+fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_right_mouse_down(x, y);
+}
+
+fn mouse_up_thunk(ctx: *anyopaque) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_mouse_up();
+}
+
+fn scroll_thunk(ctx: *anyopaque, dx: f32, dy: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_scroll(dx, dy);
+}
+
+fn key_thunk(ctx: *anyopaque, ev: custom_shell.KeyEvent) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_key(ev);
+}
+
+fn hit_test_thunk(ctx: *anyopaque, x: f32, y: f32, band_h: f32) bool {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    return paint.point_over_titlebar_control(x, y, band_h);
+}
+
+fn redraw_thunk(ctx: *anyopaque) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.request_redraw();
+}
+
+// Full paint cycle, run synchronously from WM_SIZE so a live resize re-renders
+// at each step instead of stretching the last frame.
+fn paint_now_thunk(ctx: *anyopaque) void {
+    _ = ctx;
+    paint_tick_thunk(null);
+}
+
+pub fn start_paint_loop(
+    paint: *PaintContext,
+    ctx: *anyopaque,
+    cb: PaintCallback,
+) !display_link.DisplayLink {
+    g_run_state = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    custom_shell.register_hit_test(hit_test_thunk, redraw_thunk, @ptrCast(paint));
+    if (builtin.os.tag == .windows) custom_shell.register_paint_now(paint_now_thunk);
+    custom_shell.register_mouse_dispatch(.{
+        .on_move = mouse_move_thunk,
+        .on_exit = mouse_exit_thunk,
+        .on_down = mouse_down_thunk,
+        .on_right_down = right_mouse_down_thunk,
+        .on_drag = mouse_drag_thunk,
+        .on_up = mouse_up_thunk,
+        .on_scroll = scroll_thunk,
+        .on_key = key_thunk,
+        .ctx = @ptrCast(paint),
+    });
+    var dl = try display_link.DisplayLink.init(
+        display_link.get_main_display_id(),
+        null,
+        paint_tick_thunk,
+    );
+    try dl.start();
+    return dl;
+}
