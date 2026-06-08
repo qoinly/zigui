@@ -1,0 +1,17 @@
+.{
+    .name = .showcase,
+    .version = "0.0.0",
+    .fingerprint = 0x14b88cd060a02a3f, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // zigui as an external consumer: a path dep on the repo root. showcase
+        // builds a real desktop app against zigui's PUBLIC module surface, the
+        // same way any downstream project would.
+        .zigui = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
