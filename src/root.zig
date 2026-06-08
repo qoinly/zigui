@@ -5,6 +5,8 @@ const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");
 const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
+const frame_mod = @import("frame.zig");
+const renderer = @import("renderer.zig");
 const app_runtime = @import("app_runtime.zig");
 const callbacks = @import("callbacks.zig");
 
@@ -93,6 +95,31 @@ pub fn badge(label: []const u8, variant: kit.Variant) *node.Node {
 pub fn avatar(initials: []const u8, size: f32) *node.Node {
     const fc = frame_ctx.get();
     return kit_nodes.avatar(fc.arena, fc.theme, initials, size);
+}
+
+// Live external frame (remote screen / video) - draws `source`'s current texture
+// into the layout. The decoder/app owns `source` (long-lived); feed it each frame.
+pub const FrameSource = frame_mod.FrameSource;
+pub const FrameOpts = frame_mod.FrameOpts;
+pub const FrameFit = frame_mod.Fit;
+pub const FrameMeta = frame_mod.FrameMeta;
+pub const Colorspace = frame_mod.Colorspace;
+pub const Range = frame_mod.Range;
+pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
+    const fc = frame_ctx.get();
+    // A frame node is a live surface with no input to wake the loop, so keep
+    // presenting while it is on screen. Gating on "has a frame arrived yet" instead
+    // would race the decode thread at startup and wedge the loop; the source drops
+    // stale frames so this never queues latency and acquire() is cheap when idle.
+    fc.paint.animating = true;
+    return kit_nodes.frame(fc.arena, source, opts);
+}
+
+// The backend handle a FrameSource needs to allocate its textures. Reachable only
+// during a render pass (the render context owns the renderer).
+pub const Renderer = renderer.Renderer;
+pub fn renderer_handle() *Renderer {
+    return &frame_ctx.get().paint.renderer;
 }
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();

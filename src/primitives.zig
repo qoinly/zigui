@@ -230,11 +230,27 @@ pub const RingChart = extern struct {
     }
 };
 
+// A live external frame (remote screen / video): a textured quad sampling a
+// caller-owned GPU texture, not the glyph atlas. tex is the platform texture
+// handle (Metal id / D3D11 SRV) the backend casts + binds. Plain (not extern):
+// it carries a pointer and is CPU-side dispatch, never a GPU instance buffer.
+// tex_cbcr set means NV12: tex is the luma plane, tex_cbcr the chroma plane, and
+// csc the YUV->RGB matrix. Null tex_cbcr means tex is a ready BGRA image.
+pub const Frame = struct {
+    bounds: [4]f32 = .{ 0, 0, 0, 0 }, // x, y, w, h in points
+    clip_bounds: [4]f32 = no_clip,
+    tex: ?*anyopaque = null,
+    tex_cbcr: ?*anyopaque = null,
+    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+    opacity: f32 = 1.0,
+};
+
 pub const Primitive = union(enum) {
     quad: Quad,
     polyline: Polyline,
     line_segment: LineSegment,
     ring_chart: RingChart,
+    frame: Frame,
 };
 
 // Unit square (two triangles); instanced by the Metal shader.
