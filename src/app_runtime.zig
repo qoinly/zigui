@@ -43,6 +43,11 @@ pub fn Views(comptime State: type) type {
 // it back without the caller keeping the string alive.
 const TITLE_MAX = 128;
 
+// Smallest a window may shrink to when the caller sets no min, kept well under
+// common opening sizes so a window can always resize down rather than snap up.
+const MIN_W: f32 = 320;
+const MIN_H: f32 = 240;
+
 pub const Window = struct {
     handle: window.CustomShellHandle,
     pc: paint.PaintContext,
@@ -71,6 +76,19 @@ pub const Window = struct {
         self.eng.deinit();
         self.arena.deinit();
         self.handle.deinit();
+    }
+
+    // Teardown on the user-close path. The OS releases the NSWindow itself once
+    // the close finishes, so this frees everything except the handle and fully
+    // tears the link down (cancel, not just stop) before its context goes away.
+    fn close_teardown(self: *Window) void {
+        std.debug.assert(self.dl != null); // close only fires on a looped window
+        std.debug.assert(@intFromPtr(self.handle.window) != 0);
+        if (self.dl) |*dl| dl.deinit();
+        self.dl = null;
+        self.pc.deinit();
+        self.eng.deinit();
+        self.arena.deinit();
     }
 };
 
@@ -169,8 +187,10 @@ pub const App = struct {
     windows: ?*WindowSet = null,
     // Defaults an extra window inherits when its options leave them unset.
     main_size: [2]f32 = .{ 0, 0 },
-    main_min: [2]f32 = .{ 720, 480 },
+    main_min: [2]f32 = .{ MIN_W, MIN_H },
     next_id: u32 = 2, // the first id auto-assigned to an opened window (main is 1)
+    // Fires when a non-main window closes, so the app can drop per-window state.
+    closed_cb: ?*const fn (?*anyopaque, u32) void = null,
 
     pub const Options = struct {
         title: []const u8 = "",
@@ -207,8 +227,8 @@ pub const App = struct {
             .title = opts.title,
             .width = @floatCast(opts.size[0]),
             .height = @floatCast(opts.size[1]),
-            .min_width = if (opts.min_size) |m| @floatCast(m[0]) else 720,
-            .min_height = if (opts.min_size) |m| @floatCast(m[1]) else 480,
+            .min_width = if (opts.min_size) |m| @floatCast(m[0]) else MIN_W,
+            .min_height = if (opts.min_size) |m| @floatCast(m[1]) else MIN_H,
             .chrome = .custom,
             .feel = .liquid_glass,
             .theme = theme,
@@ -259,22 +279,30 @@ pub const App = struct {
         self.rt.run_forever();
     }
 
-    // A closing window's display link must stop before its surface tears down, or
-    // it keeps driving frames against a dead window. The window stays in the set
-    // and frees once at deinit (the shell holds the release, not AppKit).
+    // Registers a handler called (with the user state + window id) when a non-main
+    // window closes, so the app can forget that window's state.
+    pub fn on_window_closed(self: *App, cb: *const fn (?*anyopaque, u32) void) void {
+        self.closed_cb = cb;
+    }
+
+    // Fired from the window's close: the main window quits the whole app (it is the
+    // app's root and cannot be torn down on its own); an extra window stops its
+    // loop, drops out of the set, and frees - the OS releases the window itself.
     fn on_window_close(ctx: *anyopaque, ns_window: ?*anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         const target = @intFromPtr(ns_window orelse return);
         if (@intFromPtr(self.win.handle.window) == target) {
-            if (self.win.dl) |*dl| dl.stop();
+            self.rt.quit();
             return;
         }
         const set = self.windows orelse return;
-        for (set.items.items) |w| {
-            if (@intFromPtr(w.handle.window) == target) {
-                if (w.dl) |*dl| dl.stop();
-                return;
-            }
+        for (set.items.items, 0..) |w, i| {
+            if (@intFromPtr(w.handle.window) != target) continue;
+            if (self.closed_cb) |cb| cb(self.win.user_state, w.id);
+            w.close_teardown();
+            _ = set.items.orderedRemove(i);
+            self.alloc.destroy(w);
+            return;
         }
     }
 

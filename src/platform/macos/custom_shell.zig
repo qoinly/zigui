@@ -1179,10 +1179,9 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         g_traffic_light_x = @floatCast(tl_x);
         recenter_traffic_lights(window);
     }
-    // The delegate also carries windowWillClose, so set it regardless of the
-    // traffic-light tuning; the runtime owns the release (close just orders out).
+    // The delegate also carries windowWillClose, where the runtime stops the
+    // window's render loop before the OS releases it, so set it on every window.
     if (ensure_window_delegate()) |d| objc.msg_send(void, window, "setDelegate:", .{d});
-    objc.msg_send(void, window, "setReleasedWhenClosed:", .{objc.NO});
 
     return .{
         .window = window,

@@ -29,9 +29,17 @@ const Pane = struct {
 var g_second: Pane = undefined;
 var g_second_open: bool = false;
 
+// Let the second window be reopened (fresh) after it is closed.
+fn on_window_closed(_: ?*anyopaque, id: u32) void {
+    if (id != 2) return;
+    g_second = .{ .app = g_second.app };
+    g_second_open = false;
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "Window 1", .size = .{ 560, 420 } });
     defer app.deinit();
+    app.on_window_closed(on_window_closed);
     var first: Pane = .{ .app = app };
     g_second = .{ .app = app };
     try app.run(&first, .{ .body = render });

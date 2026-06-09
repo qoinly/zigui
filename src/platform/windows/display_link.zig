@@ -44,6 +44,11 @@ pub const DisplayLink = struct {
             self.thread = null;
         }
     }
+
+    // Parity with the macOS link: joining the vsync thread is the full teardown.
+    pub fn deinit(self: *DisplayLink) void {
+        self.stop();
+    }
 };
 
 fn vsync_loop() void {
