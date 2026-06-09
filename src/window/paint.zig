@@ -591,8 +591,8 @@ const RunState = struct {
 var g_run_state: RunState = undefined;
 
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
-    _ = p;
-    const s = &g_run_state;
+    // The RunState arrives as the display-link callback's type-erased context.
+    const s: *RunState = @ptrCast(@alignCast(p orelse return));
     custom_shell.release_grab_if_blurred();
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
@@ -664,7 +664,7 @@ fn redraw_thunk(ctx: *anyopaque) void {
 // at each step instead of stretching the last frame.
 fn paint_now_thunk(ctx: *anyopaque) void {
     _ = ctx;
-    paint_tick_thunk(null);
+    paint_tick_thunk(@ptrCast(&g_run_state));
 }
 
 pub fn start_paint_loop(
@@ -689,7 +689,7 @@ pub fn start_paint_loop(
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
-        null,
+        @ptrCast(&g_run_state),
         paint_tick_thunk,
     );
     try dl.start();
