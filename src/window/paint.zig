@@ -279,6 +279,9 @@ pub const PaintContext = struct {
     // The native editor (a shared singleton NSTextField); the focused input shows
     // it over its rect and polls the value. Claiming it keeps the runtime from
     // hiding it this frame.
+    // Returns whether the editor was actually shown for this window. It is not,
+    // and the caller should skip its caret/value poll, when another window owns
+    // the shared editor (only the key window may host it).
     pub fn show_text_field(
         self: *PaintContext,
         x: f32,
@@ -289,9 +292,8 @@ pub const PaintContext = struct {
         font_size: f32,
         rgba: types.Rgba,
         id: u32,
-    ) void {
-        self.text_field_active = true;
-        custom_shell.show_text_field(
+    ) bool {
+        const shown = custom_shell.show_text_field(
             self.handle,
             x,
             y,
@@ -304,14 +306,15 @@ pub const PaintContext = struct {
             false,
             id,
         );
+        if (shown) self.text_field_active = true;
+        return shown;
     }
     pub fn text_field_value(self: *PaintContext, buf: []u8) []const u8 {
         _ = self;
         return custom_shell.text_field_value(buf);
     }
     pub fn hide_text_field(self: *PaintContext) void {
-        _ = self;
-        custom_shell.hide_text_field();
+        custom_shell.hide_text_field(self.handle);
     }
 
     pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {

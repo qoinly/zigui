@@ -631,6 +631,12 @@ pub const CustomShellHandle = struct {
         return (mask & NSWindowStyleMaskFullScreen) != 0;
     }
 
+    // Whether this window currently has keyboard focus. With more than one window
+    // the app uses this so only the key window drives the shared native editor.
+    pub fn is_key(self: CustomShellHandle) bool {
+        return objc.msg_send(bool, self.window, "isKeyWindow", .{});
+    }
+
     // Native fullscreen (own Space); the window delegate re-centers the traffic
     // lights on exit. toggleFullScreen only toggles, so guard to make it absolute.
     pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
@@ -704,6 +710,41 @@ fn window_did_resize_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     if (@intFromPtr(win) != 0) recenter_traffic_lights(win);
 }
 
+// Fired when any of our windows is closing; the runtime stops that window's
+// render loop so its display link can't keep driving a torn-down surface.
+pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
+var g_window_close: ?WindowCloseFn = null;
+var g_window_close_ctx: ?*anyopaque = null;
+
+pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
+    g_window_close = cb;
+    g_window_close_ctx = ctx;
+}
+
+fn window_will_close_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
+    const win = objc.msg_send(Id, notif, "object", .{});
+    if (@intFromPtr(win) != 0) {
+        const cv = objc.msg_send(?Id, win, "contentView", .{});
+        if (cv) |v| release_editor_if_owned(v);
+    }
+    const cb = g_window_close orelse return;
+    const ctx = g_window_close_ctx orelse return;
+    cb(ctx, win);
+}
+
+// Drop the editor's owner when the owning window goes away, so a later window's
+// hide/show pass doesn't compare against (or reuse) a torn-down view. The shared
+// fields keep their create-time retain, so removeFromSuperview unparents without
+// freeing them for the next window.
+fn release_editor_if_owned(content_view: Id) void {
+    const owner = g_field_owner orelse return;
+    if (@intFromPtr(owner) != @intFromPtr(content_view)) return;
+    if (g_field) |f| objc.msg_send(void, f, "removeFromSuperview", .{});
+    if (g_secure_field) |f| objc.msg_send(void, f, "removeFromSuperview", .{});
+    g_visible = false;
+    g_field_owner = null;
+}
+
 fn ensure_window_delegate() ?Id {
     if (g_window_delegate) |d| return d;
     const NSObject = objc.get_class("NSObject") orelse return null;
@@ -726,6 +767,12 @@ fn ensure_window_delegate() ?Id {
             @ptrCast(&window_did_resize_imp),
             "v@:@",
         );
+        _ = objc.class_addMethod(
+            c,
+            objc.sel("windowWillClose:"),
+            @ptrCast(&window_will_close_imp),
+            "v@:@",
+        );
         objc.objc_registerClassPair(c);
         g_window_delegate_class = c;
         break :blk c;
@@ -745,6 +792,10 @@ var g_secure_field: ?Id = null;
 var g_visible: bool = false;
 var g_active_secure: bool = false;
 var g_active_id: u32 = 0;
+// The content view that currently hosts the editor. With more than one window
+// this is the owner: only that window may move or hide the shared field, so a
+// background window can't yank it off the one the user is typing in.
+var g_field_owner: ?Id = null;
 
 const NSFocusRingTypeNone: NSUInteger = 1;
 const NSNumberFormatterDecimalStyle: NSUInteger = 1;
@@ -821,14 +872,20 @@ pub fn show_text_field(
     secure: bool,
     numeric: bool,
     id: u32,
-) void {
+) bool {
     std.debug.assert(id != 0); // 0 is the inactive sentinel for g_active_id
-    const f = ensure_field(handle.content_view, secure) orelse return;
+    std.debug.assert(@intFromPtr(handle.content_view) != 0);
+    // Only the key window may host the shared editor; let a background window's
+    // request fall through so it never steals the field from the focused window.
+    if (!handle.is_key()) return false;
+    const f = ensure_field(handle.content_view, secure) orelse return false;
     objc.msg_send(void, f, "setFrame:", .{NSRect{
         .origin = .{ .x = x, .y = y },
         .size = .{ .width = w, .height = h },
     }});
-    if (!g_visible or g_active_secure != secure or g_active_id != id) {
+    const owner_moved = g_field_owner == null or
+        @intFromPtr(g_field_owner.?) != @intFromPtr(handle.content_view);
+    if (!g_visible or g_active_secure != secure or g_active_id != id or owner_moved) {
         // Font + colour stay constant while a field is focused, so resolve and
         // apply them only on (re)seed - colorWithRed: allocs an NSColor per call,
         // which on the per-frame path would be pure waste.
@@ -863,14 +920,22 @@ pub fn show_text_field(
         g_visible = true;
         g_active_secure = secure;
         g_active_id = id;
+        g_field_owner = handle.content_view;
     }
+    return true;
 }
 
-pub fn hide_text_field() void {
+pub fn hide_text_field(handle: CustomShellHandle) void {
     if (!g_visible) return;
+    // Only the owning window may hide the editor, so a background window's hide
+    // pass can't pull the field off the window the user is typing in.
+    if (g_field_owner) |o| {
+        if (@intFromPtr(o) != @intFromPtr(handle.content_view)) return;
+    }
     if (g_field) |f| objc.msg_send(void, f, "setHidden:", .{objc.YES});
     if (g_secure_field) |f| objc.msg_send(void, f, "setHidden:", .{objc.YES});
     g_visible = false;
+    g_field_owner = null;
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {
@@ -1113,8 +1178,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         g_traffic_light_y = @floatCast(tl_y);
         g_traffic_light_x = @floatCast(tl_x);
         recenter_traffic_lights(window);
-        if (ensure_window_delegate()) |d| objc.msg_send(void, window, "setDelegate:", .{d});
     }
+    // The delegate also carries windowWillClose, so set it regardless of the
+    // traffic-light tuning; the runtime owns the release (close just orders out).
+    if (ensure_window_delegate()) |d| objc.msg_send(void, window, "setDelegate:", .{d});
+    objc.msg_send(void, window, "setReleasedWhenClosed:", .{objc.NO});
 
     return .{
         .window = window,

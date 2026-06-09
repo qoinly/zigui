@@ -164,6 +164,20 @@ pub fn set_fullscreen(enable: bool) void {
 pub fn fullscreen() bool {
     return frame_ctx.get().paint.handle.is_fullscreen();
 }
+// Whether the window rendering this frame holds keyboard focus. A multi-window
+// app gates its focused input on this so only the key window drives the editor.
+pub fn window_is_key() bool {
+    return frame_ctx.get().paint.handle.is_key();
+}
+// Identity of the window rendering this frame, so one shared view can branch on
+// which window it is drawing. The first window is 1; opened windows get their
+// WindowOptions id (or an engine-assigned one).
+pub fn window_id() u32 {
+    return frame_ctx.get().window_id;
+}
+pub fn window_title() []const u8 {
+    return frame_ctx.get().window_title;
+}
 pub fn display_count() u32 {
     return custom_shell.display_count();
 }
@@ -530,6 +544,7 @@ pub const kit = @import("kit/root.zig");
 
 pub const app = @import("app.zig");
 pub const App = app_runtime.App;
+pub const WindowOptions = app_runtime.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const Theme = window.Theme;
 pub const ActivationPolicy = app.ActivationPolicy;
