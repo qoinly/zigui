@@ -274,7 +274,7 @@ fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_titlebar_band_h > 0 and ly < g_titlebar_band_h) {
         const over_ctrl = if (g_hit_test) |ht| blk: {
             std.debug.assert(g_hit_ctx != null); // set together with g_hit_test
-            break :blk ht(g_hit_ctx.?, lx, ly, g_titlebar_band_h);
+            break :blk ht(view_ctx(self, g_hit_ctx.?), lx, ly, g_titlebar_band_h);
         } else false;
         const clicks: isize = objc.msg_send(isize, event, "clickCount", .{});
         if (!over_ctrl) {
