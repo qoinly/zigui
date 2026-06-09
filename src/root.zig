@@ -5,6 +5,10 @@ const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");
 const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
+const frame_mod = @import("frame.zig");
+const input_mod = @import("input.zig");
+const custom_shell = @import("custom_shell.zig");
+const renderer = @import("renderer.zig");
 const app_runtime = @import("app_runtime.zig");
 const callbacks = @import("callbacks.zig");
 
@@ -93,6 +97,78 @@ pub fn badge(label: []const u8, variant: kit.Variant) *node.Node {
 pub fn avatar(initials: []const u8, size: f32) *node.Node {
     const fc = frame_ctx.get();
     return kit_nodes.avatar(fc.arena, fc.theme, initials, size);
+}
+
+// Live external frame (remote screen / video) - draws `source`'s current texture
+// into the layout. The decoder/app owns `source` (long-lived); feed it each frame.
+pub const FrameSource = frame_mod.FrameSource;
+pub const FrameOpts = frame_mod.FrameOpts;
+pub const FrameFit = frame_mod.Fit;
+pub const FrameMeta = frame_mod.FrameMeta;
+pub const Colorspace = frame_mod.Colorspace;
+pub const Range = frame_mod.Range;
+pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
+    const fc = frame_ctx.get();
+    // A frame node is a live surface with no input to wake the loop, so keep
+    // presenting while it is on screen. Gating on "has a frame arrived yet" instead
+    // would race the decode thread at startup and wedge the loop; the source drops
+    // stale frames so this never queues latency and acquire() is cheap when idle.
+    fc.paint.animating = true;
+    return kit_nodes.frame(fc.arena, source, opts);
+}
+
+// The backend handle a FrameSource needs to allocate its textures. Reachable only
+// during a render pass (the render context owns the renderer).
+pub const Renderer = renderer.Renderer;
+pub fn renderer_handle() *Renderer {
+    return &frame_ctx.get().paint.renderer;
+}
+
+// Raw input capture for a remote-control loop. grab() enters relative capture (the
+// cursor hides + decouples, Escape releases); while grabbed, input arrives through
+// input_events() instead of the widgets, for the app to forward. zigui owns the
+// capture; the app owns what to send.
+pub const InputEvent = input_mod.InputEvent;
+pub const InputButton = input_mod.Button;
+pub const InputMods = input_mod.Mods;
+pub fn grab(enable: bool) void {
+    frame_ctx.get().paint.set_grab(enable);
+}
+pub fn grabbed() bool {
+    return frame_ctx.get().paint.grabbed();
+}
+pub fn input_events() []const InputEvent {
+    return frame_ctx.get().paint.raw_inputs();
+}
+
+// Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
+// returns true once each time something outside this app changes the clipboard (our
+// own set_clipboard_text writes are not reported), so a remote-control loop can
+// forward it. Call clipboard_changed once a frame.
+pub fn clipboard_text(buf: []u8) []const u8 {
+    return custom_shell.pasteboard_read_into(buf);
+}
+pub fn set_clipboard_text(s: []const u8) void {
+    custom_shell.pasteboard_write_string(s);
+}
+pub fn clipboard_changed() bool {
+    return custom_shell.clipboard_changed_external();
+}
+
+// Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
+// window; display_bounds(i) gives monitor i's frame in points so the app can size a
+// stream or place a window per screen.
+pub fn set_fullscreen(enable: bool) void {
+    frame_ctx.get().paint.handle.set_fullscreen(enable);
+}
+pub fn fullscreen() bool {
+    return frame_ctx.get().paint.handle.is_fullscreen();
+}
+pub fn display_count() u32 {
+    return custom_shell.display_count();
+}
+pub fn display_bounds(index: u32) BoundsF {
+    return custom_shell.display_bounds(index);
 }
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();

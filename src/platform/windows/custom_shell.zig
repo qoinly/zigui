@@ -12,6 +12,8 @@ const std = @import("std");
 const win32 = @import("win32.zig");
 const loop = @import("loop.zig");
 const types = @import("../../window/types.zig");
+const input = @import("../../input.zig");
+const geometry = @import("../../geometry.zig");
 
 pub const KeyMods = packed struct {
     cmd: bool = false,
@@ -92,6 +94,41 @@ pub const CustomShellHandle = struct {
         _ = win32.SetFocus(self.window);
     }
 
+    pub fn is_fullscreen(self: CustomShellHandle) bool {
+        _ = self;
+        return g_fullscreen;
+    }
+
+    // Borderless monitor-cover, not exclusive fullscreen - it composites with the
+    // rest of the desktop and switches instantly, which a remote view wants.
+    pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
+        std.debug.assert(@intFromPtr(self.window) != 0);
+        if (on == g_fullscreen) return;
+        const hwnd = self.window;
+        if (on) {
+            g_saved_style = win32.GetWindowLongPtrW(hwnd, win32.GWL_STYLE);
+            _ = win32.GetWindowRect(hwnd, &g_saved_rect);
+            const mon = win32.MonitorFromWindow(hwnd, win32.MONITOR_DEFAULTTONEAREST) orelse return;
+            var mi: win32.MONITORINFO = .{
+                .cbSize = @sizeOf(win32.MONITORINFO),
+                .rcMonitor = undefined,
+                .rcWork = undefined,
+                .dwFlags = 0,
+            };
+            if (win32.GetMonitorInfoW(mon, &mi) == 0) return;
+            const bare = g_saved_style & ~@as(isize, win32.WS_OVERLAPPEDWINDOW);
+            _ = win32.SetWindowLongPtrW(hwnd, win32.GWL_STYLE, bare);
+            const r = mi.rcMonitor;
+            place(hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            g_fullscreen = true;
+        } else {
+            _ = win32.SetWindowLongPtrW(hwnd, win32.GWL_STYLE, g_saved_style);
+            const r = g_saved_rect;
+            place(hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            g_fullscreen = false;
+        }
+    }
+
     pub fn backing_scale_factor(self: CustomShellHandle) f32 {
         return scale_for(self.window);
     }
@@ -132,6 +169,14 @@ var g_tracking_mouse: bool = false;
 var g_tracking_nc: bool = false;
 var g_hover_caption: CaptionButton = .none;
 var g_pressed_caption: CaptionButton = .none;
+var g_fullscreen: bool = false;
+var g_saved_style: isize = 0;
+var g_saved_rect: win32.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+
+fn place(hwnd: win32.HWND, x: i32, y: i32, w: i32, h: i32) void {
+    const flags = win32.SWP_NOZORDER | win32.SWP_FRAMECHANGED | win32.SWP_SHOWWINDOW;
+    _ = win32.SetWindowPos(hwnd, null, x, y, w, h, flags);
+}
 // Text-field overlay: one persistent EDIT child reused across fields.
 var g_edit: ?win32.HWND = null;
 var g_main_hwnd: ?win32.HWND = null;
@@ -164,6 +209,27 @@ fn scale_for(hwnd: win32.HWND) f32 {
 pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_dispatch = d;
 }
+
+// Raw input capture (grab mode) is macOS-only; these satisfy the shared interface
+// and capture nothing on Windows.
+pub const RawDispatch = struct {
+    on_event: *const fn (ctx: *anyopaque, ev: input.InputEvent) void,
+    ctx: *anyopaque,
+};
+
+pub fn register_raw_dispatch(d: RawDispatch) void {
+    _ = d;
+}
+
+pub fn set_grab(on: bool) void {
+    _ = on;
+}
+
+pub fn is_grabbed() bool {
+    return false;
+}
+
+pub fn release_grab_if_blurred() void {}
 
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
 // an interactive component (-> HTCLIENT) and lets caption hover request a redraw.
@@ -780,4 +846,19 @@ pub fn pasteboard_write_string(text: []const u8) void {
     if (win32.SetClipboardData(win32.CF_UNICODETEXT, mem) != null) {
         owned_by_clipboard = true;
     }
+}
+
+// The Windows backend reports no clipboard change; macOS carries the poll.
+pub fn clipboard_changed_external() bool {
+    return false;
+}
+
+// Display enumeration is macOS-only here; the Windows backend reports none.
+pub fn display_count() u32 {
+    return 0;
+}
+
+pub fn display_bounds(index: u32) geometry.BoundsF {
+    _ = index;
+    return .{};
 }

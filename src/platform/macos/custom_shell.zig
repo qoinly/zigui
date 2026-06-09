@@ -1,6 +1,8 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const types = @import("../../window/types.zig");
+const input = @import("../../input.zig");
+const geometry = @import("../../geometry.zig");
 
 const Id = objc.Id;
 const Sel = objc.Sel;
@@ -16,6 +18,7 @@ const NSWindowStyleMaskTitled: NSUInteger = 1 << 0;
 const NSWindowStyleMaskClosable: NSUInteger = 1 << 1;
 const NSWindowStyleMaskMiniaturizable: NSUInteger = 1 << 2;
 const NSWindowStyleMaskResizable: NSUInteger = 1 << 3;
+const NSWindowStyleMaskFullScreen: NSUInteger = 1 << 14;
 const NSWindowStyleMaskFullSizeContentView: NSUInteger = 1 << 15;
 const NSBackingStoreBuffered: NSUInteger = 2;
 
@@ -106,6 +109,118 @@ pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_mouse_dispatch = d;
 }
 
+// Device-dependent modifier bits in NSEvent.modifierFlags - left and right keys
+// reported apart, which a remote needs. The shared MOD_* above are device-neutral.
+const NX_LSHIFT: NSUInteger = 0x00000002;
+const NX_RSHIFT: NSUInteger = 0x00000004;
+const NX_LCTRL: NSUInteger = 0x00000001;
+const NX_RCTRL: NSUInteger = 0x00002000;
+const NX_LOPT: NSUInteger = 0x00000020;
+const NX_ROPT: NSUInteger = 0x00000040;
+const NX_LCMD: NSUInteger = 0x00000008;
+const NX_RCMD: NSUInteger = 0x00000010;
+const MOD_CAPSLOCK: NSUInteger = 1 << 16;
+const KVK_ESCAPE: u16 = 53;
+
+// Raw input for the capture path (grab mode), separate from the UI dispatch.
+pub const RawDispatch = struct {
+    on_event: *const fn (ctx: *anyopaque, ev: input.InputEvent) void,
+    ctx: *anyopaque,
+};
+var g_raw: ?RawDispatch = null;
+var g_grabbed: bool = false;
+
+pub fn register_raw_dispatch(d: RawDispatch) void {
+    g_raw = d;
+}
+
+pub fn is_grabbed() bool {
+    return g_grabbed;
+}
+
+// Enter/leave relative capture: decouple the cursor from the mouse so moves arrive
+// as HID deltas, and hide it. While grabbed the event imps route to the raw
+// dispatch instead of the UI, and Escape always releases (never forwarded).
+pub fn set_grab(on: bool) void {
+    if (on == g_grabbed) return;
+    g_grabbed = on;
+    _ = CGAssociateMouseAndMouseCursorPosition(@intFromBool(!on));
+    const NSCursor = objc.get_class("NSCursor") orelse return;
+    objc.msg_send(void, NSCursor, if (on) "hide" else "unhide", .{});
+}
+
+// Release the grab if the app is no longer active (the user switched away). A
+// hidden, decoupled cursor would otherwise strand them; the paint loop polls this.
+pub fn release_grab_if_blurred() void {
+    if (!g_grabbed) return;
+    const NSApplication = objc.get_class("NSApplication") orelse return;
+    const app = objc.msg_send(Id, NSApplication, "sharedApplication", .{});
+    const active: bool = objc.msg_send(bool, app, "isActive", .{});
+    if (!active) set_grab(false);
+}
+
+fn mods_from(flags: NSUInteger) input.Mods {
+    return .{
+        .left_shift = (flags & NX_LSHIFT) != 0,
+        .right_shift = (flags & NX_RSHIFT) != 0,
+        .left_control = (flags & NX_LCTRL) != 0,
+        .right_control = (flags & NX_RCTRL) != 0,
+        .left_option = (flags & NX_LOPT) != 0,
+        .right_option = (flags & NX_ROPT) != 0,
+        .left_command = (flags & NX_LCMD) != 0,
+        .right_command = (flags & NX_RCMD) != 0,
+        .caps_lock = (flags & MOD_CAPSLOCK) != 0,
+    };
+}
+
+// True while the device bit for the modifier `scancode` is set in `flags` - turns a
+// flagsChanged event into a down (bit now set) or up (bit cleared).
+fn modifier_down(scancode: u16, flags: NSUInteger) bool {
+    const bit: NSUInteger = switch (scancode) {
+        56 => NX_LSHIFT,
+        60 => NX_RSHIFT,
+        59 => NX_LCTRL,
+        62 => NX_RCTRL,
+        58 => NX_LOPT,
+        61 => NX_ROPT,
+        55 => NX_LCMD,
+        54 => NX_RCMD,
+        57 => MOD_CAPSLOCK,
+        else => return false,
+    };
+    return (flags & bit) != 0;
+}
+
+fn raw_key(event: Id, down: bool) void {
+    const d = g_raw orelse return;
+    const scancode: u16 = objc.msg_send(u16, event, "keyCode", .{});
+    if (down and scancode == KVK_ESCAPE) {
+        set_grab(false); // mandatory release; never forwarded
+        return;
+    }
+    const flags: NSUInteger = objc.msg_send(NSUInteger, event, "modifierFlags", .{});
+    const repeat: bool = if (down) objc.msg_send(bool, event, "isARepeat", .{}) else false;
+    d.on_event(d.ctx, .{ .key = .{
+        .scancode = scancode,
+        .down = down,
+        .repeat = repeat,
+        .mods = mods_from(flags),
+    } });
+}
+
+fn raw_motion(event: Id) void {
+    const d = g_raw orelse return;
+    const dx: CGFloat = objc.msg_send(CGFloat, event, "deltaX", .{});
+    const dy: CGFloat = objc.msg_send(CGFloat, event, "deltaY", .{});
+    d.on_event(d.ctx, .{ .motion = .{ .dx = @floatCast(dx), .dy = @floatCast(dy) } });
+}
+
+fn raw_button(event: Id, button: input.Button, down: bool) void {
+    const d = g_raw orelse return;
+    const flags: NSUInteger = objc.msg_send(NSUInteger, event, "modifierFlags", .{});
+    d.on_event(d.ctx, .{ .button = .{ .button = button, .down = down, .mods = mods_from(flags) } });
+}
+
 // The paint layer's titlebar hit-test, so a press on the band background can be
 // told apart from one on a titlebar control. The band height is stashed at open.
 pub const HitTestFn = *const fn (ctx: *anyopaque, x: f32, y: f32, band_h: f32) bool;
@@ -125,6 +240,7 @@ fn is_flipped_yes_imp(_: Id, _: Sel) callconv(.c) bool {
 }
 
 fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_button(event, .left, true);
     const d = g_mouse_dispatch orelse return;
     const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
     const loc: NSPoint = objc.msg_send(
@@ -160,6 +276,7 @@ fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
 }
 
 fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_button(event, .right, true);
     const d = g_mouse_dispatch orelse return;
     const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
     const loc: NSPoint = objc.msg_send(
@@ -172,6 +289,7 @@ fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) vo
 }
 
 fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_motion(event);
     const d = g_mouse_dispatch orelse return;
     const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
     const loc: NSPoint = objc.msg_send(
@@ -184,6 +302,7 @@ fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
 }
 
 fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_motion(event);
     const d = g_mouse_dispatch orelse return;
     const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
     const loc: NSPoint = objc.msg_send(
@@ -195,20 +314,41 @@ fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void 
     d.on_drag(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
 }
 
-fn custom_body_mouse_up_imp(_: Id, _: Sel, _: Id) callconv(.c) void {
+fn custom_body_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_button(event, .left, false);
     const d = g_mouse_dispatch orelse return;
     d.on_up(d.ctx);
 }
 
+fn custom_body_right_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) raw_button(event, .right, false);
+}
+
+fn custom_body_other_mouse_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) raw_button(event, .middle, true);
+}
+
+fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) raw_button(event, .middle, false);
+}
+
 fn custom_body_mouse_exited_imp(_: Id, _: Sel, _: Id) callconv(.c) void {
+    if (g_grabbed) return; // a hidden, decoupled cursor cannot exit the view
     const d = g_mouse_dispatch orelse return;
     d.on_exit(d.ctx);
 }
 
 fn custom_body_scroll_wheel_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
-    const d = g_mouse_dispatch orelse return;
     const dx: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaX", .{});
     const dy: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaY", .{});
+    if (g_grabbed) {
+        if (g_raw) |d| d.on_event(d.ctx, .{ .wheel = .{
+            .dx = @floatCast(dx),
+            .dy = @floatCast(dy),
+        } });
+        return;
+    }
+    const d = g_mouse_dispatch orelse return;
     d.on_scroll(d.ctx, @floatCast(dx), @floatCast(dy));
 }
 
@@ -281,6 +421,7 @@ fn key_code_for(ch: u16) KeyCode {
 }
 
 fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_key(event, true);
     const d = g_mouse_dispatch orelse return;
     const chars: Id = objc.msg_send(Id, event, "charactersIgnoringModifiers", .{});
     if (@intFromPtr(chars) == 0) return;
@@ -300,6 +441,22 @@ fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
             .ctrl = (flags & MOD_CONTROL) != 0,
         },
     });
+}
+
+fn custom_body_key_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) raw_key(event, false); // the UI path is keyDown-only
+}
+
+fn custom_body_flags_changed_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+    if (!g_grabbed) return; // the UI reads modifiers off each keyDown, not here
+    const d = g_raw orelse return;
+    const scancode: u16 = objc.msg_send(u16, event, "keyCode", .{});
+    const flags: NSUInteger = objc.msg_send(NSUInteger, event, "modifierFlags", .{});
+    d.on_event(d.ctx, .{ .key = .{
+        .scancode = scancode,
+        .down = modifier_down(scancode, flags),
+        .mods = mods_from(flags),
+    } });
 }
 
 const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
@@ -385,6 +542,31 @@ fn ensure_custom_body_class() ?Class {
         @ptrCast(&custom_body_key_down_imp),
         "v@:@",
     );
+    _ = objc.class_addMethod(cls, objc.sel("keyUp:"), @ptrCast(&custom_body_key_up_imp), "v@:@");
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("flagsChanged:"),
+        @ptrCast(&custom_body_flags_changed_imp),
+        "v@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("rightMouseUp:"),
+        @ptrCast(&custom_body_right_mouse_up_imp),
+        "v@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("otherMouseDown:"),
+        @ptrCast(&custom_body_other_mouse_down_imp),
+        "v@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("otherMouseUp:"),
+        @ptrCast(&custom_body_other_mouse_up_imp),
+        "v@:@",
+    );
     _ = objc.class_addMethod(
         cls,
         objc.sel("acceptsFirstResponder"),
@@ -423,6 +605,19 @@ pub const CustomShellHandle = struct {
         const app = objc.msg_send(Id, NSApplication, "sharedApplication", .{});
         objc.msg_send(void, app, "activateIgnoringOtherApps:", .{objc.YES});
         objc.msg_send(void, self.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+    }
+
+    pub fn is_fullscreen(self: CustomShellHandle) bool {
+        const mask: NSUInteger = objc.msg_send(NSUInteger, self.window, "styleMask", .{});
+        return (mask & NSWindowStyleMaskFullScreen) != 0;
+    }
+
+    // Native fullscreen (own Space); the window delegate re-centers the traffic
+    // lights on exit. toggleFullScreen only toggles, so guard to make it absolute.
+    pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
+        std.debug.assert(@intFromPtr(self.window) != 0);
+        if (self.is_fullscreen() == on) return;
+        objc.msg_send(void, self.window, "toggleFullScreen:", .{@as(?Id, null)});
     }
 
     pub fn get_content_size(self: CustomShellHandle) NSSize {
@@ -712,6 +907,31 @@ pub fn pasteboard_write_string(text: []const u8) void {
     if (@intFromPtr(ns) == 0) return; // invalid UTF-8 -> leave the clipboard alone
     _ = objc.msg_send(NSInteger, pb, "clearContents", .{});
     _ = objc.msg_send(bool, pb, "setString:forType:", .{ ns, pasteboard_type() });
+    // Mark this write so the next poll does not report it as an external change.
+    g_pb_own = objc.msg_send(NSInteger, pb, "changeCount", .{});
+}
+
+// macOS has no clipboard-change event, only NSPasteboard.changeCount, so the app
+// polls. These track the last count seen and the count after our own last write.
+var g_pb_last_seen: NSInteger = 0;
+var g_pb_own: NSInteger = 0;
+var g_pb_primed: bool = false;
+
+// True once each time the clipboard changes from outside this app. The first call
+// only baselines (no spurious event for whatever was already on the clipboard); our
+// own writes are recognised via g_pb_own and never reported.
+pub fn clipboard_changed_external() bool {
+    const pb = general_pasteboard() orelse return false;
+    const c: NSInteger = objc.msg_send(NSInteger, pb, "changeCount", .{});
+    std.debug.assert(c >= g_pb_last_seen); // changeCount only ever increases
+    if (!g_pb_primed) {
+        g_pb_primed = true;
+        g_pb_last_seen = c;
+        return false;
+    }
+    if (c == g_pb_last_seen) return false;
+    g_pb_last_seen = c;
+    return c != g_pb_own;
 }
 
 // The mouse dispatch carries no modifier flags, so a shift-click reads live
@@ -868,4 +1088,35 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         .theme = opts.theme orelse types.Theme.default_dark(),
         .titlebar = tb,
     };
+}
+
+// Decouple/recouple the hardware mouse from the on-screen cursor (CGError).
+extern "CoreGraphics" fn CGAssociateMouseAndMouseCursorPosition(connected: c_int) c_int;
+
+fn screen_list() ?Id {
+    const NSScreen = objc.get_class("NSScreen") orelse return null;
+    const screens = objc.msg_send(Id, NSScreen, "screens", .{});
+    return if (@intFromPtr(screens) == 0) null else screens;
+}
+
+pub fn display_count() u32 {
+    const screens = screen_list() orelse return 0;
+    const n: NSUInteger = objc.msg_send(NSUInteger, screens, "count", .{});
+    std.debug.assert(n <= std.math.maxInt(u32));
+    return @intCast(n);
+}
+
+// Display `index` frame in points, in the global screen space.
+pub fn display_bounds(index: u32) geometry.BoundsF {
+    const screens = screen_list() orelse return .{};
+    const n: NSUInteger = objc.msg_send(NSUInteger, screens, "count", .{});
+    if (index >= n) return .{};
+    const s = objc.msg_send(Id, screens, "objectAtIndex:", .{@as(NSUInteger, index)});
+    const f: NSRect = objc.msg_send(NSRect, s, "frame", .{});
+    return geometry.BoundsF.init(
+        @floatCast(f.origin.x),
+        @floatCast(f.origin.y),
+        @floatCast(f.size.width),
+        @floatCast(f.size.height),
+    );
 }

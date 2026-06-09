@@ -46,6 +46,7 @@ const color = @import("color.zig");
 const callbacks = @import("callbacks.zig");
 const custom_paint = @import("window/paint.zig");
 const primitives = @import("primitives.zig");
+const frame_mod = @import("frame.zig");
 
 const Node = node.Node;
 const Theme = types.Theme;
@@ -411,6 +412,65 @@ pub fn separator(a: A, theme: *const Theme, orientation: separator_kit.Orientati
     const spec = a.create(SeparatorSpec) catch @panic("node arena oom");
     spec.* = .{ .theme = theme, .orientation = orientation };
     return node.leaf(a, SeparatorSpec.measure, SeparatorSpec.draw, spec);
+}
+
+const FrameSpec = struct {
+    source: *frame_mod.FrameSource,
+    opts: frame_mod.FrameOpts,
+
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        // Zero intrinsic size: the frame fills its cell (grow + cross-stretch) and
+        // draw() letterboxes the source within it via fit. A reported size would
+        // block the cross-axis stretch and pin the frame to its native pixels.
+        return SizeF.init(0, 0);
+    }
+
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *FrameSpec = @ptrCast(@alignCast(ctx));
+        std.debug.assert(r.size.width >= 0);
+        std.debug.assert(r.size.height >= 0);
+        const cur = self.source.acquire() orelse return; // no frame yet -> draw nothing
+        const box = fit_rect(r, cur.width, cur.height, self.opts.fit);
+        try b.append_frame(.{
+            .bounds = box,
+            .clip_bounds = .{ r.origin.x, r.origin.y, r.size.width, r.size.height },
+            .tex = cur.tex,
+            .tex_cbcr = cur.tex_cbcr,
+            .csc = cur.csc,
+            .opacity = self.opts.opacity,
+        });
+    }
+};
+
+// Map a source-sized frame into rect r per Fit -> {x, y, w, h} in points.
+fn fit_rect(r: BoundsF, src_w: f32, src_h: f32, fit: frame_mod.Fit) [4]f32 {
+    const rw = r.size.width;
+    const rh = r.size.height;
+    if (src_w <= 0 or src_h <= 0 or fit == .fill) {
+        return .{ r.origin.x, r.origin.y, rw, rh };
+    }
+    const scale: f32 = switch (fit) {
+        .contain => @min(rw / src_w, rh / src_h),
+        .cover => @max(rw / src_w, rh / src_h),
+        .native => 1.0,
+        .fill => unreachable, // handled above
+    };
+    const w = src_w * scale;
+    const h = src_h * scale;
+    return .{ r.origin.x + (rw - w) / 2, r.origin.y + (rh - h) / 2, w, h };
+}
+
+// A live external frame (remote screen / video). Fills its layout cell (grow 1);
+// opts.fit controls aspect within the cell. The texture is owned by `source`; this
+// node only references the current frame.
+pub fn frame(a: A, source: *frame_mod.FrameSource, opts: frame_mod.FrameOpts) *Node {
+    const spec = a.create(FrameSpec) catch @panic("node arena oom");
+    spec.* = .{ .source = source, .opts = opts };
+    const n = node.leaf(a, FrameSpec.measure, FrameSpec.draw, spec);
+    n.style.flex_grow = 1;
+    return n;
 }
 
 const SkeletonSpec = struct {

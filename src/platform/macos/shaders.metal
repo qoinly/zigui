@@ -475,3 +475,87 @@ fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[te
     constexpr sampler s(mag_filter::linear, min_filter::linear);
     return tex.sample(s, in.uv);
 }
+
+// External-frame primitive: one textured quad per draw sampling a caller-owned
+// texture (remote screen / video), positioned in pixel space like the UI quads
+// and clipped to the layout rect. One uniform per draw at buffer(1) offset.
+struct FrameUniform {
+    float4 bounds;      // x, y, w, h in points
+    float4 clip_bounds; // x, y, w, h in points
+    float opacity;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    // YUV->RGB rows for the NV12 path: rgb[c] = dot(csc[c].xyz, yuv) + csc[c].w.
+    float4 csc0;
+    float4 csc1;
+    float4 csc2;
+};
+
+struct FrameFragmentIn {
+    float4 position [[position]];
+    float2 uv;
+    float opacity;
+};
+
+// clip_distance is a vertex-only output; it cannot live in the fragment stage_in
+// struct, so wrap FrameFragmentIn the way the quad/text shaders do.
+struct FrameVertexOut {
+    FrameFragmentIn frag;
+    float clip_distance [[clip_distance]][4];
+};
+
+vertex FrameVertexOut frame_vertex(
+    uint vertex_id [[vertex_id]],
+    constant float2 *unit_vertices [[buffer(0)]],
+    constant FrameUniform *frames [[buffer(1)]],
+    constant float2 *viewport_size [[buffer(2)]]
+) {
+    float2 unit_vertex = unit_vertices[vertex_id];
+    FrameUniform frame = frames[0];
+    float2 pixel_pos = frame.bounds.xy + unit_vertex * frame.bounds.zw;
+
+    FrameVertexOut out;
+    out.frag.position = to_device_position(pixel_pos, *viewport_size);
+    out.frag.uv = unit_vertex;
+    out.frag.opacity = frame.opacity;
+
+    float4 clip = compute_clip_distance(pixel_pos, frame.clip_bounds);
+    out.clip_distance[0] = clip.x;
+    out.clip_distance[1] = clip.y;
+    out.clip_distance[2] = clip.z;
+    out.clip_distance[3] = clip.w;
+    return out;
+}
+
+fragment float4 frame_fragment(
+    FrameFragmentIn in [[stage_in]],
+    texture2d<float> frame_tex [[texture(0)]],
+    sampler frame_sampler [[sampler(0)]]
+) {
+    float4 c = frame_tex.sample(frame_sampler, in.uv);
+    return float4(c.rgb, c.a * in.opacity);
+}
+
+// NV12: luma in plane 0 (R8), chroma in plane 1 (RG8, half res). The bilinear
+// sampler upsamples chroma for free. csc carries the colorspace + range.
+fragment float4 frame_nv12_fragment(
+    FrameFragmentIn in [[stage_in]],
+    constant FrameUniform *frames [[buffer(0)]],
+    texture2d<float> luma [[texture(0)]],
+    texture2d<float> chroma [[texture(1)]],
+    sampler frame_sampler [[sampler(0)]]
+) {
+    FrameUniform f = frames[0];
+    float3 yuv = float3(
+        luma.sample(frame_sampler, in.uv).r,
+        chroma.sample(frame_sampler, in.uv).r,
+        chroma.sample(frame_sampler, in.uv).g
+    );
+    float3 rgb = float3(
+        dot(f.csc0.xyz, yuv) + f.csc0.w,
+        dot(f.csc1.xyz, yuv) + f.csc1.w,
+        dot(f.csc2.xyz, yuv) + f.csc2.w
+    );
+    return float4(saturate(rgb), in.opacity);
+}

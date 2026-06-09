@@ -62,6 +62,70 @@ pub fn build(b: *std.Build) void {
     const hello_step = b.step("hello", "Build + run the hello example");
     hello_step.dependOn(&hello_run.step);
 
+    // Example: frame-demo - smoke test for the external-frame primitive.
+    const frame_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/frame_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const frame_demo_exe = b.addExecutable(.{
+        .name = "frame-demo",
+        .root_module = frame_demo_mod,
+    });
+    b.installArtifact(frame_demo_exe);
+    const frame_demo_run = b.addRunArtifact(frame_demo_exe);
+    const frame_demo_step = b.step("frame-demo", "Build + run the external-frame demo");
+    frame_demo_step.dependOn(&frame_demo_run.step);
+
+    // Example: input-demo - smoke test for the raw input-capture (grab) path.
+    const input_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/input_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const input_demo_exe = b.addExecutable(.{
+        .name = "input-demo",
+        .root_module = input_demo_mod,
+    });
+    b.installArtifact(input_demo_exe);
+    const input_demo_run = b.addRunArtifact(input_demo_exe);
+    const input_demo_step = b.step("input-demo", "Build + run the input-capture demo");
+    input_demo_step.dependOn(&input_demo_run.step);
+
+    // Example: clipboard-demo - smoke test for clipboard read/write + change-notify.
+    const clip_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/clipboard_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const clip_demo_exe = b.addExecutable(.{
+        .name = "clipboard-demo",
+        .root_module = clip_demo_mod,
+    });
+    b.installArtifact(clip_demo_exe);
+    const clip_demo_run = b.addRunArtifact(clip_demo_exe);
+    const clip_demo_step = b.step("clipboard-demo", "Build + run the clipboard demo");
+    clip_demo_step.dependOn(&clip_demo_run.step);
+
+    // Example: display-demo - smoke test for display enumeration + fullscreen toggle.
+    const disp_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/display_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const disp_demo_exe = b.addExecutable(.{
+        .name = "display-demo",
+        .root_module = disp_demo_mod,
+    });
+    b.installArtifact(disp_demo_exe);
+    const disp_demo_run = b.addRunArtifact(disp_demo_exe);
+    const disp_demo_step = b.step("display-demo", "Build + run the display/fullscreen demo");
+    disp_demo_step.dependOn(&disp_demo_run.step);
+
     // Offline codegen: regenerate src/icon_lucide_data.zig from the Lucide SVG
     // set. The SVG dir lives outside the repo, so it must be passed:
     //   zig build icongen -Dlucide-dir=/path/to/lucide/icons

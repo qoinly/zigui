@@ -26,6 +26,10 @@ const MAX_POLYLINES = 1024;
 const MAX_LINES = 1024;
 const MAX_RINGS = 256;
 
+// Mirrors the macOS renderer's symbol so the shared renderer facade compiles. The
+// Windows backend draws no external frames, so the value is otherwise unused here.
+pub const max_frames_in_flight: u32 = 3;
+
 // Modal-backdrop blur radius in points; scaled to pixels at draw time so the
 // frost tracks DPI. Mirrors the macOS MPSImageGaussianBlur sigma (12px at 2x).
 const BLUR_SIGMA_PT: f32 = 6.0;
@@ -206,6 +210,40 @@ pub const Renderer = struct {
 
     pub fn get_device(self: *Renderer) *anyopaque {
         return @ptrCast(self.device);
+    }
+
+    // External-frame API. The Windows backend draws no external frames, so these
+    // satisfy the shared renderer interface and import nothing; a frame node draws
+    // nothing here.
+    pub const Nv12Textures = struct {
+        luma: *anyopaque,
+        chroma: *anyopaque,
+        cv_luma: *anyopaque,
+        cv_chroma: *anyopaque,
+        width: u32,
+        height: u32,
+    };
+
+    pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
+        _ = self;
+        _ = pixel_buffer;
+        return null;
+    }
+
+    pub fn release_cv_texture(ref: *anyopaque) void {
+        _ = ref;
+    }
+
+    pub fn retain_surface(pixel_buffer: *anyopaque) void {
+        _ = pixel_buffer;
+    }
+
+    pub fn release_surface(pixel_buffer: *anyopaque) void {
+        _ = pixel_buffer;
+    }
+
+    pub fn flush_texture_cache(self: *Renderer) void {
+        _ = self;
     }
 
     pub fn request_redraw(self: *Renderer) void {
@@ -560,6 +598,8 @@ pub const Renderer = struct {
                     self.ring_pipeline,
                     batch,
                 ),
+                // The Windows backend draws no external frames; nothing to encode.
+                .frame => {},
             }
         }
         if (sprites.len > 0) {

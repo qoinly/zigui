@@ -36,6 +36,10 @@ pub const RenderBuilder = struct {
         try self.prims.append(self.allocator, .{ .ring_chart = ring });
     }
 
+    pub fn append_frame(self: *RenderBuilder, f: primitives.Frame) !void {
+        try self.prims.append(self.allocator, .{ .frame = f });
+    }
+
     pub fn clear_frame(self: *RenderBuilder) void {
         self.prims.clearRetainingCapacity();
         self.sprites.clearRetainingCapacity();

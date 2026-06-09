@@ -10,10 +10,26 @@ const PolychromeSprite = primitives.PolychromeSprite;
 const Polyline = primitives.Polyline;
 const LineSegment = primitives.LineSegment;
 const RingChart = primitives.RingChart;
+const Frame = primitives.Frame;
 const Primitive = primitives.Primitive;
 
 pub const MTLPixelFormat = struct {
+    pub const R8Unorm: NSUInteger = 10; // NV12 luma plane
+    pub const RG8Unorm: NSUInteger = 30; // NV12 chroma plane (Cb, Cr interleaved)
     pub const BGRA8Unorm: NSUInteger = 80;
+};
+
+// A CVPixelBuffer imported zero-copy as NV12. `luma`/`chroma` are the MTLTextures
+// to sample; they stay valid only while `cv_luma`/`cv_chroma` (the owning CV refs)
+// live, so the caller keeps those refs until the GPU is done, then releases them
+// with release_cv_texture.
+pub const Nv12Textures = struct {
+    luma: *anyopaque,
+    chroma: *anyopaque,
+    cv_luma: *anyopaque,
+    cv_chroma: *anyopaque,
+    width: u32,
+    height: u32,
 };
 
 pub const MTLLoadAction = struct {
@@ -43,6 +59,7 @@ pub const MTLTextureUsage = struct {
 };
 
 pub const MTLStorageMode = struct {
+    pub const Shared: NSUInteger = 0;
     pub const Private: NSUInteger = 2;
 };
 
@@ -68,12 +85,41 @@ const MTLScissorRect = extern struct {
     height: NSUInteger,
 };
 
+const MTLRegion = extern struct {
+    origin: extern struct { x: NSUInteger, y: NSUInteger, z: NSUInteger },
+    size: extern struct { width: NSUInteger, height: NSUInteger, depth: NSUInteger },
+};
+
 const MAX_QUADS = 1024;
 const MAX_SPRITES = 4096;
 const MAX_COLOR_SPRITES = 256;
 const MAX_POLYLINES = 1024;
 const MAX_LINES = 1024;
 const MAX_RINGS = 256;
+const MAX_FRAMES = 8;
+
+// Drawables the layer keeps in flight. Pinned (not left to the CAMetalLayer
+// default) because the external-frame texture ring sizes itself off this to know
+// when a slot is safe to overwrite; an unpinned value would silently break that.
+pub const max_frames_in_flight: NSUInteger = 3;
+
+// CPU->GPU uniform for one external-frame draw; mirrors FrameUniform in
+// shaders.metal. 96 bytes (multiple of 16) so each element stays float4-aligned at
+// its per-draw buffer offset. csc is the YUV->RGB matrix for the NV12 path (three
+// rows of m0,m1,m2,offset); unused by the BGRA path.
+const FrameGpu = extern struct {
+    bounds: [4]f32,
+    clip_bounds: [4]f32,
+    opacity: f32,
+    _pad: [3]f32 = .{ 0, 0, 0 },
+    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+
+    comptime {
+        // The shader reads this raw; a size/offset drift silently corrupts the draw.
+        std.debug.assert(@sizeOf(FrameGpu) == 96);
+        std.debug.assert(@offsetOf(FrameGpu, "csc") == 48);
+    }
+};
 
 pub const Renderer = struct {
     device: Id,
@@ -96,6 +142,7 @@ pub const Renderer = struct {
     line_buffer: Id,
     ring_buffer: Id,
     viewport_buffer: Id,
+    frame_buffer: Id,
     sampler_state: ?Id,
     quad_offset: usize = 0,
     sprite_offset: usize = 0,
@@ -103,8 +150,12 @@ pub const Renderer = struct {
     polyline_offset: usize = 0,
     line_offset: usize = 0,
     ring_offset: usize = 0,
+    frame_offset: usize = 0,
     dirty: bool = true,
     blit_pipeline_state: ?Id = null,
+    frame_pipeline_state: ?Id = null,
+    frame_nv12_pipeline_state: ?Id = null,
+    metal_texture_cache: ?*anyopaque = null,
     blur_kernel: ?Id = null,
     offscreen_tex: ?Id = null,
     offscreen_blur_tex: ?Id = null,
@@ -127,6 +178,7 @@ pub const Renderer = struct {
             MTLPixelFormat.BGRA8Unorm,
         });
         objc.msg_send(void, metal_layer, "setFramebufferOnly:", .{objc.YES});
+        objc.msg_send(void, metal_layer, "setMaximumDrawableCount:", .{max_frames_in_flight});
 
         const unit_vertex_buffer = objc.msg_send(
             Id,
@@ -174,6 +226,11 @@ pub const Renderer = struct {
             MTLResourceOptions.StorageModeShared,
         });
 
+        const frame_buffer = objc.msg_send(Id, device, "newBufferWithLength:options:", .{
+            @as(NSUInteger, MAX_FRAMES * @sizeOf(FrameGpu)),
+            MTLResourceOptions.StorageModeShared,
+        });
+
         var renderer = Renderer{
             .device = device,
             .command_queue = command_queue,
@@ -193,6 +250,7 @@ pub const Renderer = struct {
             .line_buffer = line_buffer,
             .ring_buffer = ring_buffer,
             .viewport_buffer = viewport_buffer,
+            .frame_buffer = frame_buffer,
             .sampler_state = null,
         };
 
@@ -225,6 +283,18 @@ pub const Renderer = struct {
             "blit_vertex",
             "blit_fragment",
         );
+        renderer.frame_pipeline_state = renderer.create_pipeline_state(
+            "frame_vertex",
+            "frame_fragment",
+        );
+        renderer.frame_nv12_pipeline_state = renderer.create_pipeline_state(
+            "frame_vertex",
+            "frame_nv12_fragment",
+        );
+        var cache: ?*anyopaque = null;
+        if (CVMetalTextureCacheCreate(null, null, device, null, &cache) == 0) {
+            renderer.metal_texture_cache = cache;
+        }
 
         return renderer;
     }
@@ -241,6 +311,88 @@ pub const Renderer = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    // Bind an NV12 CVPixelBuffer to Metal textures with no copy. Returns null if
+    // the cache is absent or either plane fails to map. The caller owns the two CV
+    // refs and must release them (after the GPU is done) with release_cv_texture.
+    pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
+        const cache = self.metal_texture_cache orelse return null;
+        const w = CVPixelBufferGetWidth(pixel_buffer);
+        const h = CVPixelBufferGetHeight(pixel_buffer);
+        std.debug.assert(w > 0);
+        std.debug.assert(h > 0);
+
+        // CreateTextureFromImage returns the ref +1; this is an optional, not an
+        // error union, so every failure exit releases by hand (errdefer would not
+        // fire on `return null`).
+        var cv_luma: ?*anyopaque = null;
+        if (CVMetalTextureCacheCreateTextureFromImage(
+            null,
+            cache,
+            pixel_buffer,
+            null,
+            MTLPixelFormat.R8Unorm,
+            w,
+            h,
+            0,
+            &cv_luma,
+        ) != 0) return null;
+
+        var cv_chroma: ?*anyopaque = null;
+        if (CVMetalTextureCacheCreateTextureFromImage(
+            null,
+            cache,
+            pixel_buffer,
+            null,
+            MTLPixelFormat.RG8Unorm,
+            w / 2,
+            h / 2,
+            1,
+            &cv_chroma,
+        ) != 0) {
+            CFRelease(cv_luma);
+            return null;
+        }
+
+        const luma = CVMetalTextureGetTexture(cv_luma) orelse {
+            CFRelease(cv_luma);
+            CFRelease(cv_chroma);
+            return null;
+        };
+        const chroma = CVMetalTextureGetTexture(cv_chroma) orelse {
+            CFRelease(cv_luma);
+            CFRelease(cv_chroma);
+            return null;
+        };
+        return .{
+            .luma = @ptrCast(luma),
+            .chroma = @ptrCast(chroma),
+            .cv_luma = cv_luma.?,
+            .cv_chroma = cv_chroma.?,
+            .width = @intCast(w),
+            .height = @intCast(h),
+        };
+    }
+
+    // Release a CV ref returned in Nv12Textures once the GPU no longer reads it.
+    pub fn release_cv_texture(ref: *anyopaque) void {
+        CFRelease(ref);
+    }
+
+    // Hold/drop a ref on a decoder's CVPixelBuffer so its IOSurface is not recycled
+    // while a slot still points at it.
+    pub fn retain_surface(pixel_buffer: *anyopaque) void {
+        _ = CVBufferRetain(pixel_buffer);
+    }
+
+    pub fn release_surface(pixel_buffer: *anyopaque) void {
+        CVBufferRelease(pixel_buffer);
+    }
+
+    // Recycle internal CV texture-cache bookkeeping; call once a frame.
+    pub fn flush_texture_cache(self: *Renderer) void {
+        if (self.metal_texture_cache) |cache| CVMetalTextureCacheFlush(cache, 0);
+    }
+
     // layer is owned by the view, not us - never release it. Everything else here
     // came back +1 from a new*/Create call, so release exactly once; device last,
     // after the buffers/textures/pipelines built from it.
@@ -255,6 +407,7 @@ pub const Renderer = struct {
             self.line_buffer,
             self.ring_buffer,
             self.viewport_buffer,
+            self.frame_buffer,
         };
         for (owned) |obj| objc.msg_send(void, obj, "release", .{});
         const optional = [_]?Id{
@@ -266,11 +419,14 @@ pub const Renderer = struct {
             self.ring_pipeline_state,
             self.sampler_state,
             self.blit_pipeline_state,
+            self.frame_pipeline_state,
+            self.frame_nv12_pipeline_state,
             self.blur_kernel,
             self.offscreen_tex,
             self.offscreen_blur_tex,
         };
         for (optional) |maybe| if (maybe) |obj| objc.msg_send(void, obj, "release", .{});
+        if (self.metal_texture_cache) |cache| CFRelease(cache);
         objc.msg_send(void, self.device, "release", .{});
         self.* = undefined;
     }
@@ -393,6 +549,7 @@ pub const Renderer = struct {
         self.polyline_offset = 0;
         self.line_offset = 0;
         self.ring_offset = 0;
+        self.frame_offset = 0;
 
         const want_blur = blur and self.blit_pipeline_state != null and
             split_prims <= prims.len and split_sprites <= sprites.len and
@@ -496,6 +653,7 @@ pub const Renderer = struct {
                     self.encode_line_batch(encoder, p, batch),
                 .ring_chart => if (self.ring_pipeline_state) |p|
                     self.encode_ring_batch(encoder, p, batch),
+                .frame => self.encode_frame_batch(encoder, batch),
             }
         }
         if (self.text_pipeline_state) |p| {
@@ -515,6 +673,63 @@ pub const Renderer = struct {
         objc.msg_send(void, encoder, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{
             MTLPrimitiveType.Triangle, @as(NSUInteger, 0), @as(NSUInteger, 6), @as(NSUInteger, 1),
         });
+    }
+
+    // External frames each carry their own texture(s), so they can't share one
+    // instanced draw - bind + draw one per primitive. The pipeline is chosen per
+    // frame (BGRA vs NV12), so a mixed batch is fine. Bounded by MAX_FRAMES.
+    fn encode_frame_batch(self: *Renderer, encoder: Id, batch: []const Primitive) void {
+        const ptr = objc.msg_send(*anyopaque, self.frame_buffer, "contents", .{});
+        const frames: [*]FrameGpu = @ptrCast(@alignCast(ptr));
+        for (batch) |prim| {
+            const f = prim.frame;
+            const tex = f.tex orelse continue;
+            const nv12 = f.tex_cbcr != null;
+            const want = if (nv12) self.frame_nv12_pipeline_state else self.frame_pipeline_state;
+            const p = want orelse continue;
+            if (self.frame_offset >= MAX_FRAMES) return; // a UI never stacks this many
+
+            frames[self.frame_offset] = .{
+                .bounds = f.bounds,
+                .clip_bounds = f.clip_bounds,
+                .opacity = f.opacity,
+                .csc = f.csc,
+            };
+            const off = self.frame_offset * @sizeOf(FrameGpu);
+            objc.msg_send(void, encoder, "setRenderPipelineState:", .{p});
+            objc.msg_send(void, encoder, "setVertexBuffer:offset:atIndex:", .{
+                self.unit_vertex_buffer, @as(NSUInteger, 0), @as(NSUInteger, 0),
+            });
+            objc.msg_send(void, encoder, "setVertexBuffer:offset:atIndex:", .{
+                self.frame_buffer, @as(NSUInteger, off), @as(NSUInteger, 1),
+            });
+            objc.msg_send(void, encoder, "setVertexBuffer:offset:atIndex:", .{
+                self.viewport_buffer, @as(NSUInteger, 0), @as(NSUInteger, 2),
+            });
+            objc.msg_send(void, encoder, "setFragmentTexture:atIndex:", .{
+                @as(Id, @ptrCast(tex)), @as(NSUInteger, 0),
+            });
+            if (f.tex_cbcr) |chroma| {
+                // Only NV12 needs the csc uniform and the second plane in the
+                // fragment stage; the BGRA pipeline binds neither.
+                objc.msg_send(void, encoder, "setFragmentBuffer:offset:atIndex:", .{
+                    self.frame_buffer, @as(NSUInteger, off), @as(NSUInteger, 0),
+                });
+                objc.msg_send(void, encoder, "setFragmentTexture:atIndex:", .{
+                    @as(Id, @ptrCast(chroma)), @as(NSUInteger, 1),
+                });
+            }
+            if (self.sampler_state) |sampler| {
+                objc.msg_send(void, encoder, "setFragmentSamplerState:atIndex:", .{
+                    sampler, @as(NSUInteger, 0),
+                });
+            }
+            objc.msg_send(void, encoder, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{
+                MTLPrimitiveType.Triangle, @as(NSUInteger, 0),
+                @as(NSUInteger, 6),        @as(NSUInteger, 1),
+            });
+            self.frame_offset += 1;
+        }
     }
 
     fn ensure_offscreen(self: *Renderer, w_f: objc.CGFloat, h_f: objc.CGFloat) void {
@@ -903,3 +1118,34 @@ pub const Renderer = struct {
 };
 
 extern "c" fn MTLCreateSystemDefaultDevice() ?Id;
+
+// CoreVideo zero-copy import. A CVPixelBuffer (IOSurface-backed) is bound to Metal
+// textures through the cache without a copy; the plane textures stay valid only
+// while their CVMetalTexture refs live, so the caller holds those refs until the
+// GPU is done. CV refs are CF objects, released with CFRelease.
+const CVReturn = i32;
+extern "CoreVideo" fn CVMetalTextureCacheCreate(
+    allocator: ?*anyopaque,
+    cache_attrs: ?*anyopaque,
+    device: Id,
+    texture_attrs: ?*anyopaque,
+    cache_out: *?*anyopaque,
+) CVReturn;
+extern "CoreVideo" fn CVMetalTextureCacheCreateTextureFromImage(
+    allocator: ?*anyopaque,
+    cache: ?*anyopaque,
+    image: ?*anyopaque,
+    texture_attrs: ?*anyopaque,
+    pixel_format: NSUInteger,
+    width: usize,
+    height: usize,
+    plane_index: usize,
+    texture_out: *?*anyopaque,
+) CVReturn;
+extern "CoreVideo" fn CVMetalTextureGetTexture(image: ?*anyopaque) ?Id;
+extern "CoreVideo" fn CVMetalTextureCacheFlush(cache: ?*anyopaque, options: u64) void;
+extern "CoreVideo" fn CVPixelBufferGetWidth(pixel_buffer: ?*anyopaque) usize;
+extern "CoreVideo" fn CVPixelBufferGetHeight(pixel_buffer: ?*anyopaque) usize;
+extern "CoreVideo" fn CVBufferRetain(buffer: ?*anyopaque) ?*anyopaque;
+extern "CoreVideo" fn CVBufferRelease(buffer: ?*anyopaque) void;
+extern "CoreFoundation" fn CFRelease(cf: ?*anyopaque) void;

@@ -19,6 +19,11 @@ pub const KeyMods = impl.KeyMods;
 pub const MouseDispatch = impl.MouseDispatch;
 pub const CursorKind = impl.CursorKind;
 pub const register_mouse_dispatch = impl.register_mouse_dispatch;
+pub const RawDispatch = impl.RawDispatch;
+pub const register_raw_dispatch = impl.register_raw_dispatch;
+pub const set_grab = impl.set_grab;
+pub const is_grabbed = impl.is_grabbed;
+pub const release_grab_if_blurred = impl.release_grab_if_blurred;
 pub const apply_cursor = impl.apply_cursor;
 pub const current_shift_down = impl.current_shift_down;
 pub const show_text_field = impl.show_text_field;
@@ -26,6 +31,9 @@ pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
 pub const pasteboard_read_into = impl.pasteboard_read_into;
 pub const pasteboard_write_string = impl.pasteboard_write_string;
+pub const clipboard_changed_external = impl.clipboard_changed_external;
+pub const display_count = impl.display_count;
+pub const display_bounds = impl.display_bounds;
 
 // Windows draws its window controls into the title-bar band itself (the macOS
 // backend uses native traffic lights). These hooks are no-ops elsewhere; the
