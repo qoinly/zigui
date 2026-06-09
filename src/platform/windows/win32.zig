@@ -398,6 +398,7 @@ pub extern "user32" fn CloseClipboard() callconv(.winapi) BOOL;
 pub extern "user32" fn EmptyClipboard() callconv(.winapi) BOOL;
 pub extern "user32" fn GetClipboardData(format: UINT) callconv(.winapi) ?HGLOBAL;
 pub extern "user32" fn SetClipboardData(format: UINT, mem: HGLOBAL) callconv(.winapi) ?HGLOBAL;
+pub extern "user32" fn GetClipboardSequenceNumber() callconv(.winapi) DWORD;
 
 pub extern "kernel32" fn GlobalAlloc(flags: UINT, bytes: usize) callconv(.winapi) ?HGLOBAL;
 pub extern "kernel32" fn GlobalLock(mem: HGLOBAL) callconv(.winapi) ?*anyopaque;

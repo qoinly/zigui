@@ -198,6 +198,10 @@ var g_hit_test: ?HitTestFn = null;
 var g_redraw: ?RedrawFn = null;
 var g_paint_now: ?RedrawFn = null;
 var g_ctx: ?*anyopaque = null;
+// Windows exposes clipboard changes as one process-wide sequence.
+var g_clipboard_last_seen: win32.DWORD = 0;
+var g_clipboard_own: win32.DWORD = 0;
+var g_clipboard_primed: bool = false;
 
 fn paint_now() void {
     if (g_paint_now) |pn| if (g_ctx) |c| pn(c);
@@ -951,16 +955,24 @@ pub fn pasteboard_write_string(text: []const u8) void {
     dst[wlen] = 0;
     _ = win32.GlobalUnlock(mem);
     if (win32.OpenClipboard(g_main_hwnd) == 0) return;
-    defer _ = win32.CloseClipboard();
-    _ = win32.EmptyClipboard();
-    if (win32.SetClipboardData(win32.CF_UNICODETEXT, mem) != null) {
+    const emptied = win32.EmptyClipboard() != 0;
+    if (emptied and win32.SetClipboardData(win32.CF_UNICODETEXT, mem) != null) {
         owned_by_clipboard = true;
     }
+    _ = win32.CloseClipboard();
+    if (emptied) g_clipboard_own = win32.GetClipboardSequenceNumber();
 }
 
-// The Windows backend reports no clipboard change; macOS carries the poll.
 pub fn clipboard_changed_external() bool {
-    return false;
+    const sequence = win32.GetClipboardSequenceNumber();
+    if (!g_clipboard_primed) {
+        g_clipboard_primed = true;
+        g_clipboard_last_seen = sequence;
+        return false;
+    }
+    if (sequence == g_clipboard_last_seen) return false;
+    g_clipboard_last_seen = sequence;
+    return sequence != g_clipboard_own;
 }
 
 const DISPLAYS_MAX: u32 = 32;
