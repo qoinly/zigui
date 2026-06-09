@@ -76,6 +76,7 @@ pub const CAPTION_CLUSTER_W: f32 = CAPTION_BTN_W * 3;
 pub const Error = error{
     ClassRegisterFailed,
     WindowCreateFailed,
+    RawInputRegisterFailed,
 };
 
 pub const ContentSize = extern struct { width: f64, height: f64 };
@@ -202,6 +203,13 @@ var g_ctx: ?*anyopaque = null;
 var g_clipboard_last_seen: win32.DWORD = 0;
 var g_clipboard_own: win32.DWORD = 0;
 var g_clipboard_primed: bool = false;
+// The single HWND owns one grab stream; WndProc needs this outside the paint stack.
+var g_raw: ?RawDispatch = null;
+var g_grabbed: bool = false;
+var g_cursor_hide_steps: u32 = 0;
+
+const RAW_DEVICE_COUNT: u32 = 2;
+const CURSOR_SHOW_COUNT_LIMIT: u32 = 16;
 
 fn paint_now() void {
     if (g_paint_now) |pn| if (g_ctx) |c| pn(c);
@@ -220,15 +228,13 @@ pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_dispatch = d;
 }
 
-// Raw input capture (grab mode) is macOS-only; these satisfy the shared interface
-// and capture nothing on Windows.
 pub const RawDispatch = struct {
     on_event: *const fn (ctx: *anyopaque, ev: input.InputEvent) void,
     ctx: *anyopaque,
 };
 
 pub fn register_raw_dispatch(d: RawDispatch) void {
-    _ = d;
+    g_raw = d;
 }
 
 // Per-window event routing is macOS-only; the Windows WndProc uses the registered
@@ -239,14 +245,34 @@ pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
 }
 
 pub fn set_grab(on: bool) void {
-    _ = on;
+    if (on == g_grabbed) return;
+    g_grabbed = on;
+    if (on) {
+        if (g_main_hwnd) |hwnd| {
+            _ = win32.SetForegroundWindow(hwnd);
+            _ = win32.SetFocus(hwnd);
+            confine_cursor(hwnd);
+        }
+        hide_cursor();
+    } else {
+        _ = win32.ClipCursor(null);
+        show_cursor();
+    }
 }
 
 pub fn is_grabbed() bool {
-    return false;
+    return g_grabbed;
 }
 
-pub fn release_grab_if_blurred() void {}
+pub fn release_grab_if_blurred() void {
+    if (!g_grabbed) return;
+    const hwnd = g_main_hwnd orelse return;
+    const active = win32.GetForegroundWindow() orelse {
+        set_grab(false);
+        return;
+    };
+    if (active != hwnd) set_grab(false);
+}
 
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
 // an interactive component (-> HTCLIENT) and lets caption hover request a redraw.
@@ -291,6 +317,33 @@ fn set_cursor(kind: CursorKind) void {
     _ = win32.SetCursor(win32.LoadCursorW(null, win32.make_int_resource(id)));
 }
 
+fn hide_cursor() void {
+    std.debug.assert(g_cursor_hide_steps == 0);
+    var step: u32 = 0;
+    while (step < CURSOR_SHOW_COUNT_LIMIT) : (step += 1) {
+        g_cursor_hide_steps += 1;
+        if (win32.ShowCursor(win32.FALSE) < 0) return;
+    }
+    std.debug.assert(false);
+}
+
+fn show_cursor() void {
+    std.debug.assert(g_cursor_hide_steps <= CURSOR_SHOW_COUNT_LIMIT);
+    while (g_cursor_hide_steps > 0) {
+        _ = win32.ShowCursor(win32.TRUE);
+        g_cursor_hide_steps -= 1;
+    }
+}
+
+fn confine_cursor(hwnd: win32.HWND) void {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
+    var rect: win32.RECT = undefined;
+    if (win32.GetWindowRect(hwnd, &rect) == 0) return;
+    std.debug.assert(rect.right > rect.left);
+    std.debug.assert(rect.bottom > rect.top);
+    _ = win32.ClipCursor(&rect);
+}
+
 pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     const instance = win32.GetModuleHandleW(null) orelse return error.WindowCreateFailed;
     try ensure_window_class(instance);
@@ -305,6 +358,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     const title: [*:0]const u16 = @ptrCast(&title_buf);
 
     const hwnd = try create_shell_window(instance, title, opts.width, opts.height);
+    errdefer _ = win32.DestroyWindow(hwnd);
+    errdefer g_main_hwnd = null;
+    g_main_hwnd = hwnd;
+    try register_raw_devices(hwnd);
+
     style_shell_window(hwnd);
     resize_shell_window(hwnd, opts.width, opts.height);
     _ = win32.ShowWindow(hwnd, win32.SW_SHOW);
@@ -361,6 +419,31 @@ fn create_shell_window(
         instance,
         null,
     ) orelse error.WindowCreateFailed;
+}
+
+fn register_raw_devices(hwnd: win32.HWND) Error!void {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
+    var devices = [_]win32.RAWINPUTDEVICE{
+        .{
+            .usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
+            .usUsage = win32.HID_USAGE_GENERIC_MOUSE,
+            .dwFlags = 0,
+            .hwndTarget = hwnd,
+        },
+        .{
+            .usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
+            .usUsage = win32.HID_USAGE_GENERIC_KEYBOARD,
+            .dwFlags = 0,
+            .hwndTarget = hwnd,
+        },
+    };
+    comptime std.debug.assert(devices.len == RAW_DEVICE_COUNT);
+    const ok = win32.RegisterRawInputDevices(
+        &devices,
+        RAW_DEVICE_COUNT,
+        @sizeOf(win32.RAWINPUTDEVICE),
+    );
+    if (ok == 0) return error.RawInputRegisterFailed;
 }
 
 fn style_shell_window(hwnd: win32.HWND) void {
@@ -551,11 +634,14 @@ fn wnd_proc(
         win32.WM_NCCALCSIZE => if (handle_nc_calc_size(hwnd, w, l)) |r| return r,
         win32.WM_GETMINMAXINFO => return handle_minmax(hwnd, l),
         win32.WM_NCHITTEST => return hit_test(hwnd, l),
+        win32.WM_INPUT => return handle_raw_input(hwnd, w, l),
         win32.WM_NCMOUSEMOVE,
         win32.WM_NCMOUSELEAVE,
         win32.WM_NCLBUTTONDOWN,
         win32.WM_NCLBUTTONUP,
         => if (handle_caption_message(hwnd, msg, w)) |r| return r,
+        win32.WM_ACTIVATE => handle_activate(w),
+        win32.WM_KILLFOCUS => set_grab(false),
         win32.WM_ERASEBKGND => return 1,
         win32.WM_ENTERSIZEMOVE,
         win32.WM_SIZE,
@@ -573,10 +659,16 @@ fn wnd_proc(
         win32.WM_LBUTTONDOWN,
         win32.WM_LBUTTONUP,
         win32.WM_RBUTTONDOWN,
+        win32.WM_RBUTTONUP,
+        win32.WM_MBUTTONDOWN,
+        win32.WM_MBUTTONUP,
         win32.WM_MOUSEWHEEL,
+        win32.WM_MOUSEHWHEEL,
         => return handle_mouse_message(hwnd, msg, w, l),
         win32.WM_KEYDOWN,
+        win32.WM_KEYUP,
         win32.WM_SYSKEYDOWN,
+        win32.WM_SYSKEYUP,
         win32.WM_CHAR,
         => if (handle_key_message(msg, w)) |r| return r,
         else => {},
@@ -609,6 +701,11 @@ fn handle_minmax(hwnd: win32.HWND, l: win32.LPARAM) win32.LRESULT {
     mmi.ptMinTrackSize.x = @intFromFloat(g_min_w_pt * scale);
     mmi.ptMinTrackSize.y = @intFromFloat(g_min_h_pt * scale);
     return 0;
+}
+
+fn handle_activate(w: win32.WPARAM) void {
+    const state = w & 0xFFFF;
+    if (state == win32.WA_INACTIVE) set_grab(false);
 }
 
 fn handle_caption_message(
@@ -686,6 +783,7 @@ fn handle_set_cursor(l: win32.LPARAM) ?win32.LRESULT {
 }
 
 fn handle_destroy() win32.LRESULT {
+    set_grab(false);
     // Stop vsync first so WM_QUIT is not starved by paints against a dying HWND.
     loop.quitting = true;
     loop.vsync_running.store(false, .seq_cst);
@@ -699,6 +797,7 @@ fn handle_mouse_message(
     w: win32.WPARAM,
     l: win32.LPARAM,
 ) win32.LRESULT {
+    if (g_grabbed) return 0;
     switch (msg) {
         win32.WM_MOUSEMOVE => handle_mouse_move(hwnd, l),
         win32.WM_MOUSELEAVE => handle_mouse_leave(),
@@ -706,6 +805,11 @@ fn handle_mouse_message(
         win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(d.ctx),
         win32.WM_RBUTTONDOWN => handle_mouse_right_down(hwnd, l),
         win32.WM_MOUSEWHEEL => handle_mouse_wheel(w),
+        win32.WM_RBUTTONUP,
+        win32.WM_MBUTTONDOWN,
+        win32.WM_MBUTTONUP,
+        win32.WM_MOUSEHWHEEL,
+        => {},
         else => std.debug.assert(false),
     }
     return 0;
@@ -748,8 +852,10 @@ fn handle_mouse_wheel(w: win32.WPARAM) void {
 }
 
 fn handle_key_message(msg: win32.UINT, w: win32.WPARAM) ?win32.LRESULT {
+    if (g_grabbed) return 0;
     switch (msg) {
         win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => return handle_key_down(w),
+        win32.WM_KEYUP, win32.WM_SYSKEYUP => return 0,
         win32.WM_CHAR => return handle_char(w),
         else => std.debug.assert(false),
     }
@@ -778,6 +884,129 @@ fn handle_char(w: win32.WPARAM) win32.LRESULT {
         }
     }
     return 0;
+}
+
+fn handle_raw_input(hwnd: win32.HWND, w: win32.WPARAM, l: win32.LPARAM) win32.LRESULT {
+    if (!g_grabbed) {
+        return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
+    }
+    if (g_raw == null) {
+        return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
+    }
+    const raw_handle: win32.HRAWINPUT = @ptrFromInt(@as(usize, @bitCast(l)));
+    std.debug.assert(@intFromPtr(raw_handle) != 0);
+    var raw: win32.RAWINPUT = undefined;
+    var size: win32.UINT = @sizeOf(win32.RAWINPUT);
+    const got = win32.GetRawInputData(
+        raw_handle,
+        win32.RID_INPUT,
+        &raw,
+        &size,
+        @sizeOf(win32.RAWINPUTHEADER),
+    );
+    if (got == win32.RAW_INPUT_ERROR) {
+        return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
+    }
+    if (got < @sizeOf(win32.RAWINPUTHEADER)) {
+        return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
+    }
+    switch (raw.header.dwType) {
+        win32.RIM_TYPEMOUSE => raw_mouse(&raw.data.mouse),
+        win32.RIM_TYPEKEYBOARD => raw_keyboard(&raw.data.keyboard),
+        else => {},
+    }
+    return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
+}
+
+fn raw_mouse(m: *const win32.RAWMOUSE) void {
+    const d = g_raw orelse return;
+    const relative = (m.usFlags & win32.MOUSE_MOVE_ABSOLUTE) == 0;
+    if (relative and (m.lLastX != 0 or m.lLastY != 0)) {
+        d.on_event(d.ctx, .{ .motion = .{
+            .dx = @floatFromInt(m.lLastX),
+            .dy = @floatFromInt(m.lLastY),
+        } });
+    }
+    const mods = mods_from_keys();
+    const flags = m.buttons.data.usButtonFlags;
+    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_DOWN) != 0) raw_button(.left, true, mods);
+    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_UP) != 0) raw_button(.left, false, mods);
+    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_DOWN) != 0) raw_button(.right, true, mods);
+    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_UP) != 0) raw_button(.right, false, mods);
+    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0) raw_button(.middle, true, mods);
+    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_UP) != 0) raw_button(.middle, false, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_4_DOWN) != 0) raw_button(.other, true, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_4_UP) != 0) raw_button(.other, false, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_5_DOWN) != 0) raw_button(.other, true, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_5_UP) != 0) raw_button(.other, false, mods);
+    if ((flags & win32.RI_MOUSE_WHEEL) != 0) raw_wheel(0, wheel_units(m.buttons.data.usButtonData));
+    if ((flags & win32.RI_MOUSE_HWHEEL) != 0) {
+        raw_wheel(wheel_units(m.buttons.data.usButtonData), 0);
+    }
+}
+
+fn raw_keyboard(k: *const win32.RAWKEYBOARD) void {
+    const d = g_raw orelse return;
+    const down = (k.Flags & win32.RI_KEY_BREAK) == 0;
+    const scancode = raw_scancode(k.MakeCode, k.Flags);
+    if (down and k.VKey == @as(win32.WORD, @intCast(win32.VK_ESCAPE))) {
+        set_grab(false);
+        return;
+    }
+    if (scancode == 0) return;
+    d.on_event(d.ctx, .{ .key = .{
+        .scancode = scancode,
+        .down = down,
+        .repeat = false,
+        .mods = mods_from_keys(),
+    } });
+}
+
+fn raw_scancode(make_code: win32.WORD, flags: win32.WORD) u16 {
+    if (make_code == 0) return 0;
+    if ((flags & win32.RI_KEY_E0) != 0) return 0xE000 | make_code;
+    if ((flags & win32.RI_KEY_E1) != 0) return 0xE100 | make_code;
+    return make_code;
+}
+
+fn raw_button(button: input.Button, down: bool, mods: input.Mods) void {
+    const d = g_raw orelse return;
+    d.on_event(d.ctx, .{ .button = .{ .button = button, .down = down, .mods = mods } });
+}
+
+fn raw_wheel(dx: f32, dy: f32) void {
+    const d = g_raw orelse return;
+    if (dx == 0 and dy == 0) return;
+    d.on_event(d.ctx, .{ .wheel = .{ .dx = dx, .dy = dy } });
+}
+
+fn wheel_units(data: win32.WORD) f32 {
+    const signed: i16 = @bitCast(data);
+    return @as(f32, @floatFromInt(signed)) / win32.WHEEL_DELTA * 40.0;
+}
+
+fn mods_from_keys() input.Mods {
+    return .{
+        .left_shift = key_state_down(win32.VK_LSHIFT),
+        .right_shift = key_state_down(win32.VK_RSHIFT),
+        .left_control = key_state_down(win32.VK_LCONTROL),
+        .right_control = key_state_down(win32.VK_RCONTROL),
+        .left_option = key_state_down(win32.VK_LMENU),
+        .right_option = key_state_down(win32.VK_RMENU),
+        .left_command = key_state_down(win32.VK_LWIN),
+        .right_command = key_state_down(win32.VK_RWIN),
+        .caps_lock = key_state_toggled(win32.VK_CAPITAL),
+    };
+}
+
+fn key_state_down(vk: win32.WPARAM) bool {
+    const state = @as(u16, @bitCast(win32.GetKeyState(@intCast(vk))));
+    return (state & win32.KEY_DOWN_MASK) != 0;
+}
+
+fn key_state_toggled(vk: win32.WPARAM) bool {
+    const state = @as(u16, @bitCast(win32.GetKeyState(@intCast(vk))));
+    return (state & 1) != 0;
 }
 
 // Focused text fields use one native EDIT child so IME/caret behavior stays native.
