@@ -144,7 +144,8 @@ pub fn input_events() []const InputEvent {
 // Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
 // returns true once each time something outside this app changes the clipboard (our
 // own set_clipboard_text writes are not reported), so a remote-control loop can
-// forward it. Call clipboard_changed once a frame.
+// forward it. The clipboard is one per app (every window shares it), and the poll
+// is edge-triggered, so call clipboard_changed once a frame from a single window.
 pub fn clipboard_text(buf: []u8) []const u8 {
     return custom_shell.pasteboard_read_into(buf);
 }

@@ -1014,13 +1014,17 @@ pub fn pasteboard_write_string(text: []const u8) void {
 
 // macOS has no clipboard-change event, only NSPasteboard.changeCount, so the app
 // polls. These track the last count seen and the count after our own last write.
+// One pasteboard serves the whole process, so this state is application-scoped,
+// not per-window.
 var g_pb_last_seen: NSInteger = 0;
 var g_pb_own: NSInteger = 0;
 var g_pb_primed: bool = false;
 
 // True once each time the clipboard changes from outside this app. The first call
 // only baselines (no spurious event for whatever was already on the clipboard); our
-// own writes are recognised via g_pb_own and never reported.
+// own writes are recognised via g_pb_own and never reported. Edge-triggered: the
+// call that sees a change consumes it, so with several windows poll it from one
+// place rather than each window's frame, or only the first to poll learns of it.
 pub fn clipboard_changed_external() bool {
     const pb = general_pasteboard() orelse return false;
     const c: NSInteger = objc.msg_send(NSInteger, pb, "changeCount", .{});
