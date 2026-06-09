@@ -53,36 +53,77 @@ const InstanceBuffer = struct {
     capacity: u32 = 0,
 };
 
-const BgraSurfaceState = struct {
+const FrameSurfaceState = struct {
     tex: ?*anyopaque = null,
     srv: ?*anyopaque = null,
+    chroma_tex: ?*anyopaque = null,
+    chroma_srv: ?*anyopaque = null,
     // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 };
 
-// CPU-filled BGRA surface; its D3D texture is reused so live video does not churn
+const SurfaceFormat = enum { bgra, nv12 };
+const Plane = enum { luma, chroma };
+
+// CPU-filled frame surface; its D3D textures are reused so live video does not churn
 // GPU objects while frames arrive.
-pub const BgraSurface = struct {
+pub const FrameSurface = struct {
+    format: SurfaceFormat,
     width: u32,
     height: u32,
     stride: u32,
     pixels: [*]u8,
-    state: BgraSurfaceState = .{},
+    chroma_stride: u32 = 0,
+    chroma_pixels: ?[*]u8 = null,
+    state: FrameSurfaceState = .{},
 
-    pub fn init(width: u32, height: u32, stride: u32, pixels: [*]u8) BgraSurface {
+    pub fn init_bgra(width: u32, height: u32, stride: u32, pixels: [*]u8) FrameSurface {
         std.debug.assert(width > 0);
         std.debug.assert(height > 0);
         std.debug.assert(stride >= width * 4);
-        return .{ .width = width, .height = height, .stride = stride, .pixels = pixels };
+        return .{
+            .format = .bgra,
+            .width = width,
+            .height = height,
+            .stride = stride,
+            .pixels = pixels,
+        };
     }
 
-    pub fn available(self: *const BgraSurface) bool {
+    pub fn init_nv12(
+        width: u32,
+        height: u32,
+        y_stride: u32,
+        y_pixels: [*]u8,
+        uv_stride: u32,
+        uv_pixels: [*]u8,
+    ) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        std.debug.assert(y_stride >= width);
+        std.debug.assert(uv_stride >= width);
+        return .{
+            .format = .nv12,
+            .width = width,
+            .height = height,
+            .stride = y_stride,
+            .pixels = y_pixels,
+            .chroma_stride = uv_stride,
+            .chroma_pixels = uv_pixels,
+        };
+    }
+
+    pub fn available(self: *const FrameSurface) bool {
         std.debug.assert(self.state.refs.load(.acquire) >= 1);
         return self.state.refs.load(.acquire) == 1;
     }
 
-    pub fn deinit(self: *BgraSurface) void {
+    pub fn deinit(self: *FrameSurface) void {
         std.debug.assert(self.state.refs.load(.acquire) == 1);
+        com.release(&self.state.chroma_srv);
+        com.release(&self.state.chroma_tex);
         com.release(&self.state.srv);
         com.release(&self.state.tex);
     }
@@ -129,6 +170,7 @@ pub const Renderer = struct {
     line_pipeline: Pipeline = .{},
     ring_pipeline: Pipeline = .{},
     frame_pipeline: Pipeline = .{},
+    frame_nv12_pipeline: Pipeline = .{},
 
     quad_buffer: InstanceBuffer = .{},
     sprite_buffer: InstanceBuffer = .{},
@@ -246,10 +288,10 @@ pub const Renderer = struct {
             com.release(&ib.buffer);
         }
         for ([_]*Pipeline{
-            &self.quad_pipeline,     &self.text_pipeline, &self.color_sprite_pipeline,
-            &self.polyline_pipeline, &self.line_pipeline, &self.ring_pipeline,
-            &self.frame_pipeline,    &self.blit_pipeline, &self.blur_h_pipeline,
-            &self.blur_v_pipeline,
+            &self.quad_pipeline,     &self.text_pipeline,       &self.color_sprite_pipeline,
+            &self.polyline_pipeline, &self.line_pipeline,       &self.ring_pipeline,
+            &self.frame_pipeline,    &self.frame_nv12_pipeline, &self.blit_pipeline,
+            &self.blur_h_pipeline,   &self.blur_v_pipeline,
         }) |p| {
             com.release(&p.vs);
             com.release(&p.ps);
@@ -263,8 +305,8 @@ pub const Renderer = struct {
         return @ptrCast(self.device);
     }
 
-    // The shared facade keeps the macOS import name; Windows accepts this BGRA
-    // surface shape and returns one SRV.
+    // The shared facade keeps the macOS import name; Windows accepts CPU-backed
+    // frame surfaces and returns the SRVs needed by their format.
     pub const Nv12Textures = struct {
         luma: *anyopaque,
         chroma: ?*anyopaque,
@@ -275,26 +317,29 @@ pub const Renderer = struct {
     };
 
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
-        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
         std.debug.assert(surface.width > 0);
         std.debug.assert(surface.height > 0);
-        return self.import_bgra(surface);
+        return switch (surface.format) {
+            .bgra => self.import_bgra(surface),
+            .nv12 => self.import_nv12_surface(surface),
+        };
     }
 
     pub fn release_cv_texture(ref: *anyopaque) void {
-        const surface: *BgraSurface = @ptrCast(@alignCast(ref));
+        const surface: *FrameSurface = @ptrCast(@alignCast(ref));
         const old = surface.state.refs.fetchSub(1, .acq_rel);
         std.debug.assert(old > 1);
     }
 
     pub fn retain_surface(pixel_buffer: *anyopaque) void {
-        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
         const old = surface.state.refs.fetchAdd(1, .acq_rel);
         std.debug.assert(old >= 1);
     }
 
     pub fn release_surface(pixel_buffer: *anyopaque) void {
-        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
         const old = surface.state.refs.fetchSub(1, .acq_rel);
         std.debug.assert(old > 1);
     }
@@ -303,7 +348,7 @@ pub const Renderer = struct {
         _ = self;
     }
 
-    fn import_bgra(self: *Renderer, surface: *BgraSurface) ?Nv12Textures {
+    fn import_bgra(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
         std.debug.assert(surface.width > 0);
         std.debug.assert(surface.height > 0);
         std.debug.assert(surface.stride >= surface.width * 4);
@@ -323,7 +368,44 @@ pub const Renderer = struct {
         };
     }
 
-    fn ensure_bgra_surface(self: *Renderer, surface: *BgraSurface) void {
+    fn import_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width % 2 == 0);
+        std.debug.assert(surface.height % 2 == 0);
+        std.debug.assert(surface.stride >= surface.width);
+        std.debug.assert(surface.chroma_stride >= surface.width);
+        std.debug.assert(surface.chroma_pixels != null);
+        self.ensure_nv12_surface(surface);
+        const luma = surface.state.srv orelse return null;
+        const chroma = surface.state.chroma_srv orelse return null;
+        self.context.update_subresource(
+            surface.state.tex.?,
+            0,
+            null,
+            surface.pixels,
+            surface.stride,
+            0,
+        );
+        self.context.update_subresource(
+            surface.state.chroma_tex.?,
+            0,
+            null,
+            surface.chroma_pixels.?,
+            surface.chroma_stride,
+            0,
+        );
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = luma,
+            .chroma = chroma,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn ensure_bgra_surface(self: *Renderer, surface: *FrameSurface) void {
         if (surface.state.tex != null and surface.state.srv != null) return;
         std.debug.assert(surface.state.tex == null);
         std.debug.assert(surface.state.srv == null);
@@ -349,6 +431,54 @@ pub const Renderer = struct {
         const hr = self.device.create_srv(surface.state.tex.?, &srv_desc, &surface.state.srv);
         if (com.failed(hr)) {
             com.release(&surface.state.tex);
+        }
+    }
+
+    fn ensure_nv12_surface(self: *Renderer, surface: *FrameSurface) void {
+        if (surface.state.tex != null and surface.state.chroma_tex != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.chroma_tex == null);
+        self.ensure_plane(surface, .luma);
+        self.ensure_plane(surface, .chroma);
+        if (surface.state.tex == null or surface.state.chroma_tex == null) {
+            com.release(&surface.state.chroma_srv);
+            com.release(&surface.state.chroma_tex);
+            com.release(&surface.state.srv);
+            com.release(&surface.state.tex);
+        }
+    }
+
+    fn ensure_plane(self: *Renderer, surface: *FrameSurface, plane: Plane) void {
+        const chroma = plane == .chroma;
+        const width = if (chroma) surface.width / 2 else surface.width;
+        const height = if (chroma) surface.height / 2 else surface.height;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = format,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        const tex_slot = if (chroma) &surface.state.chroma_tex else &surface.state.tex;
+        const srv_slot = if (chroma) &surface.state.chroma_srv else &surface.state.srv;
+        if (com.failed(self.device.create_texture2d(&desc, null, tex_slot))) return;
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = format,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        const hr = self.device.create_srv(tex_slot.*.?, &srv_desc, srv_slot);
+        if (com.failed(hr)) {
+            com.release(tex_slot);
         }
     }
 
@@ -730,23 +860,29 @@ pub const Renderer = struct {
     fn encode_frame_batch(self: *Renderer, batch: []const Primitive) void {
         const cb = self.frame_cb orelse return;
         if (batch.len > MAX_FRAMES) return;
-        const vs = self.frame_pipeline.vs orelse return;
-        const ps = self.frame_pipeline.ps orelse return;
         var null_srv = [_]?*anyopaque{null};
-        self.context.vs_set_shader(vs);
-        self.context.ps_set_shader(ps);
         var frame_cbs = [_]?*anyopaque{cb};
         self.context.vs_set_constant_buffers(1, 1, &frame_cbs);
         self.context.ps_set_constant_buffers(1, 1, &frame_cbs);
         for (batch) |prim| {
             const f = prim.frame;
-            if (f.tex_cbcr != null) continue;
+            const nv12 = f.tex_cbcr != null;
+            const pipeline = if (nv12) self.frame_nv12_pipeline else self.frame_pipeline;
+            const vs = pipeline.vs orelse continue;
+            const ps = pipeline.ps orelse continue;
             const srv = f.tex orelse continue;
             if (!self.update_frame_cb(cb, f)) continue;
+            self.context.vs_set_shader(vs);
+            self.context.ps_set_shader(ps);
             var srvs = [_]?*anyopaque{srv};
             self.context.ps_set_shader_resources(0, 1, &srvs);
+            if (f.tex_cbcr) |chroma| {
+                var chroma_srvs = [_]?*anyopaque{chroma};
+                self.context.ps_set_shader_resources(1, 1, &chroma_srvs);
+            }
             self.context.draw_instanced(6, 1, 0, 0);
             self.context.ps_set_shader_resources(0, 1, &null_srv);
+            self.context.ps_set_shader_resources(1, 1, &null_srv);
         }
     }
 
@@ -763,7 +899,7 @@ pub const Renderer = struct {
             .bounds = f.bounds,
             .clip_bounds = f.clip_bounds,
             .opacity = f.opacity,
-            // BGRA ignores this; the shared uniform layout reserves it for NV12.
+            // BGRA ignores this; NV12 reads the same uniform layout.
             .csc = f.csc,
         };
         self.context.unmap(cb, 0);
@@ -875,6 +1011,11 @@ pub const Renderer = struct {
             "ring_chart_fragment",
         );
         self.frame_pipeline = try self.make_pipeline(compile, "frame_vertex", "frame_fragment");
+        self.frame_nv12_pipeline = try self.make_pipeline(
+            compile,
+            "frame_vertex",
+            "frame_nv12_fragment",
+        );
         self.blit_pipeline = try self.make_pipeline(compile, "blit_vertex", "blit_fragment");
         self.blur_h_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_h_fragment");
         self.blur_v_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_v_fragment");

@@ -382,6 +382,7 @@ cbuffer FrameParams : register(b1) {
 };
 
 Texture2D frame_tex : register(t0);
+Texture2D frame_chroma_tex : register(t1);
 
 struct FrameOut {
     float4 position : SV_Position;
@@ -405,6 +406,17 @@ FrameOut frame_vertex(uint vid : SV_VertexID) {
 float4 frame_fragment(FrameOut input) : SV_Target {
     float4 c = frame_tex.Sample(atlas_sampler, input.uv);
     return float4(c.rgb, c.a * input.opacity);
+}
+
+float4 frame_nv12_fragment(FrameOut input) : SV_Target {
+    float y = frame_tex.Sample(atlas_sampler, input.uv).r;
+    float2 cbcr = frame_chroma_tex.Sample(atlas_sampler, input.uv).rg;
+    float3 yuv = float3(y, cbcr.x, cbcr.y);
+    float3 rgb = float3(
+        dot(frame_csc0.xyz, yuv) + frame_csc0.w,
+        dot(frame_csc1.xyz, yuv) + frame_csc1.w,
+        dot(frame_csc2.xyz, yuv) + frame_csc2.w);
+    return float4(saturate(rgb), input.opacity);
 }
 
 // ---- Fullscreen blit (modal backdrop composite) ---------------------------

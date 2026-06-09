@@ -12,6 +12,7 @@ const BOOL = win32.BOOL;
 
 pub const DXGI_FORMAT_UNKNOWN: u32 = 0;
 pub const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
+pub const DXGI_FORMAT_R8G8_UNORM: u32 = 49;
 pub const DXGI_FORMAT_R8_UNORM: u32 = 61;
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
 

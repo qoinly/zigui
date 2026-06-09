@@ -8,7 +8,7 @@ const impl = switch (builtin.os.tag) {
 
 pub const Renderer = impl.Renderer;
 pub const ClearColor = if (builtin.os.tag == .macos) impl.MTLClearColor else impl.ClearColor;
-pub const BgraSurface = if (builtin.os.tag == .windows) impl.BgraSurface else void;
+pub const FrameSurface = if (builtin.os.tag == .windows) impl.FrameSurface else void;
 
 // Drawables the backend keeps in flight; the external-frame texture ring sizes
 // itself off this so it never overwrites a slot the GPU is still reading.

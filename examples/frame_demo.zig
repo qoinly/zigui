@@ -60,12 +60,14 @@ const CH = H / 2;
 // holds: the live-reference window is the source's slots (3) plus frames in flight
 // (max_frames_in_flight + 1 = 4) = 7, so 8 always leaves the refilled one free.
 const pool_size = 8;
-const WinSurface = if (builtin.os.tag == .windows) zigui.BgraSurface else struct {};
+const WinSurface = if (builtin.os.tag == .windows) zigui.FrameSurface else struct {};
 const WinPool = if (builtin.os.tag == .windows) [pool_size]WinSurface else void;
-const WinPixels = if (builtin.os.tag == .windows) [pool_size][W * H * 4]u8 else void;
+const WinLuma = if (builtin.os.tag == .windows) [pool_size][W * H]u8 else void;
+const WinChroma = if (builtin.os.tag == .windows) [pool_size][W * H / 2]u8 else void;
 
 // Keep demo pixels off the main stack; the producer rewrites this fixed pool.
-var win_pixels: WinPixels = if (builtin.os.tag == .windows) undefined else {};
+var win_luma: WinLuma = if (builtin.os.tag == .windows) undefined else {};
+var win_chroma: WinChroma = if (builtin.os.tag == .windows) undefined else {};
 
 const App = struct {
     source: zigui.FrameSource = undefined,
@@ -120,7 +122,7 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
         }
     }
     const label = if (builtin.os.tag == .windows)
-        "External frame: BGRA textured quad on D3D11"
+        "External frame: NV12 YUV->RGB on D3D11"
     else
         "External frame: zero-copy NV12, YUV->RGB on the gpu";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
@@ -153,7 +155,14 @@ fn init_windows_pool(app: *App) void {
     if (app.win_pool_ready) return;
     switch (builtin.os.tag) {
         .windows => for (&app.win_pool, 0..) |*surface, i| {
-            surface.* = zigui.BgraSurface.init(W, H, W * 4, win_pixels[i][0..].ptr);
+            surface.* = zigui.FrameSurface.init_nv12(
+                W,
+                H,
+                W,
+                win_luma[i][0..].ptr,
+                W,
+                win_chroma[i][0..].ptr,
+            );
         },
         else => {},
     }
@@ -179,7 +188,7 @@ fn produce_windows(app: *App) void {
                     sleep_ms(4);
                     continue;
                 }
-                fill_bgra(surface, t);
+                fill_nv12_windows(surface, t);
                 app.source.submit_surface(surface, .{});
                 t +%= 1;
                 sleep_ms(16);
@@ -189,7 +198,7 @@ fn produce_windows(app: *App) void {
     }
 }
 
-fn fill_bgra(surface: *WinSurface, t: u32) void {
+fn fill_nv12_windows(surface: *WinSurface, t: u32) void {
     switch (builtin.os.tag) {
         .windows => {
             std.debug.assert(surface.width == W);
@@ -200,11 +209,17 @@ fn fill_bgra(surface: *WinSurface, t: u32) void {
                 var col: usize = 0;
                 while (col < W) : (col += 1) {
                     const grid = ((col + off) % 32 == 0) or ((row + off) % 32 == 0);
-                    const o = row * surface.stride + col * 4;
-                    surface.pixels[o + 0] = @intCast(col * 255 / (W - 1)); // B
-                    surface.pixels[o + 1] = if (grid) 255 else 90; // G
-                    surface.pixels[o + 2] = @intCast(row * 255 / (H - 1)); // R
-                    surface.pixels[o + 3] = 255; // A
+                    surface.pixels[row * surface.stride + col] = if (grid) 235 else 110;
+                }
+            }
+            const chroma = surface.chroma_pixels.?;
+            var cy: usize = 0;
+            while (cy < CH) : (cy += 1) {
+                var cx: usize = 0;
+                while (cx < CW) : (cx += 1) {
+                    const o = cy * surface.chroma_stride + cx * 2;
+                    chroma[o + 0] = @intCast(16 + cx * 224 / (CW - 1)); // Cb
+                    chroma[o + 1] = @intCast(16 + cy * 224 / (CH - 1)); // Cr
                 }
             }
         },
