@@ -557,6 +557,10 @@ fn wnd_proc(
         win32.WM_SIZE,
         win32.WM_EXITSIZEMOVE,
         => handle_size_message(msg),
+        win32.WM_DISPLAYCHANGE,
+        win32.WM_DPICHANGED,
+        win32.WM_SETTINGCHANGE,
+        => display_cache_reset(),
         win32.WM_CTLCOLOREDIT => if (handle_edit_color(w)) |r| return r,
         win32.WM_SETCURSOR => if (handle_set_cursor(l)) |r| return r,
         win32.WM_DESTROY => return handle_destroy(),
@@ -982,6 +986,10 @@ const DisplayList = struct {
     count: u32 = 0,
 };
 
+// Count-then-bounds callers reuse this until Windows reports display or DPI changes.
+var g_display_cache: DisplayList = .{};
+var g_display_cache_valid: bool = false;
+
 fn lparam_from_pointer(ptr: anytype) win32.LPARAM {
     const address = @intFromPtr(ptr);
     std.debug.assert(address != 0);
@@ -1121,6 +1129,7 @@ fn display_anchor_index(list: *const DisplayList) ?u32 {
 fn display_place_all(list: *DisplayList) void {
     std.debug.assert(list.count <= DISPLAYS_MAX);
     if (list.count == 0) return;
+    // Mixed-DPI edge conflicts retry under the fixed display cap.
     var invalidations: u32 = 0;
     while (invalidations < DISPLAYS_MAX) : (invalidations += 1) {
         display_reset_placements(list);
@@ -1245,13 +1254,26 @@ fn display_list() DisplayList {
     return list;
 }
 
+fn display_snapshot() *const DisplayList {
+    if (!g_display_cache_valid) {
+        g_display_cache = display_list();
+        g_display_cache_valid = true;
+    }
+    std.debug.assert(g_display_cache.count <= DISPLAYS_MAX);
+    return &g_display_cache;
+}
+
+fn display_cache_reset() void {
+    g_display_cache_valid = false;
+}
+
 pub fn display_count() u32 {
-    return display_list().count;
+    return display_snapshot().count;
 }
 
 pub fn display_bounds(index: u32) geometry.BoundsF {
     if (index >= DISPLAYS_MAX) return .{};
-    const list = display_list();
+    const list = display_snapshot();
     if (index >= list.count) return .{};
     return list.items[index].bounds;
 }
