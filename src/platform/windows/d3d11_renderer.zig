@@ -53,6 +53,13 @@ const InstanceBuffer = struct {
     capacity: u32 = 0,
 };
 
+const BgraSurfaceState = struct {
+    tex: ?*anyopaque = null,
+    srv: ?*anyopaque = null,
+    // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
+    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+};
+
 // CPU-filled BGRA surface; its D3D texture is reused so live video does not churn
 // GPU objects while frames arrive.
 pub const BgraSurface = struct {
@@ -60,10 +67,7 @@ pub const BgraSurface = struct {
     height: u32,
     stride: u32,
     pixels: [*]u8,
-    tex: ?*anyopaque = null,
-    srv: ?*anyopaque = null,
-    // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
-    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+    state: BgraSurfaceState = .{},
 
     pub fn init(width: u32, height: u32, stride: u32, pixels: [*]u8) BgraSurface {
         std.debug.assert(width > 0);
@@ -73,14 +77,14 @@ pub const BgraSurface = struct {
     }
 
     pub fn available(self: *const BgraSurface) bool {
-        std.debug.assert(self.refs.load(.acquire) >= 1);
-        return self.refs.load(.acquire) == 1;
+        std.debug.assert(self.state.refs.load(.acquire) >= 1);
+        return self.state.refs.load(.acquire) == 1;
     }
 
     pub fn deinit(self: *BgraSurface) void {
-        std.debug.assert(self.refs.load(.acquire) == 1);
-        com.release(&self.srv);
-        com.release(&self.tex);
+        std.debug.assert(self.state.refs.load(.acquire) == 1);
+        com.release(&self.state.srv);
+        com.release(&self.state.tex);
     }
 };
 
@@ -279,19 +283,19 @@ pub const Renderer = struct {
 
     pub fn release_cv_texture(ref: *anyopaque) void {
         const surface: *BgraSurface = @ptrCast(@alignCast(ref));
-        const old = surface.refs.fetchSub(1, .acq_rel);
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
         std.debug.assert(old > 1);
     }
 
     pub fn retain_surface(pixel_buffer: *anyopaque) void {
         const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
-        const old = surface.refs.fetchAdd(1, .acq_rel);
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
         std.debug.assert(old >= 1);
     }
 
     pub fn release_surface(pixel_buffer: *anyopaque) void {
         const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
-        const old = surface.refs.fetchSub(1, .acq_rel);
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
         std.debug.assert(old > 1);
     }
 
@@ -304,10 +308,10 @@ pub const Renderer = struct {
         std.debug.assert(surface.height > 0);
         std.debug.assert(surface.stride >= surface.width * 4);
         self.ensure_bgra_surface(surface);
-        const tex = surface.tex orelse return null;
-        const srv = surface.srv orelse return null;
+        const tex = surface.state.tex orelse return null;
+        const srv = surface.state.srv orelse return null;
         self.context.update_subresource(tex, 0, null, surface.pixels, surface.stride, 0);
-        const old = surface.refs.fetchAdd(1, .acq_rel);
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
         std.debug.assert(old >= 1);
         return .{
             .luma = srv,
@@ -320,9 +324,9 @@ pub const Renderer = struct {
     }
 
     fn ensure_bgra_surface(self: *Renderer, surface: *BgraSurface) void {
-        if (surface.tex != null and surface.srv != null) return;
-        std.debug.assert(surface.tex == null);
-        std.debug.assert(surface.srv == null);
+        if (surface.state.tex != null and surface.state.srv != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.srv == null);
         const desc = d3d11.D3D11_TEXTURE2D_DESC{
             .Width = surface.width,
             .Height = surface.height,
@@ -335,15 +339,16 @@ pub const Renderer = struct {
             .CPUAccessFlags = 0,
             .MiscFlags = 0,
         };
-        if (com.failed(self.device.create_texture2d(&desc, null, &surface.tex))) return;
+        if (com.failed(self.device.create_texture2d(&desc, null, &surface.state.tex))) return;
         const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
             .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
             .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
             .u0 = 0,
             .u1 = 1,
         };
-        if (com.failed(self.device.create_srv(surface.tex.?, &srv_desc, &surface.srv))) {
-            com.release(&surface.tex);
+        const hr = self.device.create_srv(surface.state.tex.?, &srv_desc, &surface.state.srv);
+        if (com.failed(hr)) {
+            com.release(&surface.state.tex);
         }
     }
 
@@ -725,9 +730,11 @@ pub const Renderer = struct {
     fn encode_frame_batch(self: *Renderer, batch: []const Primitive) void {
         const cb = self.frame_cb orelse return;
         if (batch.len > MAX_FRAMES) return;
+        const vs = self.frame_pipeline.vs orelse return;
+        const ps = self.frame_pipeline.ps orelse return;
         var null_srv = [_]?*anyopaque{null};
-        self.context.vs_set_shader(self.frame_pipeline.vs);
-        self.context.ps_set_shader(self.frame_pipeline.ps);
+        self.context.vs_set_shader(vs);
+        self.context.ps_set_shader(ps);
         var frame_cbs = [_]?*anyopaque{cb};
         self.context.vs_set_constant_buffers(1, 1, &frame_cbs);
         self.context.ps_set_constant_buffers(1, 1, &frame_cbs);
@@ -747,11 +754,16 @@ pub const Renderer = struct {
         var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
         if (com.failed(self.context.map(cb, 0, d3d11.D3D11_MAP_WRITE_DISCARD, &mapped)))
             return false;
-        const dst: *FrameGpu = @ptrCast(@alignCast(mapped.pData.?));
+        const ptr = mapped.pData orelse {
+            self.context.unmap(cb, 0);
+            return false;
+        };
+        const dst: *FrameGpu = @ptrCast(@alignCast(ptr));
         dst.* = .{
             .bounds = f.bounds,
             .clip_bounds = f.clip_bounds,
             .opacity = f.opacity,
+            // BGRA ignores this; the shared uniform layout reserves it for NV12.
             .csc = f.csc,
         };
         self.context.unmap(cb, 0);

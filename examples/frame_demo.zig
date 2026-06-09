@@ -60,7 +60,7 @@ const CH = H / 2;
 // holds: the live-reference window is the source's slots (3) plus frames in flight
 // (max_frames_in_flight + 1 = 4) = 7, so 8 always leaves the refilled one free.
 const pool_size = 8;
-const WinSurface = if (builtin.os.tag == .windows) zigui.BgraFrameSurface else struct {};
+const WinSurface = if (builtin.os.tag == .windows) zigui.BgraSurface else struct {};
 const WinPool = if (builtin.os.tag == .windows) [pool_size]WinSurface else void;
 const WinPixels = if (builtin.os.tag == .windows) [pool_size][W * H * 4]u8 else void;
 
@@ -153,7 +153,7 @@ fn init_windows_pool(app: *App) void {
     if (app.win_pool_ready) return;
     switch (builtin.os.tag) {
         .windows => for (&app.win_pool, 0..) |*surface, i| {
-            surface.* = zigui.BgraFrameSurface.init(W, H, W * 4, win_pixels[i][0..].ptr);
+            surface.* = zigui.BgraSurface.init(W, H, W * 4, win_pixels[i][0..].ptr);
         },
         else => {},
     }

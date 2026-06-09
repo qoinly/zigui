@@ -120,7 +120,7 @@ pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
 // The backend handle a FrameSource needs to allocate its textures. Reachable only
 // during a render pass (the render context owns the renderer).
 pub const Renderer = renderer.Renderer;
-pub const BgraFrameSurface = renderer.BgraSurface;
+pub const BgraSurface = renderer.BgraSurface;
 pub fn renderer_handle() *Renderer {
     return &frame_ctx.get().paint.renderer;
 }
