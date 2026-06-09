@@ -401,7 +401,10 @@ pub const PaintContext = struct {
         self.hitboxes.clearRetainingCapacity();
 
         const tbar = self.handle.titlebar;
-        const top: f32 = if (tbar.enabled) @floatCast(tbar.height) else 0;
+        // Fullscreen hides the window chrome, so drop our custom band too and let the
+        // body fill the whole screen.
+        const band_on = tbar.enabled and !self.handle.is_fullscreen();
+        const top: f32 = if (band_on) @floatCast(tbar.height) else 0;
         // macOS reserves a left gutter for the repositioned traffic lights;
         // Windows window controls live in the native caption, not the band, so
         // the band's content starts at content_left with no gutter.
@@ -411,7 +414,7 @@ pub const PaintContext = struct {
             @floatCast(tbar.content_left + TRAFFIC_CLUSTER_W);
         // Band chrome first (bg + separator) so the consumer's titlebar content
         // draws on top. The library owns only the band and the traffic lights.
-        if (tbar.enabled) {
+        if (band_on) {
             const th = self.handle.theme;
             var band = Quad.init(0, 0, pane_w, top);
             _ = band.set_background(th.background);
@@ -444,7 +447,7 @@ pub const PaintContext = struct {
             },
             // Windows reserves the right cluster for the window-control buttons so
             // consumer titlebar content does not draw under them.
-            .titlebar = if (tbar.enabled) .{
+            .titlebar = if (band_on) .{
                 .origin = .{ .x = tb_content_x, .y = 0 },
                 .size = .{
                     .width = @max(pane_w - tb_content_x - custom_shell.CAPTION_CLUSTER_W, 0),

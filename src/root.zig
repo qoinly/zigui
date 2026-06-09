@@ -154,6 +154,22 @@ pub fn set_clipboard_text(s: []const u8) void {
 pub fn clipboard_changed() bool {
     return custom_shell.clipboard_changed_external();
 }
+
+// Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
+// window; display_bounds(i) gives monitor i's frame in points so the app can size a
+// stream or place a window per screen.
+pub fn set_fullscreen(enable: bool) void {
+    frame_ctx.get().paint.handle.set_fullscreen(enable);
+}
+pub fn fullscreen() bool {
+    return frame_ctx.get().paint.handle.is_fullscreen();
+}
+pub fn display_count() u32 {
+    return custom_shell.display_count();
+}
+pub fn display_bounds(index: u32) BoundsF {
+    return custom_shell.display_bounds(index);
+}
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;

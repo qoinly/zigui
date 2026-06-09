@@ -2,6 +2,7 @@ const std = @import("std");
 const objc = @import("objc.zig");
 const types = @import("../../window/types.zig");
 const input = @import("../../input.zig");
+const geometry = @import("../../geometry.zig");
 
 const Id = objc.Id;
 const Sel = objc.Sel;
@@ -17,6 +18,7 @@ const NSWindowStyleMaskTitled: NSUInteger = 1 << 0;
 const NSWindowStyleMaskClosable: NSUInteger = 1 << 1;
 const NSWindowStyleMaskMiniaturizable: NSUInteger = 1 << 2;
 const NSWindowStyleMaskResizable: NSUInteger = 1 << 3;
+const NSWindowStyleMaskFullScreen: NSUInteger = 1 << 14;
 const NSWindowStyleMaskFullSizeContentView: NSUInteger = 1 << 15;
 const NSBackingStoreBuffered: NSUInteger = 2;
 
@@ -605,6 +607,19 @@ pub const CustomShellHandle = struct {
         objc.msg_send(void, self.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
     }
 
+    pub fn is_fullscreen(self: CustomShellHandle) bool {
+        const mask: NSUInteger = objc.msg_send(NSUInteger, self.window, "styleMask", .{});
+        return (mask & NSWindowStyleMaskFullScreen) != 0;
+    }
+
+    // Native fullscreen (own Space); the window delegate re-centers the traffic
+    // lights on exit. toggleFullScreen only toggles, so guard to make it absolute.
+    pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
+        std.debug.assert(@intFromPtr(self.window) != 0);
+        if (self.is_fullscreen() == on) return;
+        objc.msg_send(void, self.window, "toggleFullScreen:", .{@as(?Id, null)});
+    }
+
     pub fn get_content_size(self: CustomShellHandle) NSSize {
         const frame: NSRect = objc.msg_send(NSRect, self.content_view, "frame", .{});
         return frame.size;
@@ -1077,3 +1092,31 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
 
 // Decouple/recouple the hardware mouse from the on-screen cursor (CGError).
 extern "CoreGraphics" fn CGAssociateMouseAndMouseCursorPosition(connected: c_int) c_int;
+
+fn screen_list() ?Id {
+    const NSScreen = objc.get_class("NSScreen") orelse return null;
+    const screens = objc.msg_send(Id, NSScreen, "screens", .{});
+    return if (@intFromPtr(screens) == 0) null else screens;
+}
+
+pub fn display_count() u32 {
+    const screens = screen_list() orelse return 0;
+    const n: NSUInteger = objc.msg_send(NSUInteger, screens, "count", .{});
+    std.debug.assert(n <= std.math.maxInt(u32));
+    return @intCast(n);
+}
+
+// Display `index` frame in points, in the global screen space.
+pub fn display_bounds(index: u32) geometry.BoundsF {
+    const screens = screen_list() orelse return .{};
+    const n: NSUInteger = objc.msg_send(NSUInteger, screens, "count", .{});
+    if (index >= n) return .{};
+    const s = objc.msg_send(Id, screens, "objectAtIndex:", .{@as(NSUInteger, index)});
+    const f: NSRect = objc.msg_send(NSRect, s, "frame", .{});
+    return geometry.BoundsF.init(
+        @floatCast(f.origin.x),
+        @floatCast(f.origin.y),
+        @floatCast(f.size.width),
+        @floatCast(f.size.height),
+    );
+}

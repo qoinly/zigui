@@ -32,6 +32,8 @@ pub const text_field_value = impl.text_field_value;
 pub const pasteboard_read_into = impl.pasteboard_read_into;
 pub const pasteboard_write_string = impl.pasteboard_write_string;
 pub const clipboard_changed_external = impl.clipboard_changed_external;
+pub const display_count = impl.display_count;
+pub const display_bounds = impl.display_bounds;
 
 // Windows draws its window controls into the title-bar band itself (the macOS
 // backend uses native traffic lights). These hooks are no-ops elsewhere; the

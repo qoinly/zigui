@@ -157,6 +157,16 @@ pub const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 // SetWindowLongPtr indices.
 pub const GWLP_USERDATA: i32 = -21;
 pub const GWLP_WNDPROC: i32 = -4;
+pub const GWL_STYLE: i32 = -16;
+
+// MonitorFromWindow: pick the monitor the window is mostly on.
+pub const MONITOR_DEFAULTTONEAREST: DWORD = 0x00000002;
+pub const MONITORINFO = extern struct {
+    cbSize: DWORD,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: DWORD,
+};
 
 // Window messages.
 pub const WM_DESTROY: UINT = 0x0002;
@@ -325,6 +335,11 @@ pub extern "user32" fn PostThreadMessageW(
 ) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
+pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn GetMonitorInfoW(
+    monitor: ?*anyopaque,
+    info: *MONITORINFO,
+) callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowLongPtrW(
     hwnd: HWND,
     index: i32,

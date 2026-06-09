@@ -110,6 +110,22 @@ pub fn build(b: *std.Build) void {
     const clip_demo_step = b.step("clipboard-demo", "Build + run the clipboard demo");
     clip_demo_step.dependOn(&clip_demo_run.step);
 
+    // Example: display-demo - smoke test for display enumeration + fullscreen toggle.
+    const disp_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/display_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const disp_demo_exe = b.addExecutable(.{
+        .name = "display-demo",
+        .root_module = disp_demo_mod,
+    });
+    b.installArtifact(disp_demo_exe);
+    const disp_demo_run = b.addRunArtifact(disp_demo_exe);
+    const disp_demo_step = b.step("display-demo", "Build + run the display/fullscreen demo");
+    disp_demo_step.dependOn(&disp_demo_run.step);
+
     // Offline codegen: regenerate src/icon_lucide_data.zig from the Lucide SVG
     // set. The SVG dir lives outside the repo, so it must be passed:
     //   zig build icongen -Dlucide-dir=/path/to/lucide/icons
