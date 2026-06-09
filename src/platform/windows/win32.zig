@@ -25,6 +25,7 @@ pub const HCURSOR = *opaque {};
 pub const HBRUSH = *opaque {};
 pub const HMENU = *opaque {};
 pub const HDC = *opaque {};
+pub const HMONITOR = *opaque {};
 pub const HFONT = *opaque {};
 pub const HGDIOBJ = *opaque {};
 pub const HGLOBAL = *anyopaque;
@@ -55,6 +56,8 @@ pub const MSG = extern struct {
 };
 
 pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+pub const MONITORENUMPROC =
+    *const fn (HMONITOR, ?HDC, *RECT, LPARAM) callconv(.winapi) BOOL;
 
 pub const WNDCLASSEXW = extern struct {
     cbSize: UINT,
@@ -166,6 +169,13 @@ pub const MONITORINFO = extern struct {
     rcMonitor: RECT,
     rcWork: RECT,
     dwFlags: DWORD,
+};
+pub const MONITORINFOF_PRIMARY: DWORD = 0x00000001;
+
+pub const MONITOR_DPI_TYPE = enum(UINT) {
+    effective = 0,
+    angular = 1,
+    raw = 2,
 };
 
 // Window messages.
@@ -335,9 +345,15 @@ pub extern "user32" fn PostThreadMessageW(
 ) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
-pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?HMONITOR;
+pub extern "user32" fn EnumDisplayMonitors(
+    hdc: ?HDC,
+    clip: ?*const RECT,
+    proc: MONITORENUMPROC,
+    data: LPARAM,
+) callconv(.winapi) BOOL;
 pub extern "user32" fn GetMonitorInfoW(
-    monitor: ?*anyopaque,
+    monitor: HMONITOR,
     info: *MONITORINFO,
 ) callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowLongPtrW(
@@ -408,6 +424,12 @@ pub extern "gdi32" fn CreateFontW(
 ) callconv(.winapi) ?HFONT;
 
 pub extern "dwmapi" fn DwmFlush() callconv(.winapi) HRESULT;
+pub extern "shcore" fn GetDpiForMonitor(
+    monitor: HMONITOR,
+    dpi_type: MONITOR_DPI_TYPE,
+    dpi_x: *UINT,
+    dpi_y: *UINT,
+) callconv(.winapi) HRESULT;
 pub extern "dwmapi" fn DwmSetWindowAttribute(
     hwnd: HWND,
     attr: DWORD,

@@ -289,25 +289,7 @@ fn set_cursor(kind: CursorKind) void {
 
 pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     const instance = win32.GetModuleHandleW(null) orelse return error.WindowCreateFailed;
-
-    if (!g_class_registered) {
-        const wc = win32.WNDCLASSEXW{
-            .cbSize = @sizeOf(win32.WNDCLASSEXW),
-            .style = win32.CS_HREDRAW | win32.CS_VREDRAW,
-            .lpfnWndProc = wnd_proc,
-            .cbClsExtra = 0,
-            .cbWndExtra = 0,
-            .hInstance = instance,
-            .hIcon = null,
-            .hCursor = win32.LoadCursorW(null, win32.make_int_resource(win32.IDC_ARROW)),
-            .hbrBackground = null,
-            .lpszMenuName = null,
-            .lpszClassName = CLASS_NAME,
-            .hIconSm = null,
-        };
-        if (win32.RegisterClassExW(&wc) == 0) return error.ClassRegisterFailed;
-        g_class_registered = true;
-    }
+    try ensure_window_class(instance);
 
     g_titlebar_height = @floatCast(opts.titlebar.height);
     g_min_w_pt = @floatCast(opts.min_width);
@@ -318,46 +300,9 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     title_buf[@min(tlen, title_buf.len - 1)] = 0;
     const title: [*:0]const u16 = @ptrCast(&title_buf);
 
-    // WS_OVERLAPPEDWINDOW keeps the native min/maximize/snap behavior and the DWM
-    // drop shadow; WM_NCCALCSIZE then removes the visible frame so the painted
-    // band becomes the whole title bar.
-    const hwnd = win32.CreateWindowExW(
-        win32.WS_EX_APPWINDOW,
-        CLASS_NAME,
-        title,
-        win32.WS_OVERLAPPEDWINDOW | win32.WS_CLIPCHILDREN,
-        win32.CW_USEDEFAULT,
-        win32.CW_USEDEFAULT,
-        @intFromFloat(opts.width),
-        @intFromFloat(opts.height),
-        null,
-        null,
-        instance,
-        null,
-    ) orelse return error.WindowCreateFailed;
-
-    // Stripping the frame in WM_NCCALCSIZE drops Win11's auto-rounding, so ask
-    // DWM for it back; tint the 1px border so the window edge reads against a
-    // backdrop of the same color.
-    var corner: u32 = win32.DWMWCP_ROUND;
-    const corner_attr = win32.DWMWA_WINDOW_CORNER_PREFERENCE;
-    _ = win32.DwmSetWindowAttribute(hwnd, corner_attr, &corner, @sizeOf(u32));
-    var border: win32.COLORREF = 0x00555555;
-    const border_sz: win32.DWORD = @sizeOf(win32.COLORREF);
-    _ = win32.DwmSetWindowAttribute(hwnd, win32.DWMWA_BORDER_COLOR, &border, border_sz);
-
-    // CreateWindowExW sizes in raw pixels, but opts.width/height are logical
-    // (DIP); scale to the window's monitor DPI so a high-DPI display opens at the
-    // requested logical size instead of clamping up to the DPI-scaled minimum (a
-    // 200% panel forced the window to its 560x480-logical floor). This reposition
-    // also re-runs WM_NCCALCSIZE so the borderless client takes effect.
-    const scale = scale_for(hwnd);
-    const w_px: i32 = @intFromFloat(opts.width * @as(f64, scale));
-    const h_px: i32 = @intFromFloat(opts.height * @as(f64, scale));
-    std.debug.assert(w_px > 0);
-    std.debug.assert(h_px > 0);
-    const repos_flags = win32.SWP_NOMOVE | win32.SWP_NOZORDER | win32.SWP_FRAMECHANGED;
-    _ = win32.SetWindowPos(hwnd, null, 0, 0, w_px, h_px, repos_flags);
+    const hwnd = try create_shell_window(instance, title, opts.width, opts.height);
+    style_shell_window(hwnd);
+    resize_shell_window(hwnd, opts.width, opts.height);
     _ = win32.ShowWindow(hwnd, win32.SW_SHOW);
     _ = win32.UpdateWindow(hwnd);
 
@@ -369,6 +314,69 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         .theme = theme,
         .titlebar = opts.titlebar,
     };
+}
+
+fn ensure_window_class(instance: win32.HINSTANCE) Error!void {
+    if (g_class_registered) return;
+    const wc = win32.WNDCLASSEXW{
+        .cbSize = @sizeOf(win32.WNDCLASSEXW),
+        .style = win32.CS_HREDRAW | win32.CS_VREDRAW,
+        .lpfnWndProc = wnd_proc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = instance,
+        .hIcon = null,
+        .hCursor = win32.LoadCursorW(null, win32.make_int_resource(win32.IDC_ARROW)),
+        .hbrBackground = null,
+        .lpszMenuName = null,
+        .lpszClassName = CLASS_NAME,
+        .hIconSm = null,
+    };
+    if (win32.RegisterClassExW(&wc) == 0) return error.ClassRegisterFailed;
+    g_class_registered = true;
+}
+
+fn create_shell_window(
+    instance: win32.HINSTANCE,
+    title: [*:0]const u16,
+    width: f64,
+    height: f64,
+) Error!win32.HWND {
+    // WS_OVERLAPPEDWINDOW keeps native snap; WM_NCCALCSIZE removes the frame.
+    return win32.CreateWindowExW(
+        win32.WS_EX_APPWINDOW,
+        CLASS_NAME,
+        title,
+        win32.WS_OVERLAPPEDWINDOW | win32.WS_CLIPCHILDREN,
+        win32.CW_USEDEFAULT,
+        win32.CW_USEDEFAULT,
+        @intFromFloat(width),
+        @intFromFloat(height),
+        null,
+        null,
+        instance,
+        null,
+    ) orelse error.WindowCreateFailed;
+}
+
+fn style_shell_window(hwnd: win32.HWND) void {
+    // WM_NCCALCSIZE drops Win11 auto-rounding, so request it back from DWM.
+    var corner: u32 = win32.DWMWCP_ROUND;
+    const corner_attr = win32.DWMWA_WINDOW_CORNER_PREFERENCE;
+    _ = win32.DwmSetWindowAttribute(hwnd, corner_attr, &corner, @sizeOf(u32));
+    var border: win32.COLORREF = 0x00555555;
+    const border_sz: win32.DWORD = @sizeOf(win32.COLORREF);
+    _ = win32.DwmSetWindowAttribute(hwnd, win32.DWMWA_BORDER_COLOR, &border, border_sz);
+}
+
+fn resize_shell_window(hwnd: win32.HWND, width: f64, height: f64) void {
+    const scale = scale_for(hwnd);
+    const w_px: i32 = @intFromFloat(width * @as(f64, scale));
+    const h_px: i32 = @intFromFloat(height * @as(f64, scale));
+    std.debug.assert(w_px > 0);
+    std.debug.assert(h_px > 0);
+    const flags = win32.SWP_NOMOVE | win32.SWP_NOZORDER | win32.SWP_FRAMECHANGED;
+    _ = win32.SetWindowPos(hwnd, null, 0, 0, w_px, h_px, flags);
 }
 
 fn dispatch_point(hwnd: win32.HWND, l: win32.LPARAM) [2]f32 {
@@ -536,33 +544,71 @@ fn wnd_proc(
     l: win32.LPARAM,
 ) callconv(.winapi) win32.LRESULT {
     switch (msg) {
-        win32.WM_NCCALCSIZE => {
-            if (w != 0) {
-                // Client = whole window. Maximized, inset by the frame padding so
-                // content fits the work area and does not cover the taskbar.
-                if (win32.IsZoomed(hwnd) != 0) {
-                    const params: *win32.NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(l)));
-                    const padded = win32.GetSystemMetrics(win32.SM_CXPADDEDBORDER);
-                    const fx = win32.GetSystemMetrics(win32.SM_CXFRAME) + padded;
-                    const fy = win32.GetSystemMetrics(win32.SM_CYFRAME) + padded;
-                    params.rgrc[0].left += fx;
-                    params.rgrc[0].right -= fx;
-                    params.rgrc[0].top += fy;
-                    params.rgrc[0].bottom -= fy;
-                }
-                return 0;
-            }
-        },
-        win32.WM_GETMINMAXINFO => {
-            // Enforce the app's min window size so it can never shrink below what
-            // the titlebar layout needs (a degenerate band asserts in the kit).
-            const mmi: *win32.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(l)));
-            const scale = scale_for(hwnd);
-            mmi.ptMinTrackSize.x = @intFromFloat(g_min_w_pt * scale);
-            mmi.ptMinTrackSize.y = @intFromFloat(g_min_h_pt * scale);
-            return 0;
-        },
+        win32.WM_NCCALCSIZE => if (handle_nc_calc_size(hwnd, w, l)) |r| return r,
+        win32.WM_GETMINMAXINFO => return handle_minmax(hwnd, l),
         win32.WM_NCHITTEST => return hit_test(hwnd, l),
+        win32.WM_NCMOUSEMOVE,
+        win32.WM_NCMOUSELEAVE,
+        win32.WM_NCLBUTTONDOWN,
+        win32.WM_NCLBUTTONUP,
+        => if (handle_caption_message(hwnd, msg, w)) |r| return r,
+        win32.WM_ERASEBKGND => return 1,
+        win32.WM_ENTERSIZEMOVE,
+        win32.WM_SIZE,
+        win32.WM_EXITSIZEMOVE,
+        => handle_size_message(msg),
+        win32.WM_CTLCOLOREDIT => if (handle_edit_color(w)) |r| return r,
+        win32.WM_SETCURSOR => if (handle_set_cursor(l)) |r| return r,
+        win32.WM_DESTROY => return handle_destroy(),
+        win32.WM_MOUSEMOVE,
+        win32.WM_MOUSELEAVE,
+        win32.WM_LBUTTONDOWN,
+        win32.WM_LBUTTONUP,
+        win32.WM_RBUTTONDOWN,
+        win32.WM_MOUSEWHEEL,
+        => return handle_mouse_message(hwnd, msg, w, l),
+        win32.WM_KEYDOWN,
+        win32.WM_SYSKEYDOWN,
+        win32.WM_CHAR,
+        => if (handle_key_message(msg, w)) |r| return r,
+        else => {},
+    }
+    return win32.DefWindowProcW(hwnd, msg, w, l);
+}
+
+fn handle_nc_calc_size(
+    hwnd: win32.HWND,
+    w: win32.WPARAM,
+    l: win32.LPARAM,
+) ?win32.LRESULT {
+    if (w == 0) return null;
+    if (win32.IsZoomed(hwnd) != 0) {
+        const params: *win32.NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(l)));
+        const padded = win32.GetSystemMetrics(win32.SM_CXPADDEDBORDER);
+        const fx = win32.GetSystemMetrics(win32.SM_CXFRAME) + padded;
+        const fy = win32.GetSystemMetrics(win32.SM_CYFRAME) + padded;
+        params.rgrc[0].left += fx;
+        params.rgrc[0].right -= fx;
+        params.rgrc[0].top += fy;
+        params.rgrc[0].bottom -= fy;
+    }
+    return 0;
+}
+
+fn handle_minmax(hwnd: win32.HWND, l: win32.LPARAM) win32.LRESULT {
+    const mmi: *win32.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(l)));
+    const scale = scale_for(hwnd);
+    mmi.ptMinTrackSize.x = @intFromFloat(g_min_w_pt * scale);
+    mmi.ptMinTrackSize.y = @intFromFloat(g_min_h_pt * scale);
+    return 0;
+}
+
+fn handle_caption_message(
+    hwnd: win32.HWND,
+    msg: win32.UINT,
+    w: win32.WPARAM,
+) ?win32.LRESULT {
+    switch (msg) {
         win32.WM_NCMOUSEMOVE => {
             track_nc_leave(hwnd);
             const hovered = caption_from_ht(w);
@@ -581,7 +627,6 @@ fn wnd_proc(
                 g_pressed_caption = cb;
                 return 0; // act on release for a reliable custom-chrome button
             }
-            // HTCAPTION / resize borders fall through to DefWindowProc.
         },
         win32.WM_NCLBUTTONUP => {
             const cb = caption_from_ht(w);
@@ -592,120 +637,142 @@ fn wnd_proc(
                 return 0;
             }
         },
-        win32.WM_ERASEBKGND => return 1,
+        else => std.debug.assert(false),
+    }
+    return null;
+}
+
+fn handle_size_message(msg: win32.UINT) void {
+    switch (msg) {
         win32.WM_ENTERSIZEMOVE => {
-            // Silence the vsync thread for the modal loop's lifetime: it would
-            // otherwise flood WM_VSYNC and starve the mouse-move input the resize
-            // depends on. Paint runs synchronously from WM_SIZE below.
+            // The modal resize loop drives WM_SIZE synchronously and starves vsync.
             loop.resizing.store(true, .seq_cst);
         },
         win32.WM_SIZE => {
-            // The modal resize loop starves the vsync thread, so repaint
-            // synchronously on every size step. Painting each step (no rate cap)
-            // keeps the content locked to the window frame - a cap let the frame
-            // outrun the content, which reads as lag. A same-size step is cheap:
-            // the renderer skips ResizeBuffers and an unchanged frame. Falls
-            // through to DefWindowProc; WM_EXITSIZEMOVE guarantees the final frame.
-            paint_now();
+            if (loop.resizing.load(.seq_cst)) {
+                paint_now();
+            } else {
+                request_redraw();
+            }
         },
         win32.WM_EXITSIZEMOVE => {
             loop.resizing.store(false, .seq_cst);
             paint_now();
         },
-        win32.WM_CTLCOLOREDIT => {
-            // Theme the EDIT overlay to match the kit-drawn field (wParam = HDC).
-            const hdc: win32.HDC = @ptrFromInt(w);
-            _ = win32.SetTextColor(hdc, g_field_text);
-            _ = win32.SetBkColor(hdc, g_field_bg);
-            if (g_field_brush) |br| return @bitCast(@intFromPtr(br));
-        },
-        win32.WM_SETCURSOR => {
-            // Reassert our cursor over the client area; let the frame use its own
-            // resize cursors. The hit-test code is the low word of lParam.
-            if (win32.get_x_lparam(l) == win32.HTCLIENT) {
-                set_cursor(g_cursor);
-                return 1;
-            }
-        },
-        win32.WM_DESTROY => {
-            // Stop the vsync flood first so WM_QUIT is not starved and no paint
-            // runs against the dying window, then quit the loop.
-            loop.quitting = true;
-            loop.vsync_running.store(false, .seq_cst);
-            win32.PostQuitMessage(0);
-            return 0;
-        },
-        win32.WM_MOUSEMOVE => {
-            clear_caption_hover();
-            if (g_dispatch) |d| {
-                track_mouse_leave(hwnd);
-                const p = dispatch_point(hwnd, l);
-                d.on_move(d.ctx, p[0], p[1]);
-            }
-            return 0;
-        },
-        win32.WM_MOUSELEAVE => {
-            g_tracking_mouse = false;
-            if (g_dispatch) |d| d.on_exit(d.ctx);
-            return 0;
-        },
-        win32.WM_LBUTTONDOWN => {
-            if (g_dispatch) |d| {
-                const p = dispatch_point(hwnd, l);
-                d.on_down(d.ctx, p[0], p[1]);
-            }
-            return 0;
-        },
-        win32.WM_LBUTTONUP => {
-            if (g_dispatch) |d| d.on_up(d.ctx);
-            return 0;
-        },
-        win32.WM_RBUTTONDOWN => {
-            if (g_dispatch) |d| {
-                const p = dispatch_point(hwnd, l);
-                d.on_right_down(d.ctx, p[0], p[1]);
-            }
-            return 0;
-        },
-        win32.WM_MOUSEWHEEL => {
-            if (g_dispatch) |d| {
-                const raw_delta = win32.get_wheel_delta_wparam(w);
-                const notches = @as(f32, @floatFromInt(raw_delta)) / win32.WHEEL_DELTA;
-                d.on_scroll(d.ctx, 0, notches * 40.0);
-            }
-            return 0;
-        },
-        win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => {
-            if (g_dispatch) |d| {
-                if (key_code_for_vk(w)) |code| {
-                    d.on_key(d.ctx, .{ .code = code, .ch = 0, .mods = key_mods() });
-                    return 0;
-                }
-            }
-        },
-        win32.WM_CHAR => {
-            if (g_dispatch) |d| {
-                const mods = key_mods();
-                const raw: u21 = @intCast(w & 0x10FFFF);
-                // Ctrl+letter arrives as a control char (Ctrl+A == 0x01); the
-                // kit's cmd-shortcuts switch on the letter, so fold it back.
-                const ch: u21 = if (mods.cmd and raw >= 0x01 and raw <= 0x1A) raw + 0x60 else raw;
-                const printable = ch >= 0x20 and ch != 0x7F;
-                const cmd_letter = mods.cmd and ch >= 'a' and ch <= 'z';
-                if (printable or cmd_letter) {
-                    d.on_key(d.ctx, .{ .code = .char, .ch = ch, .mods = mods });
-                }
-            }
-            return 0;
-        },
-        else => {},
+        else => std.debug.assert(false),
     }
-    return win32.DefWindowProcW(hwnd, msg, w, l);
 }
 
-// A persistent native EDIT child overlays the kit-drawn field while focused; the
-// consumer polls text_field_value each frame into its own buffer. numeric is not
-// enforced yet (the kit validates).
+fn handle_edit_color(w: win32.WPARAM) ?win32.LRESULT {
+    const hdc: win32.HDC = @ptrFromInt(w);
+    _ = win32.SetTextColor(hdc, g_field_text);
+    _ = win32.SetBkColor(hdc, g_field_bg);
+    if (g_field_brush) |br| return @bitCast(@intFromPtr(br));
+    return null;
+}
+
+fn handle_set_cursor(l: win32.LPARAM) ?win32.LRESULT {
+    if (win32.get_x_lparam(l) != win32.HTCLIENT) return null;
+    set_cursor(g_cursor);
+    return 1;
+}
+
+fn handle_destroy() win32.LRESULT {
+    // Stop vsync first so WM_QUIT is not starved by paints against a dying HWND.
+    loop.quitting = true;
+    loop.vsync_running.store(false, .seq_cst);
+    win32.PostQuitMessage(0);
+    return 0;
+}
+
+fn handle_mouse_message(
+    hwnd: win32.HWND,
+    msg: win32.UINT,
+    w: win32.WPARAM,
+    l: win32.LPARAM,
+) win32.LRESULT {
+    switch (msg) {
+        win32.WM_MOUSEMOVE => handle_mouse_move(hwnd, l),
+        win32.WM_MOUSELEAVE => handle_mouse_leave(),
+        win32.WM_LBUTTONDOWN => handle_mouse_down(hwnd, l),
+        win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(d.ctx),
+        win32.WM_RBUTTONDOWN => handle_mouse_right_down(hwnd, l),
+        win32.WM_MOUSEWHEEL => handle_mouse_wheel(w),
+        else => std.debug.assert(false),
+    }
+    return 0;
+}
+
+fn handle_mouse_move(hwnd: win32.HWND, l: win32.LPARAM) void {
+    clear_caption_hover();
+    if (g_dispatch) |d| {
+        track_mouse_leave(hwnd);
+        const p = dispatch_point(hwnd, l);
+        d.on_move(d.ctx, p[0], p[1]);
+    }
+}
+
+fn handle_mouse_leave() void {
+    g_tracking_mouse = false;
+    if (g_dispatch) |d| d.on_exit(d.ctx);
+}
+
+fn handle_mouse_down(hwnd: win32.HWND, l: win32.LPARAM) void {
+    if (g_dispatch) |d| {
+        const p = dispatch_point(hwnd, l);
+        d.on_down(d.ctx, p[0], p[1]);
+    }
+}
+
+fn handle_mouse_right_down(hwnd: win32.HWND, l: win32.LPARAM) void {
+    if (g_dispatch) |d| {
+        const p = dispatch_point(hwnd, l);
+        d.on_right_down(d.ctx, p[0], p[1]);
+    }
+}
+
+fn handle_mouse_wheel(w: win32.WPARAM) void {
+    if (g_dispatch) |d| {
+        const raw_delta = win32.get_wheel_delta_wparam(w);
+        const notches = @as(f32, @floatFromInt(raw_delta)) / win32.WHEEL_DELTA;
+        d.on_scroll(d.ctx, 0, notches * 40.0);
+    }
+}
+
+fn handle_key_message(msg: win32.UINT, w: win32.WPARAM) ?win32.LRESULT {
+    switch (msg) {
+        win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => return handle_key_down(w),
+        win32.WM_CHAR => return handle_char(w),
+        else => std.debug.assert(false),
+    }
+    return null;
+}
+
+fn handle_key_down(w: win32.WPARAM) ?win32.LRESULT {
+    if (g_dispatch) |d| {
+        if (key_code_for_vk(w)) |code| {
+            d.on_key(d.ctx, .{ .code = code, .ch = 0, .mods = key_mods() });
+            return 0;
+        }
+    }
+    return null;
+}
+
+fn handle_char(w: win32.WPARAM) win32.LRESULT {
+    if (g_dispatch) |d| {
+        const mods = key_mods();
+        const raw: u21 = @intCast(w & 0x10FFFF);
+        const ch: u21 = if (mods.cmd and raw >= 0x01 and raw <= 0x1A) raw + 0x60 else raw;
+        const printable = ch >= 0x20 and ch != 0x7F;
+        const cmd_letter = mods.cmd and ch >= 'a' and ch <= 'z';
+        if (printable or cmd_letter) {
+            d.on_key(d.ctx, .{ .code = .char, .ch = ch, .mods = mods });
+        }
+    }
+    return 0;
+}
+
+// Focused text fields use one native EDIT child so IME/caret behavior stays native.
 fn ensure_edit(parent: win32.HWND) ?win32.HWND {
     if (g_edit) |e| return e;
     g_main_hwnd = parent;
@@ -745,6 +812,18 @@ pub fn show_text_field(
     const edit = ensure_edit(handle.window) orelse return false;
     const scale = scale_for(handle.window);
 
+    place_text_field(edit, x, y, w, h, scale);
+    update_text_field_font(edit, @intFromFloat(font_size * scale));
+    update_text_field_colors(handle.theme, color);
+    seed_text_field(edit, initial, secure, id);
+    return true;
+}
+
+fn place_text_field(edit: win32.HWND, x: f32, y: f32, w: f32, h: f32, scale: f32) void {
+    std.debug.assert(@intFromPtr(edit) != 0);
+    std.debug.assert(scale > 0);
+    std.debug.assert(w >= 0);
+    std.debug.assert(h >= 0);
     _ = win32.SetWindowPos(
         edit,
         null,
@@ -754,57 +833,61 @@ pub fn show_text_field(
         @intFromFloat(h * scale),
         win32.SWP_NOZORDER | win32.SWP_SHOWWINDOW,
     );
+}
 
-    const font_px: i32 = @intFromFloat(font_size * scale);
-    if (font_px != g_edit_font_px) {
-        if (g_edit_font) |f| _ = win32.DeleteObject(@ptrCast(f));
-        g_edit_font = win32.CreateFontW(
-            -font_px,
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            win32.L("Segoe UI"),
-        );
-        g_edit_font_px = font_px;
-        if (g_edit_font) |f| _ = win32.SendMessageW(edit, win32.WM_SETFONT, @intFromPtr(f), 1);
-    }
+fn update_text_field_font(edit: win32.HWND, font_px: i32) void {
+    std.debug.assert(@intFromPtr(edit) != 0);
+    std.debug.assert(font_px > 0);
+    if (font_px == g_edit_font_px) return;
+    if (g_edit_font) |f| _ = win32.DeleteObject(@ptrCast(f));
+    g_edit_font = win32.CreateFontW(
+        -font_px,
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        win32.L("Segoe UI"),
+    );
+    g_edit_font_px = font_px;
+    if (g_edit_font) |f| _ = win32.SendMessageW(edit, win32.WM_SETFONT, @intFromPtr(f), 1);
+}
 
+fn update_text_field_colors(theme: types.Theme, color: types.Rgba) void {
+    std.debug.assert(color.a >= 0);
+    std.debug.assert(color.a <= 1);
     g_field_text = win32.rgb_to_colorref(color.r, color.g, color.b);
-    const bg = handle.theme.background;
+    const bg = theme.background;
     const bg_cr = win32.rgb_to_colorref(bg.r, bg.g, bg.b);
-    if (bg_cr != g_field_bg or g_field_brush == null) {
-        if (g_field_brush) |br| _ = win32.DeleteObject(@ptrCast(br));
-        g_field_brush = win32.CreateSolidBrush(bg_cr);
-        g_field_bg = bg_cr;
-    }
+    if (bg_cr == g_field_bg and g_field_brush != null) return;
+    if (g_field_brush) |br| _ = win32.DeleteObject(@ptrCast(br));
+    g_field_brush = win32.CreateSolidBrush(bg_cr);
+    g_field_bg = bg_cr;
+}
 
-    // Re-seed text + focus only when the active field changes, so live typing is
-    // not clobbered every frame.
-    if (!g_field_visible or g_active_secure != secure or g_active_id != id) {
-        _ = win32.SendMessageW(edit, win32.EM_SETPASSWORDCHAR, if (secure) 0x2022 else 0, 0);
-        var wbuf: [512]u16 = undefined;
-        const wlen = std.unicode.utf8ToUtf16Le(&wbuf, initial) catch 0;
-        wbuf[@min(wlen, wbuf.len - 1)] = 0;
-        _ = win32.SetWindowTextW(edit, @ptrCast(&wbuf));
-        // caret past the seeded text so the user appends, not overwrites
-        const sel_end: win32.WPARAM = @bitCast(@as(isize, std.math.maxInt(i32)));
-        const sel_lp: win32.LPARAM = @bitCast(@as(isize, std.math.maxInt(i32)));
-        _ = win32.SendMessageW(edit, win32.EM_SETSEL, sel_end, sel_lp);
-        _ = win32.SetFocus(edit);
-        g_field_visible = true;
-        g_active_secure = secure;
-        g_active_id = id;
-    }
-    return true;
+fn seed_text_field(edit: win32.HWND, initial: []const u8, secure: bool, id: u32) void {
+    std.debug.assert(@intFromPtr(edit) != 0);
+    std.debug.assert(id != 0);
+    if (g_field_visible and g_active_secure == secure and g_active_id == id) return;
+    _ = win32.SendMessageW(edit, win32.EM_SETPASSWORDCHAR, if (secure) 0x2022 else 0, 0);
+    var wbuf: [512]u16 = undefined;
+    const wlen = std.unicode.utf8ToUtf16Le(&wbuf, initial) catch 0;
+    wbuf[@min(wlen, wbuf.len - 1)] = 0;
+    _ = win32.SetWindowTextW(edit, @ptrCast(&wbuf));
+    const sel_end: win32.WPARAM = @bitCast(@as(isize, std.math.maxInt(i32)));
+    const sel_lp: win32.LPARAM = @bitCast(@as(isize, std.math.maxInt(i32)));
+    _ = win32.SendMessageW(edit, win32.EM_SETSEL, sel_end, sel_lp);
+    _ = win32.SetFocus(edit);
+    g_field_visible = true;
+    g_active_secure = secure;
+    g_active_id = id;
 }
 
 pub fn hide_text_field(handle: CustomShellHandle) void {
@@ -876,12 +959,299 @@ pub fn clipboard_changed_external() bool {
     return false;
 }
 
-// Display enumeration is macOS-only here; the Windows backend reports none.
+const DISPLAYS_MAX: u32 = 32;
+const DISPLAY_POINT_EPSILON: f32 = 0.25;
+
+const DisplayScale = struct {
+    x: f32,
+    y: f32,
+};
+
+const DisplayInfo = struct {
+    monitor: win32.HMONITOR,
+    rect: win32.RECT,
+    scale: DisplayScale,
+    bounds: geometry.BoundsF = .{},
+    primary: bool = false,
+    placed: bool = false,
+    invalid: bool = false,
+};
+
+const DisplayList = struct {
+    items: [DISPLAYS_MAX]DisplayInfo = undefined,
+    count: u32 = 0,
+};
+
+fn lparam_from_pointer(ptr: anytype) win32.LPARAM {
+    const address = @intFromPtr(ptr);
+    std.debug.assert(address != 0);
+    return @bitCast(address);
+}
+
+fn pointer_from_lparam(comptime T: type, value: win32.LPARAM) *T {
+    std.debug.assert(value != 0);
+    return @ptrFromInt(@as(usize, @bitCast(value)));
+}
+
+fn monitor_scale(monitor: win32.HMONITOR) ?DisplayScale {
+    std.debug.assert(@intFromPtr(monitor) != 0);
+    var dpi_x: win32.UINT = 0;
+    var dpi_y: win32.UINT = 0;
+    const hr = win32.GetDpiForMonitor(monitor, .effective, &dpi_x, &dpi_y);
+    if (hr < 0) return null;
+    if (dpi_x == 0) return null;
+    if (dpi_y == 0) return null;
+    return .{
+        .x = @as(f32, @floatFromInt(dpi_x)) / win32.USER_DEFAULT_SCREEN_DPI,
+        .y = @as(f32, @floatFromInt(dpi_y)) / win32.USER_DEFAULT_SCREEN_DPI,
+    };
+}
+
+fn display_info(monitor: win32.HMONITOR) ?DisplayInfo {
+    var info: win32.MONITORINFO = .{
+        .cbSize = @sizeOf(win32.MONITORINFO),
+        .rcMonitor = undefined,
+        .rcWork = undefined,
+        .dwFlags = 0,
+    };
+    if (win32.GetMonitorInfoW(monitor, &info) == 0) return null;
+    const rect = info.rcMonitor;
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    if (width <= 0) return null;
+    if (height <= 0) return null;
+    const scale = monitor_scale(monitor) orelse return null;
+    std.debug.assert(scale.x > 0);
+    std.debug.assert(scale.y > 0);
+    return .{
+        .monitor = monitor,
+        .rect = rect,
+        .scale = scale,
+        .bounds = display_size(rect, scale),
+        .primary = (info.dwFlags & win32.MONITORINFOF_PRIMARY) != 0,
+    };
+}
+
+fn display_size(rect: win32.RECT, scale: DisplayScale) geometry.BoundsF {
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+    std.debug.assert(scale.x > 0);
+    std.debug.assert(scale.y > 0);
+    return geometry.BoundsF.init(
+        0,
+        0,
+        @as(f32, @floatFromInt(width)) / scale.x,
+        @as(f32, @floatFromInt(height)) / scale.y,
+    );
+}
+
+fn ranges_overlap(a0: i32, a1: i32, b0: i32, b1: i32) bool {
+    std.debug.assert(a0 < a1);
+    std.debug.assert(b0 < b1);
+    return a0 < b1 and b0 < a1;
+}
+
+fn display_candidate_origin(
+    anchor: *const DisplayInfo,
+    target: *const DisplayInfo,
+) ?geometry.Point(f32) {
+    std.debug.assert(anchor.placed);
+    std.debug.assert(!anchor.invalid);
+    std.debug.assert(!target.invalid);
+    const a = anchor.rect;
+    const b = target.rect;
+    if (a.right == b.left and ranges_overlap(a.top, a.bottom, b.top, b.bottom)) {
+        return .{
+            .x = anchor.bounds.right(),
+            .y = anchor.bounds.origin.y +
+                @as(f32, @floatFromInt(b.top - a.top)) / anchor.scale.y,
+        };
+    } else if (b.right == a.left and ranges_overlap(a.top, a.bottom, b.top, b.bottom)) {
+        return .{
+            .x = anchor.bounds.origin.x - target.bounds.size.width,
+            .y = anchor.bounds.origin.y +
+                @as(f32, @floatFromInt(b.top - a.top)) / anchor.scale.y,
+        };
+    } else if (a.bottom == b.top and ranges_overlap(a.left, a.right, b.left, b.right)) {
+        return .{
+            .x = anchor.bounds.origin.x +
+                @as(f32, @floatFromInt(b.left - a.left)) / anchor.scale.x,
+            .y = anchor.bounds.bottom(),
+        };
+    } else if (b.bottom == a.top and ranges_overlap(a.left, a.right, b.left, b.right)) {
+        return .{
+            .x = anchor.bounds.origin.x +
+                @as(f32, @floatFromInt(b.left - a.left)) / anchor.scale.x,
+            .y = anchor.bounds.origin.y - target.bounds.size.height,
+        };
+    }
+    return null;
+}
+
+fn display_origin_matches(a: geometry.Point(f32), b: geometry.Point(f32)) bool {
+    return @abs(a.x - b.x) <= DISPLAY_POINT_EPSILON and
+        @abs(a.y - b.y) <= DISPLAY_POINT_EPSILON;
+}
+
+fn display_try_place(anchor: *const DisplayInfo, target: *DisplayInfo) bool {
+    std.debug.assert(anchor.placed);
+    std.debug.assert(!target.placed);
+    std.debug.assert(!target.invalid);
+    const origin = display_candidate_origin(anchor, target) orelse return false;
+    target.bounds.origin = origin;
+    target.placed = true;
+    return true;
+}
+
+fn display_anchor_index(list: *const DisplayList) ?u32 {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var i: u32 = 0;
+    while (i < list.count) : (i += 1) {
+        if (!list.items[i].invalid and list.items[i].primary) return i;
+    }
+    i = 0;
+    while (i < list.count) : (i += 1) {
+        if (!list.items[i].invalid) return i;
+    }
+    return null;
+}
+
+fn display_place_all(list: *DisplayList) void {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    if (list.count == 0) return;
+    var invalidations: u32 = 0;
+    while (invalidations < DISPLAYS_MAX) : (invalidations += 1) {
+        display_reset_placements(list);
+        if (!display_seed_anchor(list)) return;
+        display_grow_placements(list);
+        if (display_conflict_index(list)) |index| {
+            list.items[index].invalid = true;
+        } else {
+            return;
+        }
+    }
+    std.debug.assert(false);
+}
+
+fn display_reset_placements(list: *DisplayList) void {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var i: u32 = 0;
+    while (i < list.count) : (i += 1) {
+        list.items[i].placed = false;
+    }
+}
+
+fn display_seed_anchor(list: *DisplayList) bool {
+    const anchor = display_anchor_index(list) orelse return false;
+    std.debug.assert(!list.items[anchor].invalid);
+    list.items[anchor].bounds.origin = .{
+        .x = @as(f32, @floatFromInt(list.items[anchor].rect.left)) / list.items[anchor].scale.x,
+        .y = @as(f32, @floatFromInt(list.items[anchor].rect.top)) / list.items[anchor].scale.y,
+    };
+    list.items[anchor].placed = true;
+    return true;
+}
+
+fn display_grow_placements(list: *DisplayList) void {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var pass: u32 = 0;
+    while (pass < DISPLAYS_MAX) : (pass += 1) {
+        if (!display_place_pass(list)) return;
+    }
+    std.debug.assert(false);
+}
+
+fn display_place_pass(list: *DisplayList) bool {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var changed = false;
+    var i: u32 = 0;
+    while (i < list.count) : (i += 1) {
+        if (!list.items[i].placed or list.items[i].invalid) continue;
+        var j: u32 = 0;
+        while (j < list.count) : (j += 1) {
+            if (list.items[j].placed) continue;
+            if (list.items[j].invalid) continue;
+            if (display_try_place(&list.items[i], &list.items[j])) changed = true;
+        }
+    }
+    return changed;
+}
+
+fn display_conflict_index(list: *const DisplayList) ?u32 {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var i: u32 = 0;
+    while (i < list.count) : (i += 1) {
+        if (!list.items[i].placed or list.items[i].invalid) continue;
+        var j: u32 = 0;
+        while (j < list.count) : (j += 1) {
+            if (i == j) continue;
+            if (!list.items[j].placed or list.items[j].invalid) continue;
+            const origin = display_candidate_origin(&list.items[i], &list.items[j]) orelse continue;
+            if (display_origin_matches(list.items[j].bounds.origin, origin)) continue;
+            if (!list.items[j].primary) return j;
+            if (!list.items[i].primary) return i;
+            std.debug.assert(false);
+        }
+    }
+    return null;
+}
+
+fn display_compact(list: *DisplayList) void {
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    var write: u32 = 0;
+    var read: u32 = 0;
+    while (read < list.count) : (read += 1) {
+        if (!list.items[read].placed) continue;
+        if (list.items[read].invalid) continue;
+        if (write != read) list.items[write] = list.items[read];
+        write += 1;
+    }
+    list.count = write;
+}
+
+fn display_list_callback(
+    monitor: win32.HMONITOR,
+    hdc: ?win32.HDC,
+    rect: *win32.RECT,
+    data: win32.LPARAM,
+) callconv(.winapi) win32.BOOL {
+    _ = hdc;
+    _ = rect;
+    const list = pointer_from_lparam(DisplayList, data);
+    if (list.count >= DISPLAYS_MAX) {
+        std.debug.assert(false);
+        return win32.FALSE;
+    }
+    const info = display_info(monitor) orelse return win32.TRUE;
+    list.items[list.count] = info;
+    list.count += 1;
+    return win32.TRUE;
+}
+
+fn display_list() DisplayList {
+    var list: DisplayList = .{};
+    _ = win32.EnumDisplayMonitors(
+        null,
+        null,
+        display_list_callback,
+        lparam_from_pointer(&list),
+    );
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    display_place_all(&list);
+    display_compact(&list);
+    std.debug.assert(list.count <= DISPLAYS_MAX);
+    return list;
+}
+
 pub fn display_count() u32 {
-    return 0;
+    return display_list().count;
 }
 
 pub fn display_bounds(index: u32) geometry.BoundsF {
-    _ = index;
-    return .{};
+    if (index >= DISPLAYS_MAX) return .{};
+    const list = display_list();
+    if (index >= list.count) return .{};
+    return list.items[index].bounds;
 }
