@@ -765,11 +765,28 @@ fn int_formatter() ?Id {
     return f;
 }
 
+// Only one field is first responder at a time, so move the shared singleton to
+// the window asking for it instead of keeping a separate editor per window.
+fn reparent(f: Id, content_view: Id) void {
+    std.debug.assert(@intFromPtr(f) != 0);
+    std.debug.assert(@intFromPtr(content_view) != 0);
+    const cur = objc.msg_send(?Id, f, "superview", .{});
+    if (@intFromPtr(cur) == @intFromPtr(content_view)) return;
+    objc.msg_send(void, f, "removeFromSuperview", .{});
+    objc.msg_send(void, content_view, "addSubview:", .{f});
+}
+
 fn ensure_field(content_view: Id, secure: bool) ?Id {
     if (secure) {
-        if (g_secure_field) |f| return f;
+        if (g_secure_field) |f| {
+            reparent(f, content_view);
+            return f;
+        }
     } else {
-        if (g_field) |f| return f;
+        if (g_field) |f| {
+            reparent(f, content_view);
+            return f;
+        }
     }
     const cls_name = if (secure) "NSSecureTextField" else "NSTextField";
     const cls = objc.get_class(cls_name) orelse return null;
