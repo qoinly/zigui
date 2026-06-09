@@ -25,9 +25,8 @@ const MAX_COLOR_SPRITES = 256;
 const MAX_POLYLINES = 1024;
 const MAX_LINES = 1024;
 const MAX_RINGS = 256;
+const MAX_FRAMES = 8;
 
-// Mirrors the macOS renderer's symbol so the shared renderer facade compiles. The
-// Windows backend draws no external frames, so the value is otherwise unused here.
 pub const max_frames_in_flight: u32 = 3;
 
 // Modal-backdrop blur radius in points; scaled to pixels at draw time so the
@@ -52,6 +51,50 @@ const InstanceBuffer = struct {
     srv: ?*anyopaque = null,
     stride: u32 = 0,
     capacity: u32 = 0,
+};
+
+// CPU-filled BGRA surface; its D3D texture is reused so live video does not churn
+// GPU objects while frames arrive.
+pub const BgraSurface = struct {
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixels: [*]u8,
+    tex: ?*anyopaque = null,
+    srv: ?*anyopaque = null,
+    // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
+    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+
+    pub fn init(width: u32, height: u32, stride: u32, pixels: [*]u8) BgraSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(stride >= width * 4);
+        return .{ .width = width, .height = height, .stride = stride, .pixels = pixels };
+    }
+
+    pub fn available(self: *const BgraSurface) bool {
+        std.debug.assert(self.refs.load(.acquire) >= 1);
+        return self.refs.load(.acquire) == 1;
+    }
+
+    pub fn deinit(self: *BgraSurface) void {
+        std.debug.assert(self.refs.load(.acquire) == 1);
+        com.release(&self.srv);
+        com.release(&self.tex);
+    }
+};
+
+const FrameGpu = extern struct {
+    bounds: [4]f32,
+    clip_bounds: [4]f32,
+    opacity: f32,
+    _pad: [3]f32 = .{ 0, 0, 0 },
+    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+
+    comptime {
+        std.debug.assert(@sizeOf(FrameGpu) == 96);
+        std.debug.assert(@offsetOf(FrameGpu, "csc") == 48);
+    }
 };
 
 // An offscreen color target usable as both a render target and a sampled
@@ -81,6 +124,7 @@ pub const Renderer = struct {
     polyline_pipeline: Pipeline = .{},
     line_pipeline: Pipeline = .{},
     ring_pipeline: Pipeline = .{},
+    frame_pipeline: Pipeline = .{},
 
     quad_buffer: InstanceBuffer = .{},
     sprite_buffer: InstanceBuffer = .{},
@@ -95,6 +139,7 @@ pub const Renderer = struct {
 
     viewport_cb: ?*anyopaque = null,
     blur_cb: ?*anyopaque = null,
+    frame_cb: ?*anyopaque = null,
     blend_state: ?*anyopaque = null,
     raster_state: ?*anyopaque = null,
     raster_state_scissor: ?*anyopaque = null,
@@ -182,6 +227,7 @@ pub const Renderer = struct {
         com.release(&self.rtv);
         com.release(&self.viewport_cb);
         com.release(&self.blur_cb);
+        com.release(&self.frame_cb);
         com.release(&self.blend_state);
         com.release(&self.raster_state);
         com.release(&self.raster_state_scissor);
@@ -196,9 +242,10 @@ pub const Renderer = struct {
             com.release(&ib.buffer);
         }
         for ([_]*Pipeline{
-            &self.quad_pipeline,     &self.text_pipeline,   &self.color_sprite_pipeline,
-            &self.polyline_pipeline, &self.line_pipeline,   &self.ring_pipeline,
-            &self.blit_pipeline,     &self.blur_h_pipeline, &self.blur_v_pipeline,
+            &self.quad_pipeline,     &self.text_pipeline, &self.color_sprite_pipeline,
+            &self.polyline_pipeline, &self.line_pipeline, &self.ring_pipeline,
+            &self.frame_pipeline,    &self.blit_pipeline, &self.blur_h_pipeline,
+            &self.blur_v_pipeline,
         }) |p| {
             com.release(&p.vs);
             com.release(&p.ps);
@@ -212,38 +259,92 @@ pub const Renderer = struct {
         return @ptrCast(self.device);
     }
 
-    // External-frame API. The Windows backend draws no external frames, so these
-    // satisfy the shared renderer interface and import nothing; a frame node draws
-    // nothing here.
+    // The shared facade keeps the macOS import name; Windows accepts this BGRA
+    // surface shape and returns one SRV.
     pub const Nv12Textures = struct {
         luma: *anyopaque,
-        chroma: *anyopaque,
+        chroma: ?*anyopaque,
         cv_luma: *anyopaque,
-        cv_chroma: *anyopaque,
+        cv_chroma: ?*anyopaque,
         width: u32,
         height: u32,
     };
 
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
-        _ = self;
-        _ = pixel_buffer;
-        return null;
+        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        return self.import_bgra(surface);
     }
 
     pub fn release_cv_texture(ref: *anyopaque) void {
-        _ = ref;
+        const surface: *BgraSurface = @ptrCast(@alignCast(ref));
+        const old = surface.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
     }
 
     pub fn retain_surface(pixel_buffer: *anyopaque) void {
-        _ = pixel_buffer;
+        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
     }
 
     pub fn release_surface(pixel_buffer: *anyopaque) void {
-        _ = pixel_buffer;
+        const surface: *BgraSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
     }
 
     pub fn flush_texture_cache(self: *Renderer) void {
         _ = self;
+    }
+
+    fn import_bgra(self: *Renderer, surface: *BgraSurface) ?Nv12Textures {
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        std.debug.assert(surface.stride >= surface.width * 4);
+        self.ensure_bgra_surface(surface);
+        const tex = surface.tex orelse return null;
+        const srv = surface.srv orelse return null;
+        self.context.update_subresource(tex, 0, null, surface.pixels, surface.stride, 0);
+        const old = surface.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = srv,
+            .chroma = null,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn ensure_bgra_surface(self: *Renderer, surface: *BgraSurface) void {
+        if (surface.tex != null and surface.srv != null) return;
+        std.debug.assert(surface.tex == null);
+        std.debug.assert(surface.srv == null);
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = surface.width,
+            .Height = surface.height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, null, &surface.tex))) return;
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        if (com.failed(self.device.create_srv(surface.tex.?, &srv_desc, &surface.srv))) {
+            com.release(&surface.tex);
+        }
     }
 
     pub fn request_redraw(self: *Renderer) void {
@@ -598,8 +699,7 @@ pub const Renderer = struct {
                     self.ring_pipeline,
                     batch,
                 ),
-                // The Windows backend draws no external frames; nothing to encode.
-                .frame => {},
+                .frame => self.encode_frame_batch(batch),
             }
         }
         if (sprites.len > 0) {
@@ -620,6 +720,42 @@ pub const Renderer = struct {
                 atlas,
             );
         }
+    }
+
+    fn encode_frame_batch(self: *Renderer, batch: []const Primitive) void {
+        const cb = self.frame_cb orelse return;
+        if (batch.len > MAX_FRAMES) return;
+        var null_srv = [_]?*anyopaque{null};
+        self.context.vs_set_shader(self.frame_pipeline.vs);
+        self.context.ps_set_shader(self.frame_pipeline.ps);
+        var frame_cbs = [_]?*anyopaque{cb};
+        self.context.vs_set_constant_buffers(1, 1, &frame_cbs);
+        self.context.ps_set_constant_buffers(1, 1, &frame_cbs);
+        for (batch) |prim| {
+            const f = prim.frame;
+            if (f.tex_cbcr != null) continue;
+            const srv = f.tex orelse continue;
+            if (!self.update_frame_cb(cb, f)) continue;
+            var srvs = [_]?*anyopaque{srv};
+            self.context.ps_set_shader_resources(0, 1, &srvs);
+            self.context.draw_instanced(6, 1, 0, 0);
+            self.context.ps_set_shader_resources(0, 1, &null_srv);
+        }
+    }
+
+    fn update_frame_cb(self: *Renderer, cb: *anyopaque, f: primitives.Frame) bool {
+        var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
+        if (com.failed(self.context.map(cb, 0, d3d11.D3D11_MAP_WRITE_DISCARD, &mapped)))
+            return false;
+        const dst: *FrameGpu = @ptrCast(@alignCast(mapped.pData.?));
+        dst.* = .{
+            .bounds = f.bounds,
+            .clip_bounds = f.clip_bounds,
+            .opacity = f.opacity,
+            .csc = f.csc,
+        };
+        self.context.unmap(cb, 0);
+        return true;
     }
 
     fn encode_prim_batch(
@@ -726,6 +862,7 @@ pub const Renderer = struct {
             "ring_chart_vertex",
             "ring_chart_fragment",
         );
+        self.frame_pipeline = try self.make_pipeline(compile, "frame_vertex", "frame_fragment");
         self.blit_pipeline = try self.make_pipeline(compile, "blit_vertex", "blit_fragment");
         self.blur_h_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_h_fragment");
         self.blur_v_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_v_fragment");
@@ -827,6 +964,19 @@ pub const Renderer = struct {
         if (com.failed(self.device.create_buffer(&cb_desc, null, &blur_cb)))
             return error.BufferCreateFailed;
         self.blur_cb = blur_cb;
+
+        const frame_cb_desc = d3d11.D3D11_BUFFER_DESC{
+            .ByteWidth = @sizeOf(FrameGpu),
+            .Usage = d3d11.D3D11_USAGE_DYNAMIC,
+            .BindFlags = d3d11.D3D11_BIND_CONSTANT_BUFFER,
+            .CPUAccessFlags = d3d11.D3D11_CPU_ACCESS_WRITE,
+            .MiscFlags = 0,
+            .StructureByteStride = 0,
+        };
+        var frame_cb: ?*anyopaque = null;
+        if (com.failed(self.device.create_buffer(&frame_cb_desc, null, &frame_cb)))
+            return error.BufferCreateFailed;
+        self.frame_cb = frame_cb;
     }
 
     fn make_instance_buffer(self: *Renderer, stride: u32, capacity: u32) Error!InstanceBuffer {

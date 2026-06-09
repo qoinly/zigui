@@ -369,6 +369,44 @@ float4 ring_chart_fragment(RingOut input) : SV_Target {
     return col;
 }
 
+// ---- External frame --------------------------------------------------------
+
+cbuffer FrameParams : register(b1) {
+    float4 frame_bounds;
+    float4 frame_clip_bounds;
+    float frame_opacity;
+    float3 frame_pad;
+    float4 frame_csc0;
+    float4 frame_csc1;
+    float4 frame_csc2;
+};
+
+Texture2D frame_tex : register(t0);
+
+struct FrameOut {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float opacity : TEXCOORD1;
+    float4 clip : SV_ClipDistance0;
+};
+
+FrameOut frame_vertex(uint vid : SV_VertexID) {
+    float2 unit_vertex = UNIT[vid];
+    float2 pixel_pos = frame_bounds.xy + unit_vertex * frame_bounds.zw;
+
+    FrameOut o;
+    o.position = to_device_position(pixel_pos);
+    o.uv = unit_vertex;
+    o.opacity = frame_opacity;
+    o.clip = compute_clip_distance(pixel_pos, frame_clip_bounds);
+    return o;
+}
+
+float4 frame_fragment(FrameOut input) : SV_Target {
+    float4 c = frame_tex.Sample(atlas_sampler, input.uv);
+    return float4(c.rgb, c.a * input.opacity);
+}
+
 // ---- Fullscreen blit (modal backdrop composite) ---------------------------
 
 Texture2D blit_tex : register(t0);

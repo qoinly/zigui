@@ -60,6 +60,12 @@ const CH = H / 2;
 // holds: the live-reference window is the source's slots (3) plus frames in flight
 // (max_frames_in_flight + 1 = 4) = 7, so 8 always leaves the refilled one free.
 const pool_size = 8;
+const WinSurface = if (builtin.os.tag == .windows) zigui.BgraFrameSurface else struct {};
+const WinPool = if (builtin.os.tag == .windows) [pool_size]WinSurface else void;
+const WinPixels = if (builtin.os.tag == .windows) [pool_size][W * H * 4]u8 else void;
+
+// Keep demo pixels off the main stack; the producer rewrites this fixed pool.
+var win_pixels: WinPixels = if (builtin.os.tag == .windows) undefined else {};
 
 const App = struct {
     source: zigui.FrameSource = undefined,
@@ -67,6 +73,8 @@ const App = struct {
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
     pool: [pool_size]?*anyopaque = .{null} ** pool_size,
+    win_pool: WinPool = if (builtin.os.tag == .windows) undefined else {},
+    win_pool_ready: bool = false,
 
     // Called after the window closes (run returns): stop the producer, free the
     // source's refs, then release the pool buffers.
@@ -77,6 +85,7 @@ const App = struct {
             self.thread = null;
         }
         if (self.started) self.source.deinit();
+        deinit_windows_pool(self);
         if (builtin.os.tag == .macos) {
             for (&self.pool) |*pb| {
                 if (pb.*) |p| cv.CVBufferRelease(p);
@@ -102,6 +111,7 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     if (!app.started) {
         app.source = zigui.FrameSource.init(zigui.renderer_handle());
         app.running.store(true, .release);
+        init_windows_pool(app);
         if (std.Thread.spawn(.{}, produce, .{app})) |t| {
             app.thread = t;
             app.started = true;
@@ -109,8 +119,12 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
             app.running.store(false, .release);
         }
     }
+    const label = if (builtin.os.tag == .windows)
+        "External frame: BGRA textured quad on D3D11"
+    else
+        "External frame: zero-copy NV12, YUV->RGB on the gpu";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
-        zigui.text("External frame: zero-copy NV12, YUV->RGB on the gpu", .{ .size = 16 }),
+        zigui.text(label, .{ .size = 16 }),
         zigui.frame(&app.source, .{ .fit = .contain }),
     });
 }
@@ -119,6 +133,7 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
 // buffer, hands it off newest-wins, and rotates; the source drops anything the
 // render side does not pick up.
 fn produce(app: *App) void {
+    if (builtin.os.tag == .windows) return produce_windows(app);
     if (builtin.os.tag != .macos) return; // the CVPixelBuffer source is macOS-only
     for (&app.pool) |*pb| pb.* = create_nv12();
     var t: u32 = 0;
@@ -131,6 +146,69 @@ fn produce(app: *App) void {
         app.source.submit_surface(pb, .{});
         t +%= 1;
         sleep_ms(16);
+    }
+}
+
+fn init_windows_pool(app: *App) void {
+    if (app.win_pool_ready) return;
+    switch (builtin.os.tag) {
+        .windows => for (&app.win_pool, 0..) |*surface, i| {
+            surface.* = zigui.BgraFrameSurface.init(W, H, W * 4, win_pixels[i][0..].ptr);
+        },
+        else => {},
+    }
+    if (builtin.os.tag == .windows) app.win_pool_ready = true;
+}
+
+fn deinit_windows_pool(app: *App) void {
+    if (!app.win_pool_ready) return;
+    switch (builtin.os.tag) {
+        .windows => for (&app.win_pool) |*surface| surface.deinit(),
+        else => {},
+    }
+    app.win_pool_ready = false;
+}
+
+fn produce_windows(app: *App) void {
+    switch (builtin.os.tag) {
+        .windows => {
+            var t: u32 = 0;
+            while (app.running.load(.acquire)) {
+                const surface = &app.win_pool[t % pool_size];
+                if (!surface.available()) {
+                    sleep_ms(4);
+                    continue;
+                }
+                fill_bgra(surface, t);
+                app.source.submit_surface(surface, .{});
+                t +%= 1;
+                sleep_ms(16);
+            }
+        },
+        else => {},
+    }
+}
+
+fn fill_bgra(surface: *WinSurface, t: u32) void {
+    switch (builtin.os.tag) {
+        .windows => {
+            std.debug.assert(surface.width == W);
+            std.debug.assert(surface.height == H);
+            const off: usize = t % 32;
+            var row: usize = 0;
+            while (row < H) : (row += 1) {
+                var col: usize = 0;
+                while (col < W) : (col += 1) {
+                    const grid = ((col + off) % 32 == 0) or ((row + off) % 32 == 0);
+                    const o = row * surface.stride + col * 4;
+                    surface.pixels[o + 0] = @intCast(col * 255 / (W - 1)); // B
+                    surface.pixels[o + 1] = if (grid) 255 else 90; // G
+                    surface.pixels[o + 2] = @intCast(row * 255 / (H - 1)); // R
+                    surface.pixels[o + 3] = 255; // A
+                }
+            }
+        },
+        else => {},
     }
 }
 

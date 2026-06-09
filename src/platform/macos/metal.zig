@@ -25,9 +25,9 @@ pub const MTLPixelFormat = struct {
 // with release_cv_texture.
 pub const Nv12Textures = struct {
     luma: *anyopaque,
-    chroma: *anyopaque,
+    chroma: ?*anyopaque,
     cv_luma: *anyopaque,
-    cv_chroma: *anyopaque,
+    cv_chroma: ?*anyopaque,
     width: u32,
     height: u32,
 };
