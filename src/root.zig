@@ -144,7 +144,8 @@ pub fn input_events() []const InputEvent {
 // Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
 // returns true once each time something outside this app changes the clipboard (our
 // own set_clipboard_text writes are not reported), so a remote-control loop can
-// forward it. Call clipboard_changed once a frame.
+// forward it. The clipboard is one per app (every window shares it), and the poll
+// is edge-triggered, so call clipboard_changed once a frame from a single window.
 pub fn clipboard_text(buf: []u8) []const u8 {
     return custom_shell.pasteboard_read_into(buf);
 }
@@ -163,6 +164,20 @@ pub fn set_fullscreen(enable: bool) void {
 }
 pub fn fullscreen() bool {
     return frame_ctx.get().paint.handle.is_fullscreen();
+}
+// Whether the window rendering this frame holds keyboard focus. A multi-window
+// app gates its focused input on this so only the key window drives the editor.
+pub fn window_is_key() bool {
+    return frame_ctx.get().paint.handle.is_key();
+}
+// Identity of the window rendering this frame, so one shared view can branch on
+// which window it is drawing. The first window is 1; opened windows get their
+// WindowOptions id (or an engine-assigned one).
+pub fn window_id() u32 {
+    return frame_ctx.get().window_id;
+}
+pub fn window_title() []const u8 {
+    return frame_ctx.get().window_title;
 }
 pub fn display_count() u32 {
     return custom_shell.display_count();
@@ -530,6 +545,7 @@ pub const kit = @import("kit/root.zig");
 
 pub const app = @import("app.zig");
 pub const App = app_runtime.App;
+pub const WindowOptions = app_runtime.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const Theme = window.Theme;
 pub const ActivationPolicy = app.ActivationPolicy;

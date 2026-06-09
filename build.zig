@@ -126,6 +126,22 @@ pub fn build(b: *std.Build) void {
     const disp_demo_step = b.step("display-demo", "Build + run the display/fullscreen demo");
     disp_demo_step.dependOn(&disp_demo_run.step);
 
+    // Example: multiwindow-demo - smoke test for the multi-window open path.
+    const mw_demo_mod = b.createModule(.{
+        .root_source_file = b.path("examples/multiwindow_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigui", .module = mod }},
+    });
+    const mw_demo_exe = b.addExecutable(.{
+        .name = "multiwindow-demo",
+        .root_module = mw_demo_mod,
+    });
+    b.installArtifact(mw_demo_exe);
+    const mw_demo_run = b.addRunArtifact(mw_demo_exe);
+    const mw_demo_step = b.step("multiwindow-demo", "Build + run the multi-window demo");
+    mw_demo_step.dependOn(&mw_demo_run.step);
+
     // Offline codegen: regenerate src/icon_lucide_data.zig from the Lucide SVG
     // set. The SVG dir lives outside the repo, so it must be passed:
     //   zig build icongen -Dlucide-dir=/path/to/lucide/icons

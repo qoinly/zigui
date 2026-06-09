@@ -13,6 +13,8 @@ pub const FrameCtx = struct {
     theme: *const types.Theme,
     paint: *paint.PaintContext,
     state: ?*anyopaque = null, // the caller's run state; handed back to callbacks
+    window_id: u32 = 1, // which window is rendering; the first window is 1
+    window_title: []const u8 = "", // its title, so a shared view can label itself
 };
 
 var current: ?*FrameCtx = null;

@@ -279,6 +279,9 @@ pub const PaintContext = struct {
     // The native editor (a shared singleton NSTextField); the focused input shows
     // it over its rect and polls the value. Claiming it keeps the runtime from
     // hiding it this frame.
+    // Returns whether the editor was actually shown for this window. It is not,
+    // and the caller should skip its caret/value poll, when another window owns
+    // the shared editor (only the key window may host it).
     pub fn show_text_field(
         self: *PaintContext,
         x: f32,
@@ -289,9 +292,8 @@ pub const PaintContext = struct {
         font_size: f32,
         rgba: types.Rgba,
         id: u32,
-    ) void {
-        self.text_field_active = true;
-        custom_shell.show_text_field(
+    ) bool {
+        const shown = custom_shell.show_text_field(
             self.handle,
             x,
             y,
@@ -304,14 +306,15 @@ pub const PaintContext = struct {
             false,
             id,
         );
+        if (shown) self.text_field_active = true;
+        return shown;
     }
     pub fn text_field_value(self: *PaintContext, buf: []u8) []const u8 {
         _ = self;
         return custom_shell.text_field_value(buf);
     }
     pub fn hide_text_field(self: *PaintContext) void {
-        _ = self;
-        custom_shell.hide_text_field();
+        custom_shell.hide_text_field(self.handle);
     }
 
     pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {
@@ -582,17 +585,20 @@ pub const PaintCallback = *const fn (
     frame: Frame,
 ) PaintError!void;
 
-const RunState = struct {
+pub const RunState = struct {
     paint_ctx: *PaintContext,
     user_ctx: *anyopaque,
     user_cb: PaintCallback,
 };
 
-var g_run_state: RunState = undefined;
+// Windows repaints synchronously from WM_SIZE (paint_now), which has no display
+// link to carry a per-window context, so it targets the last started loop -
+// correct while only one window exists on Windows.
+var g_resize_state: ?*RunState = null;
 
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
-    _ = p;
-    const s = &g_run_state;
+    // The RunState arrives as the display-link callback's type-erased context.
+    const s: *RunState = @ptrCast(@alignCast(p orelse return));
     custom_shell.release_grab_if_blurred();
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
@@ -664,15 +670,19 @@ fn redraw_thunk(ctx: *anyopaque) void {
 // at each step instead of stretching the last frame.
 fn paint_now_thunk(ctx: *anyopaque) void {
     _ = ctx;
-    paint_tick_thunk(null);
+    if (g_resize_state) |s| paint_tick_thunk(@ptrCast(s));
 }
 
 pub fn start_paint_loop(
+    run_state: *RunState,
     paint: *PaintContext,
     ctx: *anyopaque,
     cb: PaintCallback,
 ) !display_link.DisplayLink {
-    g_run_state = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    std.debug.assert(@intFromPtr(run_state) != 0);
+    std.debug.assert(@intFromPtr(paint) != 0);
+    run_state.* = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    if (builtin.os.tag == .windows) g_resize_state = run_state;
     custom_shell.register_hit_test(hit_test_thunk, redraw_thunk, @ptrCast(paint));
     if (builtin.os.tag == .windows) custom_shell.register_paint_now(paint_now_thunk);
     custom_shell.register_mouse_dispatch(.{
@@ -687,9 +697,10 @@ pub fn start_paint_loop(
         .ctx = @ptrCast(paint),
     });
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
+    custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
-        null,
+        @ptrCast(run_state),
         paint_tick_thunk,
     );
     try dl.start();

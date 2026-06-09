@@ -141,6 +141,12 @@ pub const CustomShellHandle = struct {
         return win32.IsIconic(self.window) != 0;
     }
 
+    // The Windows backend runs a single window, which always holds focus.
+    pub fn is_key(self: CustomShellHandle) bool {
+        _ = self;
+        return true;
+    }
+
     pub fn sync_drawable_size(self: CustomShellHandle) ContentSize {
         var rect: win32.RECT = undefined;
         _ = win32.GetClientRect(self.window, &rect);
@@ -219,6 +225,13 @@ pub const RawDispatch = struct {
 
 pub fn register_raw_dispatch(d: RawDispatch) void {
     _ = d;
+}
+
+// Per-window event routing is macOS-only; the Windows WndProc uses the registered
+// globals.
+pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
+    _ = handle;
+    _ = ctx;
 }
 
 pub fn set_grab(on: bool) void {
@@ -726,10 +739,10 @@ pub fn show_text_field(
     secure: bool,
     numeric: bool,
     id: u32,
-) void {
+) bool {
     std.debug.assert(id != 0);
     _ = numeric;
-    const edit = ensure_edit(handle.window) orelse return;
+    const edit = ensure_edit(handle.window) orelse return false;
     const scale = scale_for(handle.window);
 
     _ = win32.SetWindowPos(
@@ -791,13 +804,23 @@ pub fn show_text_field(
         g_active_secure = secure;
         g_active_id = id;
     }
+    return true;
 }
 
-pub fn hide_text_field() void {
+pub fn hide_text_field(handle: CustomShellHandle) void {
+    _ = handle; // the Windows backend runs one window, so it always owns the editor
     if (!g_field_visible) return;
     if (g_edit) |e| _ = win32.ShowWindow(e, win32.SW_HIDE);
     if (g_main_hwnd) |m| _ = win32.SetFocus(m);
     g_field_visible = false;
+}
+
+// The Windows backend runs a single window torn down at process exit, so it has
+// no separate per-window close path to hook.
+pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
+pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
+    _ = cb;
+    _ = ctx;
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {

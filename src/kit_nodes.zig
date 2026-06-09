@@ -1105,9 +1105,8 @@ const SelectOverlaySpec = struct {
             .query = query,
         });
         if (o.search) if (o.search_field) |fld| {
-            pc.animating = true; // poll the native field while the combobox is open
             const sr = select_kit.search_rect(panel);
-            pc.show_text_field(
+            const shown = pc.show_text_field(
                 sr[0],
                 sr[1],
                 sr[2],
@@ -1117,8 +1116,11 @@ const SelectOverlaySpec = struct {
                 theme.foreground,
                 SELECT_SEARCH_ID,
             );
-            var tmp: [256]u8 = undefined;
-            fld.set(pc.text_field_value(&tmp));
+            if (shown) {
+                pc.animating = true; // poll the native field while the combobox is open
+                var tmp: [256]u8 = undefined;
+                fld.set(pc.text_field_value(&tmp));
+            }
         };
         if (o.on_dismiss) |cb|
             try dismiss_around(pc, r.size.width, r.size.height, panel, cb, o.ctx);
@@ -1383,7 +1385,7 @@ fn edit_native(
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
     const ey = r.origin.y + (r.size.height - EDITOR_H) / 2;
     const ew = @max(0, r.size.width - input_kit.PAD * 2);
-    pc.show_text_field(
+    const shown = pc.show_text_field(
         ex,
         ey,
         ew,
@@ -1393,6 +1395,9 @@ fn edit_native(
         theme.foreground,
         id,
     );
+    // A background window does not own the editor, so it neither animates a caret
+    // nor reads the value (that would pull the other window's text into this one).
+    if (!shown) return;
     pc.animating = true;
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));

@@ -109,6 +109,23 @@ pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_mouse_dispatch = d;
 }
 
+// The view (ZigUICustomBody) holds a pointer to its window's render context in this
+// ivar; an event imp reads it from its own `self` so each window routes to its own
+// context. The dispatch fn-pointers are shared (the same thunks); only the ctx
+// differs per window. Unset (or null) falls back to the registered global ctx.
+const CTX_IVAR = "zg_ctx";
+
+fn view_ctx(self: Id, fallback: *anyopaque) *anyopaque {
+    return objc.get_ivar(anyopaque, self, CTX_IVAR) orelse fallback;
+}
+
+// Bind a window's content view to its render context, so its event imps resolve to
+// the right window.
+pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
+    std.debug.assert(@intFromPtr(handle.content_view) != 0);
+    objc.set_ivar(handle.content_view, CTX_IVAR, ctx);
+}
+
 // Device-dependent modifier bits in NSEvent.modifierFlags - left and right keys
 // reported apart, which a remote needs. The shared MOD_* above are device-neutral.
 const NX_LSHIFT: NSUInteger = 0x00000002;
@@ -257,7 +274,7 @@ fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_titlebar_band_h > 0 and ly < g_titlebar_band_h) {
         const over_ctrl = if (g_hit_test) |ht| blk: {
             std.debug.assert(g_hit_ctx != null); // set together with g_hit_test
-            break :blk ht(g_hit_ctx.?, lx, ly, g_titlebar_band_h);
+            break :blk ht(view_ctx(self, g_hit_ctx.?), lx, ly, g_titlebar_band_h);
         } else false;
         const clicks: isize = objc.msg_send(isize, event, "clickCount", .{});
         if (!over_ctrl) {
@@ -272,7 +289,7 @@ fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
             return;
         }
     }
-    d.on_down(d.ctx, lx, ly);
+    d.on_down(view_ctx(self, d.ctx), lx, ly);
 }
 
 fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -285,7 +302,7 @@ fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) vo
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_right_down(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_right_down(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -298,7 +315,7 @@ fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_move(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_move(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -311,13 +328,13 @@ fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void 
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_drag(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_drag(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
-fn custom_body_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_mouse_up_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) return raw_button(event, .left, false);
     const d = g_mouse_dispatch orelse return;
-    d.on_up(d.ctx);
+    d.on_up(view_ctx(self, d.ctx));
 }
 
 fn custom_body_right_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
@@ -332,13 +349,13 @@ fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .middle, false);
 }
 
-fn custom_body_mouse_exited_imp(_: Id, _: Sel, _: Id) callconv(.c) void {
+fn custom_body_mouse_exited_imp(self: Id, _: Sel, _: Id) callconv(.c) void {
     if (g_grabbed) return; // a hidden, decoupled cursor cannot exit the view
     const d = g_mouse_dispatch orelse return;
-    d.on_exit(d.ctx);
+    d.on_exit(view_ctx(self, d.ctx));
 }
 
-fn custom_body_scroll_wheel_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_scroll_wheel_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     const dx: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaX", .{});
     const dy: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaY", .{});
     if (g_grabbed) {
@@ -349,7 +366,7 @@ fn custom_body_scroll_wheel_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
         return;
     }
     const d = g_mouse_dispatch orelse return;
-    d.on_scroll(d.ctx, @floatCast(dx), @floatCast(dy));
+    d.on_scroll(view_ctx(self, d.ctx), @floatCast(dx), @floatCast(dy));
 }
 
 // YES so the body view gets keyDown: while it's the window's first responder.
@@ -420,7 +437,7 @@ fn key_code_for(ch: u16) KeyCode {
     };
 }
 
-fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_key_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) return raw_key(event, true);
     const d = g_mouse_dispatch orelse return;
     const chars: Id = objc.msg_send(Id, event, "charactersIgnoringModifiers", .{});
@@ -431,7 +448,7 @@ fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     const ch: u16 = objc.msg_send(u16, chars, "characterAtIndex:", .{@as(NSUInteger, 0)});
     const flags: NSUInteger = objc.msg_send(NSUInteger, event, "modifierFlags", .{});
     const code = key_code_for(ch);
-    d.on_key(d.ctx, .{
+    d.on_key(view_ctx(self, d.ctx), .{
         .code = code,
         .ch = if (code == .char) @as(u21, ch) else 0,
         .mods = .{
@@ -493,6 +510,8 @@ fn ensure_custom_body_class() ?Class {
     if (g_custom_body_class) |c| return c;
     const NSView_cls = objc.get_class("NSView") orelse return null;
     const cls = objc.objc_allocateClassPair(NSView_cls, "ZigUICustomBody", 0) orelse return null;
+    const ptr_align: u8 = @ctz(@as(usize, @alignOf(?*anyopaque)));
+    _ = objc.class_addIvar(cls, CTX_IVAR, @sizeOf(?*anyopaque), ptr_align, "^v");
     _ = objc.class_addMethod(cls, objc.sel("isFlipped"), @ptrCast(&is_flipped_yes_imp), "B@:");
     _ = objc.class_addMethod(
         cls,
@@ -612,6 +631,12 @@ pub const CustomShellHandle = struct {
         return (mask & NSWindowStyleMaskFullScreen) != 0;
     }
 
+    // Whether this window currently has keyboard focus. With more than one window
+    // the app uses this so only the key window drives the shared native editor.
+    pub fn is_key(self: CustomShellHandle) bool {
+        return objc.msg_send(bool, self.window, "isKeyWindow", .{});
+    }
+
     // Native fullscreen (own Space); the window delegate re-centers the traffic
     // lights on exit. toggleFullScreen only toggles, so guard to make it absolute.
     pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
@@ -685,6 +710,41 @@ fn window_did_resize_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     if (@intFromPtr(win) != 0) recenter_traffic_lights(win);
 }
 
+// Fired when any of our windows is closing; the runtime stops that window's
+// render loop so its display link can't keep driving a torn-down surface.
+pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
+var g_window_close: ?WindowCloseFn = null;
+var g_window_close_ctx: ?*anyopaque = null;
+
+pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
+    g_window_close = cb;
+    g_window_close_ctx = ctx;
+}
+
+fn window_will_close_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
+    const win = objc.msg_send(Id, notif, "object", .{});
+    if (@intFromPtr(win) != 0) {
+        const cv = objc.msg_send(?Id, win, "contentView", .{});
+        if (cv) |v| release_editor_if_owned(v);
+    }
+    const cb = g_window_close orelse return;
+    const ctx = g_window_close_ctx orelse return;
+    cb(ctx, win);
+}
+
+// Drop the editor's owner when the owning window goes away, so a later window's
+// hide/show pass doesn't compare against (or reuse) a torn-down view. The shared
+// fields keep their create-time retain, so removeFromSuperview unparents without
+// freeing them for the next window.
+fn release_editor_if_owned(content_view: Id) void {
+    const owner = g_field_owner orelse return;
+    if (@intFromPtr(owner) != @intFromPtr(content_view)) return;
+    if (g_field) |f| objc.msg_send(void, f, "removeFromSuperview", .{});
+    if (g_secure_field) |f| objc.msg_send(void, f, "removeFromSuperview", .{});
+    g_visible = false;
+    g_field_owner = null;
+}
+
 fn ensure_window_delegate() ?Id {
     if (g_window_delegate) |d| return d;
     const NSObject = objc.get_class("NSObject") orelse return null;
@@ -707,6 +767,12 @@ fn ensure_window_delegate() ?Id {
             @ptrCast(&window_did_resize_imp),
             "v@:@",
         );
+        _ = objc.class_addMethod(
+            c,
+            objc.sel("windowWillClose:"),
+            @ptrCast(&window_will_close_imp),
+            "v@:@",
+        );
         objc.objc_registerClassPair(c);
         g_window_delegate_class = c;
         break :blk c;
@@ -726,6 +792,10 @@ var g_secure_field: ?Id = null;
 var g_visible: bool = false;
 var g_active_secure: bool = false;
 var g_active_id: u32 = 0;
+// The content view that currently hosts the editor. With more than one window
+// this is the owner: only that window may move or hide the shared field, so a
+// background window can't yank it off the one the user is typing in.
+var g_field_owner: ?Id = null;
 
 const NSFocusRingTypeNone: NSUInteger = 1;
 const NSNumberFormatterDecimalStyle: NSUInteger = 1;
@@ -746,11 +816,28 @@ fn int_formatter() ?Id {
     return f;
 }
 
+// Only one field is first responder at a time, so move the shared singleton to
+// the window asking for it instead of keeping a separate editor per window.
+fn reparent(f: Id, content_view: Id) void {
+    std.debug.assert(@intFromPtr(f) != 0);
+    std.debug.assert(@intFromPtr(content_view) != 0);
+    const cur = objc.msg_send(?Id, f, "superview", .{});
+    if (@intFromPtr(cur) == @intFromPtr(content_view)) return;
+    objc.msg_send(void, f, "removeFromSuperview", .{});
+    objc.msg_send(void, content_view, "addSubview:", .{f});
+}
+
 fn ensure_field(content_view: Id, secure: bool) ?Id {
     if (secure) {
-        if (g_secure_field) |f| return f;
+        if (g_secure_field) |f| {
+            reparent(f, content_view);
+            return f;
+        }
     } else {
-        if (g_field) |f| return f;
+        if (g_field) |f| {
+            reparent(f, content_view);
+            return f;
+        }
     }
     const cls_name = if (secure) "NSSecureTextField" else "NSTextField";
     const cls = objc.get_class(cls_name) orelse return null;
@@ -785,14 +872,20 @@ pub fn show_text_field(
     secure: bool,
     numeric: bool,
     id: u32,
-) void {
+) bool {
     std.debug.assert(id != 0); // 0 is the inactive sentinel for g_active_id
-    const f = ensure_field(handle.content_view, secure) orelse return;
+    std.debug.assert(@intFromPtr(handle.content_view) != 0);
+    // Only the key window may host the shared editor; let a background window's
+    // request fall through so it never steals the field from the focused window.
+    if (!handle.is_key()) return false;
+    const f = ensure_field(handle.content_view, secure) orelse return false;
     objc.msg_send(void, f, "setFrame:", .{NSRect{
         .origin = .{ .x = x, .y = y },
         .size = .{ .width = w, .height = h },
     }});
-    if (!g_visible or g_active_secure != secure or g_active_id != id) {
+    const owner_moved = g_field_owner == null or
+        @intFromPtr(g_field_owner.?) != @intFromPtr(handle.content_view);
+    if (!g_visible or g_active_secure != secure or g_active_id != id or owner_moved) {
         // Font + colour stay constant while a field is focused, so resolve and
         // apply them only on (re)seed - colorWithRed: allocs an NSColor per call,
         // which on the per-frame path would be pure waste.
@@ -827,14 +920,22 @@ pub fn show_text_field(
         g_visible = true;
         g_active_secure = secure;
         g_active_id = id;
+        g_field_owner = handle.content_view;
     }
+    return true;
 }
 
-pub fn hide_text_field() void {
+pub fn hide_text_field(handle: CustomShellHandle) void {
     if (!g_visible) return;
+    // Only the owning window may hide the editor, so a background window's hide
+    // pass can't pull the field off the window the user is typing in.
+    if (g_field_owner) |o| {
+        if (@intFromPtr(o) != @intFromPtr(handle.content_view)) return;
+    }
     if (g_field) |f| objc.msg_send(void, f, "setHidden:", .{objc.YES});
     if (g_secure_field) |f| objc.msg_send(void, f, "setHidden:", .{objc.YES});
     g_visible = false;
+    g_field_owner = null;
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {
@@ -913,13 +1014,17 @@ pub fn pasteboard_write_string(text: []const u8) void {
 
 // macOS has no clipboard-change event, only NSPasteboard.changeCount, so the app
 // polls. These track the last count seen and the count after our own last write.
+// One pasteboard serves the whole process, so this state is application-scoped,
+// not per-window.
 var g_pb_last_seen: NSInteger = 0;
 var g_pb_own: NSInteger = 0;
 var g_pb_primed: bool = false;
 
 // True once each time the clipboard changes from outside this app. The first call
 // only baselines (no spurious event for whatever was already on the clipboard); our
-// own writes are recognised via g_pb_own and never reported.
+// own writes are recognised via g_pb_own and never reported. Edge-triggered: the
+// call that sees a change consumes it, so with several windows poll it from one
+// place rather than each window's frame, or only the first to poll learns of it.
 pub fn clipboard_changed_external() bool {
     const pb = general_pasteboard() orelse return false;
     const c: NSInteger = objc.msg_send(NSInteger, pb, "changeCount", .{});
@@ -1077,8 +1182,10 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         g_traffic_light_y = @floatCast(tl_y);
         g_traffic_light_x = @floatCast(tl_x);
         recenter_traffic_lights(window);
-        if (ensure_window_delegate()) |d| objc.msg_send(void, window, "setDelegate:", .{d});
     }
+    // The delegate also carries windowWillClose, where the runtime stops the
+    // window's render loop before the OS releases it, so set it on every window.
+    if (ensure_window_delegate()) |d| objc.msg_send(void, window, "setDelegate:", .{d});
 
     return .{
         .window = window,
