@@ -221,6 +221,13 @@ pub fn register_raw_dispatch(d: RawDispatch) void {
     _ = d;
 }
 
+// Per-window event routing is macOS-only; the Windows WndProc uses the registered
+// globals.
+pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
+    _ = handle;
+    _ = ctx;
+}
+
 pub fn set_grab(on: bool) void {
     _ = on;
 }

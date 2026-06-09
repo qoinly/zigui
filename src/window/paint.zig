@@ -687,6 +687,7 @@ pub fn start_paint_loop(
         .ctx = @ptrCast(paint),
     });
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
+    custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
         @ptrCast(&g_run_state),

@@ -109,6 +109,23 @@ pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_mouse_dispatch = d;
 }
 
+// The view (ZigUICustomBody) holds a pointer to its window's render context in this
+// ivar; an event imp reads it from its own `self` so each window routes to its own
+// context. The dispatch fn-pointers are shared (the same thunks); only the ctx
+// differs per window. Unset (or null) falls back to the registered global ctx.
+const CTX_IVAR = "zg_ctx";
+
+fn view_ctx(self: Id, fallback: *anyopaque) *anyopaque {
+    return objc.get_ivar(anyopaque, self, CTX_IVAR) orelse fallback;
+}
+
+// Bind a window's content view to its render context, so its event imps resolve to
+// the right window.
+pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
+    std.debug.assert(@intFromPtr(handle.content_view) != 0);
+    objc.set_ivar(handle.content_view, CTX_IVAR, ctx);
+}
+
 // Device-dependent modifier bits in NSEvent.modifierFlags - left and right keys
 // reported apart, which a remote needs. The shared MOD_* above are device-neutral.
 const NX_LSHIFT: NSUInteger = 0x00000002;
@@ -272,7 +289,7 @@ fn custom_body_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
             return;
         }
     }
-    d.on_down(d.ctx, lx, ly);
+    d.on_down(view_ctx(self, d.ctx), lx, ly);
 }
 
 fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -285,7 +302,7 @@ fn custom_body_right_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) vo
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_right_down(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_right_down(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -298,7 +315,7 @@ fn custom_body_mouse_moved_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_move(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_move(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
@@ -311,13 +328,13 @@ fn custom_body_mouse_dragged_imp(self: Id, _: Sel, event: Id) callconv(.c) void 
         "convertPoint:fromView:",
         .{ win_loc, @as(?Id, null) },
     );
-    d.on_drag(d.ctx, @floatCast(loc.x), @floatCast(loc.y));
+    d.on_drag(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
-fn custom_body_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_mouse_up_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) return raw_button(event, .left, false);
     const d = g_mouse_dispatch orelse return;
-    d.on_up(d.ctx);
+    d.on_up(view_ctx(self, d.ctx));
 }
 
 fn custom_body_right_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
@@ -332,13 +349,13 @@ fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .middle, false);
 }
 
-fn custom_body_mouse_exited_imp(_: Id, _: Sel, _: Id) callconv(.c) void {
+fn custom_body_mouse_exited_imp(self: Id, _: Sel, _: Id) callconv(.c) void {
     if (g_grabbed) return; // a hidden, decoupled cursor cannot exit the view
     const d = g_mouse_dispatch orelse return;
-    d.on_exit(d.ctx);
+    d.on_exit(view_ctx(self, d.ctx));
 }
 
-fn custom_body_scroll_wheel_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_scroll_wheel_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     const dx: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaX", .{});
     const dy: CGFloat = objc.msg_send(CGFloat, event, "scrollingDeltaY", .{});
     if (g_grabbed) {
@@ -349,7 +366,7 @@ fn custom_body_scroll_wheel_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
         return;
     }
     const d = g_mouse_dispatch orelse return;
-    d.on_scroll(d.ctx, @floatCast(dx), @floatCast(dy));
+    d.on_scroll(view_ctx(self, d.ctx), @floatCast(dx), @floatCast(dy));
 }
 
 // YES so the body view gets keyDown: while it's the window's first responder.
@@ -420,7 +437,7 @@ fn key_code_for(ch: u16) KeyCode {
     };
 }
 
-fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
+fn custom_body_key_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) return raw_key(event, true);
     const d = g_mouse_dispatch orelse return;
     const chars: Id = objc.msg_send(Id, event, "charactersIgnoringModifiers", .{});
@@ -431,7 +448,7 @@ fn custom_body_key_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     const ch: u16 = objc.msg_send(u16, chars, "characterAtIndex:", .{@as(NSUInteger, 0)});
     const flags: NSUInteger = objc.msg_send(NSUInteger, event, "modifierFlags", .{});
     const code = key_code_for(ch);
-    d.on_key(d.ctx, .{
+    d.on_key(view_ctx(self, d.ctx), .{
         .code = code,
         .ch = if (code == .char) @as(u21, ch) else 0,
         .mods = .{
@@ -493,6 +510,8 @@ fn ensure_custom_body_class() ?Class {
     if (g_custom_body_class) |c| return c;
     const NSView_cls = objc.get_class("NSView") orelse return null;
     const cls = objc.objc_allocateClassPair(NSView_cls, "ZigUICustomBody", 0) orelse return null;
+    const ptr_align: u8 = @ctz(@as(usize, @alignOf(?*anyopaque)));
+    _ = objc.class_addIvar(cls, CTX_IVAR, @sizeOf(?*anyopaque), ptr_align, "^v");
     _ = objc.class_addMethod(cls, objc.sel("isFlipped"), @ptrCast(&is_flipped_yes_imp), "B@:");
     _ = objc.class_addMethod(
         cls,

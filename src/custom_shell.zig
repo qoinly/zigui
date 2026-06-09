@@ -21,6 +21,7 @@ pub const CursorKind = impl.CursorKind;
 pub const register_mouse_dispatch = impl.register_mouse_dispatch;
 pub const RawDispatch = impl.RawDispatch;
 pub const register_raw_dispatch = impl.register_raw_dispatch;
+pub const bind_surface_ctx = impl.bind_surface_ctx;
 pub const set_grab = impl.set_grab;
 pub const is_grabbed = impl.is_grabbed;
 pub const release_grab_if_blurred = impl.release_grab_if_blurred;
