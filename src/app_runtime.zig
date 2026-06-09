@@ -36,9 +36,9 @@ pub fn Views(comptime State: type) type {
     };
 }
 
-// The one public entry: opens a custom-rendered window and owns the render loop.
-pub const App = struct {
-    rt: platform_app.App,
+// Everything scoped to one window, kept apart from the process-level platform app
+// and run loop that live on App.
+pub const Window = struct {
     handle: window.CustomShellHandle,
     pc: paint.PaintContext,
     eng: layout.LayoutEngine,
@@ -47,6 +47,21 @@ pub const App = struct {
     alloc: std.mem.Allocator,
     dl: ?display_link.DisplayLink = null,
     user_state: ?*anyopaque = null,
+
+    pub fn deinit(self: *Window) void {
+        if (self.dl) |*dl| dl.stop(); // stop the link before the paint context it drives
+        self.pc.deinit();
+        self.eng.deinit();
+        self.arena.deinit();
+        self.handle.deinit();
+    }
+};
+
+// The one public entry: opens a custom-rendered window and owns the render loop.
+pub const App = struct {
+    rt: platform_app.App,
+    win: Window,
+    alloc: std.mem.Allocator,
 
     pub const Options = struct {
         title: []const u8 = "",
@@ -82,18 +97,21 @@ pub const App = struct {
 
         self.* = .{
             .rt = rt,
-            .handle = handle,
-            .pc = undefined,
-            .eng = layout.LayoutEngine.init(alloc),
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .theme = theme,
             .alloc = alloc,
+            .win = .{
+                .handle = handle,
+                .pc = undefined,
+                .eng = layout.LayoutEngine.init(alloc),
+                .arena = std.heap.ArenaAllocator.init(alloc),
+                .theme = theme,
+                .alloc = alloc,
+            },
         };
-        errdefer self.arena.deinit();
-        errdefer self.eng.deinit();
+        errdefer self.win.arena.deinit();
+        errdefer self.win.eng.deinit();
 
-        try self.pc.init(self.handle, alloc);
-        self.pc.icon_system.set_source(.bundled);
+        try self.win.pc.init(self.win.handle, alloc);
+        self.win.pc.icon_system.set_source(.bundled);
         return self;
     }
 
@@ -101,39 +119,39 @@ pub const App = struct {
     // the title band. The free builders read the per-frame context this sets, so
     // the views need no allocator.
     pub fn run(self: *App, state: anytype, comptime views: Views(@TypeOf(state))) !void {
-        std.debug.assert(self.dl == null);
+        std.debug.assert(self.win.dl == null);
         const StateArg = @TypeOf(state);
         comptime std.debug.assert(StateArg == void or @typeInfo(StateArg) == .pointer);
-        self.user_state = if (StateArg == void) null else @ptrCast(state);
+        self.win.user_state = if (StateArg == void) null else @ptrCast(state);
         const Bridge = struct {
             fn cb(
                 ctx: *anyopaque,
                 pc: *paint.PaintContext,
                 raw: paint.Frame,
             ) paint.PaintError!void {
-                const app: *App = @ptrCast(@alignCast(ctx));
+                const w: *Window = &(@as(*App, @ptrCast(@alignCast(ctx)))).win;
                 // High-water pool: reset both before building this frame's tree.
-                app.eng.clear();
-                _ = app.arena.reset(.retain_capacity);
+                w.eng.clear();
+                _ = w.arena.reset(.retain_capacity);
                 pc.blur_modal = false; // an overlay re-arms it each frame while open
                 pc.text_field_active = false; // a focused input re-arms it below
                 var fc = frame_ctx.FrameCtx{
-                    .arena = app.arena.allocator(),
-                    .theme = &app.theme,
+                    .arena = w.arena.allocator(),
+                    .theme = &w.theme,
                     .paint = pc,
-                    .state = app.user_state,
+                    .state = w.user_state,
                 };
                 var f = Frame{
                     .size = .{ .width = raw.width, .height = raw.height },
                     .body = raw.body,
                     .titlebar = raw.titlebar,
-                    .theme = &app.theme,
-                    .arena = app.arena.allocator(),
+                    .theme = &w.theme,
+                    .arena = w.arena.allocator(),
                     .time = pc.now_s,
                 };
                 // non-null whenever StateArg != void (run sets it from a real pointer)
                 const st: StateArg =
-                    if (StateArg == void) {} else @ptrCast(@alignCast(app.user_state.?));
+                    if (StateArg == void) {} else @ptrCast(@alignCast(w.user_state.?));
                 frame_ctx.enter(&fc);
                 defer frame_ctx.leave();
                 var builder = raw.builder;
@@ -146,37 +164,33 @@ pub const App = struct {
                 pc.block_hover = ov_root != null;
                 if (views.titlebar) |titlebar_view| {
                     const tb_root = titlebar_view(&f, st);
-                    try node.render_at(&app.eng, &builder, &app.theme, tb_root, raw.titlebar, pc);
+                    try node.render_at(&w.eng, &builder, &w.theme, tb_root, raw.titlebar, pc);
                 }
                 const body_root = views.body(&f, st);
-                try node.render_at(&app.eng, &builder, &app.theme, body_root, raw.body, pc);
+                try node.render_at(&w.eng, &builder, &w.theme, body_root, raw.body, pc);
                 if (ov_root) |root| {
                     pc.block_hover = false; // the modal layer itself is live
                     const full = geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size };
-                    try node.render_at(&app.eng, &builder, &app.theme, root, full, pc);
+                    try node.render_at(&w.eng, &builder, &w.theme, root, full, pc);
                 }
                 // Non-modal layer on top; block_hover stays as-is so the body keeps
                 // its hover (a tooltip needs its trigger live to stay visible).
                 if (views.hud) |hud_view| if (hud_view(&f, st)) |hud_root| {
                     const full = geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size };
-                    try node.render_at(&app.eng, &builder, &app.theme, hud_root, full, pc);
+                    try node.render_at(&w.eng, &builder, &w.theme, hud_root, full, pc);
                 };
                 // No focused input claimed the singleton editor this frame -> hide it.
                 if (!pc.text_field_active) pc.hide_text_field();
             }
         };
-        self.dl = try paint.start_paint_loop(&self.pc, @ptrCast(self), Bridge.cb);
-        self.pc.request_redraw();
-        self.handle.focus();
+        self.win.dl = try paint.start_paint_loop(&self.win.pc, @ptrCast(self), Bridge.cb);
+        self.win.pc.request_redraw();
+        self.win.handle.focus();
         self.rt.run_forever();
     }
 
     pub fn deinit(self: *App) void {
-        if (self.dl) |*dl| dl.stop();
-        self.pc.deinit();
-        self.eng.deinit();
-        self.arena.deinit();
-        self.handle.deinit();
+        self.win.deinit();
         self.rt.deinit();
         self.alloc.destroy(self);
     }
