@@ -46,6 +46,9 @@ pub const Window = struct {
     theme: types.Theme,
     alloc: std.mem.Allocator,
     dl: ?display_link.DisplayLink = null,
+    // Owns this window's render-loop state so the display link drives it without a
+    // shared global; each window gets an independent vsync loop.
+    run_state: paint.RunState = undefined,
     user_state: ?*anyopaque = null,
 
     pub fn deinit(self: *Window) void {
@@ -183,7 +186,12 @@ pub const App = struct {
                 if (!pc.text_field_active) pc.hide_text_field();
             }
         };
-        self.win.dl = try paint.start_paint_loop(&self.win.pc, @ptrCast(self), Bridge.cb);
+        self.win.dl = try paint.start_paint_loop(
+            &self.win.run_state,
+            &self.win.pc,
+            @ptrCast(self),
+            Bridge.cb,
+        );
         self.win.pc.request_redraw();
         self.win.handle.focus();
         self.rt.run_forever();

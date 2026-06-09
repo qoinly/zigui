@@ -582,13 +582,16 @@ pub const PaintCallback = *const fn (
     frame: Frame,
 ) PaintError!void;
 
-const RunState = struct {
+pub const RunState = struct {
     paint_ctx: *PaintContext,
     user_ctx: *anyopaque,
     user_cb: PaintCallback,
 };
 
-var g_run_state: RunState = undefined;
+// Windows repaints synchronously from WM_SIZE (paint_now), which has no display
+// link to carry a per-window context, so it targets the last started loop -
+// correct while only one window exists on Windows.
+var g_resize_state: ?*RunState = null;
 
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     // The RunState arrives as the display-link callback's type-erased context.
@@ -664,15 +667,19 @@ fn redraw_thunk(ctx: *anyopaque) void {
 // at each step instead of stretching the last frame.
 fn paint_now_thunk(ctx: *anyopaque) void {
     _ = ctx;
-    paint_tick_thunk(@ptrCast(&g_run_state));
+    if (g_resize_state) |s| paint_tick_thunk(@ptrCast(s));
 }
 
 pub fn start_paint_loop(
+    run_state: *RunState,
     paint: *PaintContext,
     ctx: *anyopaque,
     cb: PaintCallback,
 ) !display_link.DisplayLink {
-    g_run_state = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    std.debug.assert(@intFromPtr(run_state) != 0);
+    std.debug.assert(@intFromPtr(paint) != 0);
+    run_state.* = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    if (builtin.os.tag == .windows) g_resize_state = run_state;
     custom_shell.register_hit_test(hit_test_thunk, redraw_thunk, @ptrCast(paint));
     if (builtin.os.tag == .windows) custom_shell.register_paint_now(paint_now_thunk);
     custom_shell.register_mouse_dispatch(.{
@@ -690,7 +697,7 @@ pub fn start_paint_loop(
     custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
-        @ptrCast(&g_run_state),
+        @ptrCast(run_state),
         paint_tick_thunk,
     );
     try dl.start();
