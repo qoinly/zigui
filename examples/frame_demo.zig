@@ -76,7 +76,9 @@ const App = struct {
     thread: ?std.Thread = null,
     pool: [pool_size]?*anyopaque = .{null} ** pool_size,
     win_pool: WinPool = if (builtin.os.tag == .windows) undefined else {},
+    win_pool_count: usize = 0,
     win_pool_ready: bool = false,
+    win_next: u32 = 0,
 
     // Called after the window closes (run returns): stop the producer, free the
     // source's refs, then release the pool buffers.
@@ -111,18 +113,24 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     // feeder thread spin up on the first frame. A real client starts its decoder
     // the same way once it has a handle to feed.
     if (!app.started) {
-        app.source = zigui.FrameSource.init(zigui.renderer_handle());
-        app.running.store(true, .release);
-        init_windows_pool(app);
-        if (std.Thread.spawn(.{}, produce, .{app})) |t| {
-            app.thread = t;
+        const renderer = zigui.renderer_handle();
+        app.source = zigui.FrameSource.init(renderer);
+        if (builtin.os.tag == .windows) {
+            init_windows_pool(app, renderer);
             app.started = true;
-        } else |_| {
-            app.running.store(false, .release);
+        } else {
+            app.running.store(true, .release);
+            if (std.Thread.spawn(.{}, produce, .{app})) |t| {
+                app.thread = t;
+                app.started = true;
+            } else |_| {
+                app.running.store(false, .release);
+            }
         }
     }
+    if (builtin.os.tag == .windows) produce_windows(app, zigui.renderer_handle());
     const label = if (builtin.os.tag == .windows)
-        "External frame: NV12 YUV->RGB on D3D11"
+        "External frame: shared NV12, YUV->RGB on D3D11"
     else
         "External frame: zero-copy NV12, YUV->RGB on the gpu";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
@@ -131,11 +139,11 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     });
 }
 
-// Producer thread: stands in for a decoder emitting NV12 surfaces. Fills a pool
+// The producer stands in for a decoder emitting NV12 surfaces. It fills a pool
 // buffer, hands it off newest-wins, and rotates; the source drops anything the
 // render side does not pick up.
 fn produce(app: *App) void {
-    if (builtin.os.tag == .windows) return produce_windows(app);
+    if (builtin.os.tag == .windows) return;
     if (builtin.os.tag != .macos) return; // the CVPixelBuffer source is macOS-only
     for (&app.pool) |*pb| pb.* = create_nv12();
     var t: u32 = 0;
@@ -151,73 +159,79 @@ fn produce(app: *App) void {
     }
 }
 
-fn init_windows_pool(app: *App) void {
+fn init_windows_pool(app: *App, renderer: *zigui.Renderer) void {
     if (app.win_pool_ready) return;
     switch (builtin.os.tag) {
         .windows => for (&app.win_pool, 0..) |*surface, i| {
-            surface.* = zigui.FrameSurface.init_nv12(
-                W,
-                H,
-                W,
-                win_luma[i][0..].ptr,
-                W,
-                win_chroma[i][0..].ptr,
-            );
+            surface.* = renderer.create_shared_nv12_surface(W, H) orelse break;
+            app.win_pool_count = i + 1;
         },
         else => {},
     }
-    if (builtin.os.tag == .windows) app.win_pool_ready = true;
+    if (builtin.os.tag == .windows) app.win_pool_ready = app.win_pool_count == pool_size;
 }
 
 fn deinit_windows_pool(app: *App) void {
-    if (!app.win_pool_ready) return;
     switch (builtin.os.tag) {
-        .windows => for (&app.win_pool) |*surface| surface.deinit(),
+        .windows => for (app.win_pool[0..app.win_pool_count]) |*surface| surface.deinit(),
         else => {},
     }
+    app.win_pool_count = 0;
     app.win_pool_ready = false;
 }
 
-fn produce_windows(app: *App) void {
+fn produce_windows(app: *App, renderer: *zigui.Renderer) void {
     switch (builtin.os.tag) {
         .windows => {
-            var t: u32 = 0;
-            while (app.running.load(.acquire)) {
-                const surface = &app.win_pool[t % pool_size];
+            if (!app.win_pool_ready) return;
+            var attempts: usize = 0;
+            while (attempts < pool_size) : (attempts += 1) {
+                const idx = app.win_next % pool_size;
+                const surface = &app.win_pool[idx];
                 if (!surface.available()) {
-                    sleep_ms(4);
+                    app.win_next +%= 1;
                     continue;
                 }
-                fill_nv12_windows(surface, t);
+                fill_nv12_windows(
+                    win_luma[idx][0..],
+                    win_chroma[idx][0..],
+                    app.win_next,
+                );
+                if (!renderer.update_shared_nv12_surface(
+                    surface,
+                    win_luma[idx][0..].ptr,
+                    W,
+                    win_chroma[idx][0..].ptr,
+                    W,
+                )) return;
                 app.source.submit_surface(surface, .{});
-                t +%= 1;
-                sleep_ms(16);
+                app.win_next +%= 1;
+                return;
             }
         },
         else => {},
     }
 }
 
-fn fill_nv12_windows(surface: *WinSurface, t: u32) void {
+fn fill_nv12_windows(y: []u8, chroma: []u8, t: u32) void {
     switch (builtin.os.tag) {
         .windows => {
-            std.debug.assert(surface.width == W);
-            std.debug.assert(surface.height == H);
+            std.debug.assert(y.len >= W * H);
+            std.debug.assert(chroma.len >= W * H / 2);
             const off: usize = t % 32;
             var row: usize = 0;
             while (row < H) : (row += 1) {
                 var col: usize = 0;
                 while (col < W) : (col += 1) {
                     const grid = ((col + off) % 32 == 0) or ((row + off) % 32 == 0);
-                    surface.pixels[row * surface.stride + col] = if (grid) 235 else 110;
+                    y[row * W + col] = if (grid) 235 else 110;
                 }
             }
-            const chroma = surface.chroma_pixels.?;
             var cy: usize = 0;
             while (cy < CH) : (cy += 1) {
                 var cx: usize = 0;
                 while (cx < CW) : (cx += 1) {
-                    const o = cy * surface.chroma_stride + cx * 2;
+                    const o = cy * W + cx * 2;
                     chroma[o + 0] = @intCast(16 + cx * 224 / (CW - 1)); // Cb
                     chroma[o + 1] = @intCast(16 + cy * 224 / (CH - 1)); // Cr
                 }

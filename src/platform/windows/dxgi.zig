@@ -9,6 +9,7 @@ const HRESULT = win32.HRESULT;
 const GUID = win32.GUID;
 const HWND = win32.HWND;
 const BOOL = win32.BOOL;
+const HANDLE = win32.HANDLE;
 
 pub const DXGI_FORMAT_UNKNOWN: u32 = 0;
 pub const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
@@ -65,6 +66,86 @@ pub const IID_ID3D11Texture2D = com.guid(
     0x4f,
     0x9c,
 );
+
+pub const IID_IDXGIResource = com.guid(
+    0x035f3ab4,
+    0x482e,
+    0x4e50,
+    0xb4,
+    0x1f,
+    0x8a,
+    0x7f,
+    0x8b,
+    0xd8,
+    0x96,
+    0x0b,
+);
+
+pub const IID_IDXGIKeyedMutex = com.guid(
+    0x9d8e1289,
+    0xd7b3,
+    0x465f,
+    0x81,
+    0x26,
+    0x25,
+    0x0e,
+    0x34,
+    0x9a,
+    0xf8,
+    0x5d,
+);
+
+pub const IDXGIResource = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        QueryInterface: *const fn (
+            *IDXGIResource,
+            *const GUID,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDXGIResource) callconv(.winapi) u32,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetParent: *const anyopaque,
+        GetDevice: *const anyopaque,
+        GetSharedHandle: *const fn (*IDXGIResource, *?HANDLE) callconv(.winapi) HRESULT,
+        GetUsage: *const anyopaque,
+        SetEvictionPriority: *const anyopaque,
+        GetEvictionPriority: *const anyopaque,
+    };
+
+    pub fn get_shared_handle(self: *IDXGIResource, out: *?HANDLE) HRESULT {
+        return self.vtable.GetSharedHandle(self, out);
+    }
+};
+
+pub const IDXGIKeyedMutex = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDXGIKeyedMutex) callconv(.winapi) u32,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetParent: *const anyopaque,
+        GetDevice: *const anyopaque,
+        AcquireSync: *const fn (*IDXGIKeyedMutex, u64, u32) callconv(.winapi) HRESULT,
+        ReleaseSync: *const fn (*IDXGIKeyedMutex, u64) callconv(.winapi) HRESULT,
+    };
+
+    pub fn acquire_sync(self: *IDXGIKeyedMutex, key: u64, timeout_ms: u32) HRESULT {
+        return self.vtable.AcquireSync(self, key, timeout_ms);
+    }
+
+    pub fn release_sync(self: *IDXGIKeyedMutex, key: u64) HRESULT {
+        return self.vtable.ReleaseSync(self, key);
+    }
+};
 
 pub const IDXGISwapChain = extern struct {
     vtable: *const VTable,

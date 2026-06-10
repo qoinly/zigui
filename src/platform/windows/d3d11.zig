@@ -27,7 +27,9 @@ pub const D3D11_BIND_SHADER_RESOURCE: u32 = 0x8;
 pub const D3D11_BIND_RENDER_TARGET: u32 = 0x20;
 
 pub const D3D11_CPU_ACCESS_WRITE: u32 = 0x10000;
+pub const D3D11_RESOURCE_MISC_SHARED: u32 = 0x2;
 pub const D3D11_RESOURCE_MISC_BUFFER_STRUCTURED: u32 = 0x40;
+pub const D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX: u32 = 0x100;
 
 pub const D3D11_MAP_WRITE_DISCARD: u32 = 4;
 
@@ -230,7 +232,12 @@ pub const ID3D11Device = extern struct {
         CreatePredicate: *const anyopaque,
         CreateCounter: *const anyopaque,
         CreateDeferredContext: *const anyopaque,
-        OpenSharedResource: *const anyopaque,
+        OpenSharedResource: *const fn (
+            *ID3D11Device,
+            win32.HANDLE,
+            *const GUID,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
         CheckFormatSupport: *const anyopaque,
         CheckMultisampleQualityLevels: *const anyopaque,
         CheckCounterInfo: *const anyopaque,
@@ -311,6 +318,14 @@ pub const ID3D11Device = extern struct {
         out: *?*anyopaque,
     ) HRESULT {
         return self.vtable.CreateSamplerState(self, desc, out);
+    }
+    pub fn open_shared_resource(
+        self: *ID3D11Device,
+        handle: win32.HANDLE,
+        riid: *const GUID,
+        out: *?*anyopaque,
+    ) HRESULT {
+        return self.vtable.OpenSharedResource(self, handle, riid, out);
     }
     pub fn get_immediate_context(self: *ID3D11Device) ?*ID3D11DeviceContext {
         var ctx: ?*ID3D11DeviceContext = null;
@@ -571,6 +586,28 @@ pub const ID3D11DeviceContext = extern struct {
     }
     pub fn release(self: *ID3D11DeviceContext) void {
         _ = self.vtable.Release(self);
+    }
+};
+
+pub const ID3D11Texture2D = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*ID3D11Texture2D) callconv(.winapi) u32,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetDevice: *const anyopaque,
+        GetType: *const anyopaque,
+        SetEvictionPriority: *const anyopaque,
+        GetEvictionPriority: *const anyopaque,
+        GetDesc: *const fn (*ID3D11Texture2D, *D3D11_TEXTURE2D_DESC) callconv(.winapi) void,
+    };
+
+    pub fn get_desc(self: *ID3D11Texture2D, out: *D3D11_TEXTURE2D_DESC) void {
+        self.vtable.GetDesc(self, out);
     }
 };
 

@@ -58,15 +58,23 @@ const FrameSurfaceState = struct {
     srv: ?*anyopaque = null,
     chroma_tex: ?*anyopaque = null,
     chroma_srv: ?*anyopaque = null,
+    mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    chroma_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    owner_tex: ?*anyopaque = null,
+    owner_chroma_tex: ?*anyopaque = null,
+    owner_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    owner_chroma_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    shared_acquired: bool = false,
     // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 };
 
-const SurfaceFormat = enum { bgra, nv12 };
+const SurfaceFormat = enum { bgra, nv12, shared_nv12 };
 const Plane = enum { luma, chroma };
+var shared_frame_pixel: u8 = 0;
 
-// CPU-filled frame surface; its D3D textures are reused so live video does not churn
-// GPU objects while frames arrive.
+// External frame surface. CPU-backed surfaces reuse upload textures; shared
+// surfaces cache opened SRVs for a decoder-owned DXGI handle.
 pub const FrameSurface = struct {
     format: SurfaceFormat,
     width: u32,
@@ -75,6 +83,10 @@ pub const FrameSurface = struct {
     pixels: [*]u8,
     chroma_stride: u32 = 0,
     chroma_pixels: ?[*]u8 = null,
+    shared_luma: ?win32.HANDLE = null,
+    shared_chroma: ?win32.HANDLE = null,
+    shared_acquire_key: u64 = 0,
+    shared_release_key: u64 = 0,
     state: FrameSurfaceState = .{},
 
     pub fn init_bgra(width: u32, height: u32, stride: u32, pixels: [*]u8) FrameSurface {
@@ -115,6 +127,32 @@ pub const FrameSurface = struct {
         };
     }
 
+    pub fn init_shared_nv12(
+        width: u32,
+        height: u32,
+        luma: win32.HANDLE,
+        chroma: win32.HANDLE,
+        acquire_key: u64,
+        release_key: u64,
+    ) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        return .{
+            .format = .shared_nv12,
+            .width = width,
+            .height = height,
+            .stride = width,
+            .pixels = @ptrCast(&shared_frame_pixel),
+            .chroma_stride = width,
+            .shared_luma = luma,
+            .shared_chroma = chroma,
+            .shared_acquire_key = acquire_key,
+            .shared_release_key = release_key,
+        };
+    }
+
     pub fn available(self: *const FrameSurface) bool {
         std.debug.assert(self.state.refs.load(.acquire) >= 1);
         return self.state.refs.load(.acquire) == 1;
@@ -122,12 +160,52 @@ pub const FrameSurface = struct {
 
     pub fn deinit(self: *FrameSurface) void {
         std.debug.assert(self.state.refs.load(.acquire) == 1);
+        release_shared_sync(self);
+        release_shared_owner(self);
+        release_shared_import(self);
         com.release(&self.state.chroma_srv);
         com.release(&self.state.chroma_tex);
         com.release(&self.state.srv);
         com.release(&self.state.tex);
     }
+
+    fn release_shared_owner(self: *FrameSurface) void {
+        com.release(&self.state.owner_chroma_mutex);
+        com.release(&self.state.owner_mutex);
+        com.release(&self.state.owner_chroma_tex);
+        com.release(&self.state.owner_tex);
+    }
+
+    fn release_shared_import(self: *FrameSurface) void {
+        com.release(&self.state.chroma_mutex);
+        com.release(&self.state.mutex);
+    }
 };
+
+fn query_keyed_mutex(tex: *anyopaque, out: *?*dxgi.IDXGIKeyedMutex) win32.HRESULT {
+    var raw: ?*anyopaque = null;
+    const hr = com.query_interface(tex, &dxgi.IID_IDXGIKeyedMutex, &raw);
+    if (com.failed(hr)) return hr;
+    out.* = @ptrCast(@alignCast(raw.?));
+    return hr;
+}
+
+fn shared_handle(tex: *anyopaque) ?win32.HANDLE {
+    var raw: ?*anyopaque = null;
+    if (com.failed(com.query_interface(tex, &dxgi.IID_IDXGIResource, &raw))) return null;
+    var res: ?*dxgi.IDXGIResource = @ptrCast(@alignCast(raw.?));
+    defer com.release(&res);
+    var handle: ?win32.HANDLE = null;
+    if (com.failed(res.?.get_shared_handle(&handle))) return null;
+    return handle;
+}
+
+fn release_shared_sync(surface: *FrameSurface) void {
+    if (!surface.state.shared_acquired) return;
+    if (surface.state.chroma_mutex) |mutex| _ = mutex.release_sync(surface.shared_release_key);
+    if (surface.state.mutex) |mutex| _ = mutex.release_sync(surface.shared_release_key);
+    surface.state.shared_acquired = false;
+}
 
 const FrameGpu = extern struct {
     bounds: [4]f32,
@@ -305,6 +383,63 @@ pub const Renderer = struct {
         return @ptrCast(self.device);
     }
 
+    pub fn create_shared_nv12_surface(self: *Renderer, width: u32, height: u32) ?FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+
+        var out = FrameSurface.init_shared_nv12(
+            width,
+            height,
+            @ptrFromInt(1),
+            @ptrFromInt(1),
+            0,
+            0,
+        );
+        if (!self.create_shared_plane(width, height, dxgi.DXGI_FORMAT_R8_UNORM, &out)) {
+            out.deinit();
+            return null;
+        }
+        if (!self.create_shared_plane(width / 2, height / 2, dxgi.DXGI_FORMAT_R8G8_UNORM, &out)) {
+            out.deinit();
+            return null;
+        }
+        std.debug.assert(out.shared_luma != null);
+        std.debug.assert(out.shared_chroma != null);
+        return out;
+    }
+
+    pub fn update_shared_nv12_surface(
+        self: *Renderer,
+        surface: *FrameSurface,
+        y: [*]const u8,
+        y_stride: u32,
+        uv: [*]const u8,
+        uv_stride: u32,
+    ) bool {
+        std.debug.assert(surface.format == .shared_nv12);
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        std.debug.assert(y_stride >= surface.width);
+        std.debug.assert(uv_stride >= surface.width);
+        const tex = surface.state.owner_tex orelse return false;
+        const chroma_tex = surface.state.owner_chroma_tex orelse return false;
+        const mutex = surface.state.owner_mutex orelse return false;
+        const chroma_mutex = surface.state.owner_chroma_mutex orelse return false;
+        if (com.failed(mutex.acquire_sync(surface.shared_release_key, 0))) return false;
+        var chroma_acquired = false;
+        defer {
+            if (chroma_acquired) _ = chroma_mutex.release_sync(surface.shared_acquire_key);
+            _ = mutex.release_sync(surface.shared_acquire_key);
+        }
+        if (com.failed(chroma_mutex.acquire_sync(surface.shared_release_key, 0))) return false;
+        chroma_acquired = true;
+        self.context.update_subresource(tex, 0, null, y, y_stride, 0);
+        self.context.update_subresource(chroma_tex, 0, null, uv, uv_stride, 0);
+        return true;
+    }
+
     // The shared facade keeps the macOS import name; Windows accepts CPU-backed
     // frame surfaces and returns the SRVs needed by their format.
     pub const Nv12Textures = struct {
@@ -323,11 +458,13 @@ pub const Renderer = struct {
         return switch (surface.format) {
             .bgra => self.import_bgra(surface),
             .nv12 => self.import_nv12_surface(surface),
+            .shared_nv12 => self.import_shared_nv12_surface(surface),
         };
     }
 
     pub fn release_cv_texture(ref: *anyopaque) void {
         const surface: *FrameSurface = @ptrCast(@alignCast(ref));
+        if (surface.format == .shared_nv12) release_shared_sync(surface);
         const old = surface.state.refs.fetchSub(1, .acq_rel);
         std.debug.assert(old > 1);
     }
@@ -405,6 +542,35 @@ pub const Renderer = struct {
         };
     }
 
+    fn import_shared_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width % 2 == 0);
+        std.debug.assert(surface.height % 2 == 0);
+        std.debug.assert(surface.shared_luma != null);
+        std.debug.assert(surface.shared_chroma != null);
+        self.ensure_shared_nv12_surface(surface);
+        const luma = surface.state.srv orelse return null;
+        const chroma = surface.state.chroma_srv orelse return null;
+        const mutex = surface.state.mutex orelse return null;
+        const chroma_mutex = surface.state.chroma_mutex orelse return null;
+        std.debug.assert(!surface.state.shared_acquired);
+        if (com.failed(mutex.acquire_sync(surface.shared_acquire_key, 0))) return null;
+        if (com.failed(chroma_mutex.acquire_sync(surface.shared_acquire_key, 0))) {
+            _ = mutex.release_sync(surface.shared_release_key);
+            return null;
+        }
+        surface.state.shared_acquired = true;
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = luma,
+            .chroma = chroma,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
     fn ensure_bgra_surface(self: *Renderer, surface: *FrameSurface) void {
         if (surface.state.tex != null and surface.state.srv != null) return;
         std.debug.assert(surface.state.tex == null);
@@ -448,6 +614,22 @@ pub const Renderer = struct {
         }
     }
 
+    fn ensure_shared_nv12_surface(self: *Renderer, surface: *FrameSurface) void {
+        if (surface.state.srv != null and surface.state.chroma_srv != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.chroma_tex == null);
+        self.open_shared_plane(surface, .luma);
+        self.open_shared_plane(surface, .chroma);
+        if (surface.state.srv == null or surface.state.chroma_srv == null) {
+            com.release(&surface.state.chroma_srv);
+            com.release(&surface.state.chroma_tex);
+            com.release(&surface.state.chroma_mutex);
+            com.release(&surface.state.srv);
+            com.release(&surface.state.tex);
+            com.release(&surface.state.mutex);
+        }
+    }
+
     fn ensure_plane(self: *Renderer, surface: *FrameSurface, plane: Plane) void {
         const chroma = plane == .chroma;
         const width = if (chroma) surface.width / 2 else surface.width;
@@ -480,6 +662,97 @@ pub const Renderer = struct {
         if (com.failed(hr)) {
             com.release(tex_slot);
         }
+    }
+
+    fn open_shared_plane(self: *Renderer, surface: *FrameSurface, plane: Plane) void {
+        const chroma = plane == .chroma;
+        const handle = if (chroma) surface.shared_chroma else surface.shared_luma;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        const tex_slot = if (chroma) &surface.state.chroma_tex else &surface.state.tex;
+        const srv_slot = if (chroma) &surface.state.chroma_srv else &surface.state.srv;
+        const mutex_slot = if (chroma) &surface.state.chroma_mutex else &surface.state.mutex;
+        std.debug.assert(handle != null);
+        if (com.failed(self.device.open_shared_resource(
+            handle.?,
+            &dxgi.IID_ID3D11Texture2D,
+            tex_slot,
+        ))) return;
+        if (!valid_shared_plane_desc(tex_slot.*.?, surface, plane)) {
+            com.release(tex_slot);
+            return;
+        }
+        if (com.failed(query_keyed_mutex(tex_slot.*.?, mutex_slot))) {
+            com.release(tex_slot);
+            return;
+        }
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = format,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        if (com.failed(self.device.create_srv(tex_slot.*.?, &srv_desc, srv_slot))) {
+            com.release(mutex_slot);
+            com.release(tex_slot);
+        }
+    }
+
+    fn create_shared_plane(
+        self: *Renderer,
+        width: u32,
+        height: u32,
+        format: u32,
+        surface: *FrameSurface,
+    ) bool {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        const chroma = format == dxgi.DXGI_FORMAT_R8G8_UNORM;
+        const tex_slot = if (chroma) &surface.state.owner_chroma_tex else &surface.state.owner_tex;
+        const mutex_slot = if (chroma)
+            &surface.state.owner_chroma_mutex
+        else
+            &surface.state.owner_mutex;
+        const handle_slot = if (chroma) &surface.shared_chroma else &surface.shared_luma;
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = format,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = d3d11.D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, null, tex_slot))) return false;
+        if (com.failed(query_keyed_mutex(tex_slot.*.?, mutex_slot))) {
+            com.release(tex_slot);
+            return false;
+        }
+        handle_slot.* = shared_handle(tex_slot.*.?) orelse {
+            com.release(mutex_slot);
+            com.release(tex_slot);
+            return false;
+        };
+        return true;
+    }
+
+    fn valid_shared_plane_desc(tex: *anyopaque, surface: *FrameSurface, plane: Plane) bool {
+        const chroma = plane == .chroma;
+        const want_w = if (chroma) surface.width / 2 else surface.width;
+        const want_h = if (chroma) surface.height / 2 else surface.height;
+        const want_format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        var desc: d3d11.D3D11_TEXTURE2D_DESC = undefined;
+        const t: *d3d11.ID3D11Texture2D = @ptrCast(@alignCast(tex));
+        t.get_desc(&desc);
+        if (desc.Width != want_w or desc.Height != want_h) return false;
+        if (desc.MipLevels != 1 or desc.ArraySize != 1) return false;
+        if (desc.Format != want_format) return false;
+        if (desc.SampleDesc.Count != 1) return false;
+        if (desc.BindFlags & d3d11.D3D11_BIND_SHADER_RESOURCE == 0) return false;
+        if (desc.MiscFlags & d3d11.D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX == 0) return false;
+        return true;
     }
 
     pub fn request_redraw(self: *Renderer) void {

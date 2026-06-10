@@ -46,6 +46,11 @@ pub fn release(ptr: anytype) void {
     }
 }
 
+pub fn query_interface(obj: *anyopaque, iid: *const GUID, out: *?*anyopaque) HRESULT {
+    const unk: *IUnknown = @ptrCast(@alignCast(obj));
+    return unk.vtable.QueryInterface(unk, iid, out);
+}
+
 pub fn guid(
     d1: u32,
     d2: u16,

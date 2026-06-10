@@ -31,6 +31,7 @@ pub const HFONT = *opaque {};
 pub const HGDIOBJ = *opaque {};
 pub const HGLOBAL = *anyopaque;
 pub const HRAWINPUT = *opaque {};
+pub const HANDLE = *opaque {};
 pub const COLORREF = u32;
 
 pub const TRUE: BOOL = 1;
