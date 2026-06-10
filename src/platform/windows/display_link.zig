@@ -8,10 +8,10 @@ const std = @import("std");
 const win32 = @import("win32.zig");
 const loop = @import("loop.zig");
 
-pub const dispatch_function_t = *const fn (?*anyopaque) callconv(.c) void;
+pub const dispatch_function_t = loop.VsyncCallback;
 pub const CGDirectDisplayID = u32;
 
-pub const Error = error{ThreadSpawnFailed};
+pub const Error = error{ NoVsyncSlots, ThreadSpawnFailed };
 
 pub fn get_main_display_id() CGDirectDisplayID {
     return 0;
@@ -19,6 +19,7 @@ pub fn get_main_display_id() CGDirectDisplayID {
 
 pub const DisplayLink = struct {
     thread: ?std.Thread = null,
+    token: usize = 0,
 
     pub fn init(
         display_id: CGDirectDisplayID,
@@ -26,19 +27,22 @@ pub const DisplayLink = struct {
         callback: dispatch_function_t,
     ) Error!DisplayLink {
         _ = display_id;
-        loop.vsync_cb = callback;
-        loop.vsync_ctx = context;
-        return .{};
+        const token = loop.alloc_vsync_slot(callback, context) orelse return error.NoVsyncSlots;
+        return .{ .token = token };
     }
 
     pub fn start(self: *DisplayLink) Error!void {
         if (self.thread != null) return;
-        loop.vsync_running.store(true, .seq_cst);
-        self.thread = std.Thread.spawn(.{}, vsync_loop, .{}) catch return error.ThreadSpawnFailed;
+        const slot = loop.get_vsync_slot(self.token) orelse return error.NoVsyncSlots;
+        slot.running.store(true, .seq_cst);
+        self.thread = std.Thread.spawn(.{}, vsync_loop, .{self.token}) catch {
+            slot.running.store(false, .seq_cst);
+            return error.ThreadSpawnFailed;
+        };
     }
 
     pub fn stop(self: *DisplayLink) void {
-        loop.vsync_running.store(false, .seq_cst);
+        if (loop.get_vsync_slot(self.token)) |slot| slot.running.store(false, .seq_cst);
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -48,13 +52,18 @@ pub const DisplayLink = struct {
     // Parity with the macOS link: joining the vsync thread is the full teardown.
     pub fn deinit(self: *DisplayLink) void {
         self.stop();
+        loop.free_vsync_slot(self.token);
+        self.token = 0;
     }
 };
 
-fn vsync_loop() void {
-    // Exits when stop() clears vsync_running; each tick blocks on the compositor
+fn vsync_loop(token: usize) void {
+    // Exits when stop() clears this link's slot; each tick blocks on the compositor
     // (or the Sleep fallback on failure), so it paces to refresh and never spins.
-    while (loop.vsync_running.load(.seq_cst)) {
+    std.debug.assert(token != 0);
+    while (true) {
+        const slot = loop.get_vsync_slot(token) orelse return;
+        if (!slot.running.load(.seq_cst)) return;
         std.debug.assert(loop.gui_thread_id != 0); // post target, set before this thread spawns
         // During the modal resize/move loop, WM_SIZE drives paint synchronously,
         // so this thread goes fully idle for its duration. A posted WM_VSYNC
@@ -69,6 +78,6 @@ fn vsync_loop() void {
         if (win32.DwmFlush() != 0) {
             win32.Sleep(8);
         }
-        _ = win32.PostThreadMessageW(loop.gui_thread_id, loop.WM_VSYNC, 0, 0);
+        _ = win32.PostThreadMessageW(loop.gui_thread_id, loop.WM_VSYNC, token, 0);
     }
 }

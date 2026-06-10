@@ -142,10 +142,8 @@ pub const CustomShellHandle = struct {
         return win32.IsIconic(self.window) != 0;
     }
 
-    // The Windows backend runs a single window, which always holds focus.
     pub fn is_key(self: CustomShellHandle) bool {
-        _ = self;
-        return true;
+        return win32.GetForegroundWindow() == self.window;
     }
 
     pub fn sync_drawable_size(self: CustomShellHandle) ContentSize {
@@ -164,8 +162,8 @@ pub const CustomShellHandle = struct {
     }
 };
 
-// Single-window globals (the macOS backend makes the same assumption). The
-// WndProc reaches the registered dispatch + chrome metrics through these.
+// Process-wide shell state. Callback tables stay global; HWND-local context
+// lives in GWLP_USERDATA and is selected in WndProc.
 var g_dispatch: ?MouseDispatch = null;
 var g_class_registered: bool = false;
 var g_titlebar_height: f32 = 37;
@@ -187,6 +185,8 @@ fn place(hwnd: win32.HWND, x: i32, y: i32, w: i32, h: i32) void {
 // Text-field overlay: one persistent EDIT child reused across fields.
 var g_edit: ?win32.HWND = null;
 var g_main_hwnd: ?win32.HWND = null;
+var g_root_hwnd: ?win32.HWND = null;
+var g_grab_hwnd: ?win32.HWND = null;
 var g_field_visible: bool = false;
 var g_active_id: u32 = 0;
 var g_active_secure: bool = false;
@@ -207,12 +207,27 @@ var g_clipboard_primed: bool = false;
 var g_raw: ?RawDispatch = null;
 var g_grabbed: bool = false;
 var g_cursor_hide_steps: u32 = 0;
+var g_window_close: ?WindowCloseFn = null;
+var g_window_close_ctx: ?*anyopaque = null;
 
 const RAW_DEVICE_COUNT: u32 = 2;
 const CURSOR_SHOW_COUNT_LIMIT: u32 = 16;
 
-fn paint_now() void {
-    if (g_paint_now) |pn| if (g_ctx) |c| pn(c);
+fn surface_ctx(hwnd: win32.HWND) ?*anyopaque {
+    const value = win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA);
+    if (value == 0) return null;
+    return @ptrFromInt(@as(usize, @bitCast(value)));
+}
+
+fn dispatch_ctx(hwnd: win32.HWND, fallback: *anyopaque) *anyopaque {
+    return surface_ctx(hwnd) orelse fallback;
+}
+
+fn paint_now(hwnd: win32.HWND) void {
+    if (g_paint_now) |pn| {
+        const c = surface_ctx(hwnd) orelse (g_ctx orelse return);
+        pn(c);
+    }
 }
 
 const RESIZE_BORDER_PX: i32 = 6;
@@ -237,24 +252,31 @@ pub fn register_raw_dispatch(d: RawDispatch) void {
     g_raw = d;
 }
 
-// Per-window event routing is macOS-only; the Windows WndProc uses the registered
-// globals.
 pub fn bind_surface_ctx(handle: CustomShellHandle, ctx: *anyopaque) void {
-    _ = handle;
-    _ = ctx;
+    std.debug.assert(@intFromPtr(handle.window) != 0);
+    std.debug.assert(@intFromPtr(ctx) != 0);
+    const value: isize = @bitCast(@intFromPtr(ctx));
+    _ = win32.SetWindowLongPtrW(handle.window, win32.GWLP_USERDATA, value);
 }
 
 pub fn set_grab(on: bool) void {
     if (on == g_grabbed) return;
     g_grabbed = on;
     if (on) {
-        if (g_main_hwnd) |hwnd| {
+        if (grab_target_hwnd()) |hwnd| {
+            g_grab_hwnd = hwnd;
+            register_raw_devices(hwnd) catch {
+                g_grabbed = false;
+                g_grab_hwnd = null;
+                return;
+            };
             _ = win32.SetForegroundWindow(hwnd);
             _ = win32.SetFocus(hwnd);
             confine_cursor(hwnd);
         }
         hide_cursor();
     } else {
+        g_grab_hwnd = null;
         _ = win32.ClipCursor(null);
         show_cursor();
     }
@@ -266,12 +288,20 @@ pub fn is_grabbed() bool {
 
 pub fn release_grab_if_blurred() void {
     if (!g_grabbed) return;
-    const hwnd = g_main_hwnd orelse return;
+    const hwnd = g_grab_hwnd orelse return;
     const active = win32.GetForegroundWindow() orelse {
         set_grab(false);
         return;
     };
     if (active != hwnd) set_grab(false);
+}
+
+fn grab_target_hwnd() ?win32.HWND {
+    const active = win32.GetForegroundWindow();
+    if (active) |hwnd| {
+        if (surface_ctx(hwnd) != null) return hwnd;
+    }
+    return g_main_hwnd orelse g_root_hwnd;
 }
 
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
@@ -305,6 +335,13 @@ pub fn current_shift_down() bool {
 fn request_redraw() void {
     if (g_redraw) |r| {
         if (g_ctx) |c| r(c);
+    }
+}
+
+fn request_redraw_for(hwnd: win32.HWND) void {
+    if (g_redraw) |r| {
+        const c = surface_ctx(hwnd) orelse (g_ctx orelse return);
+        r(c);
     }
 }
 
@@ -359,7 +396,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
 
     const hwnd = try create_shell_window(instance, title, opts.width, opts.height);
     errdefer _ = win32.DestroyWindow(hwnd);
-    errdefer g_main_hwnd = null;
+    const was_first = g_root_hwnd == null;
+    if (was_first) g_root_hwnd = hwnd;
+    errdefer {
+        if (was_first) g_root_hwnd = null;
+    }
     g_main_hwnd = hwnd;
     try register_raw_devices(hwnd);
 
@@ -498,10 +539,10 @@ fn track_nc_leave(hwnd: win32.HWND) void {
     g_tracking_nc = true;
 }
 
-fn clear_caption_hover() void {
+fn clear_caption_hover(hwnd: win32.HWND) void {
     if (g_hover_caption != .none) {
         g_hover_caption = .none;
-        request_redraw();
+        request_redraw_for(hwnd);
     }
 }
 
@@ -570,7 +611,7 @@ fn perform_caption_action(hwnd: win32.HWND, cb: CaptionButton) void {
             const cmd = if (win32.IsZoomed(hwnd) != 0) win32.SW_RESTORE else win32.SW_MAXIMIZE;
             _ = win32.ShowWindow(hwnd, cmd);
         },
-        .close => _ = win32.DestroyWindow(hwnd),
+        .close => _ = win32.SendMessageW(hwnd, win32.WM_CLOSE, 0, 0),
         .none => {},
     }
 }
@@ -613,11 +654,10 @@ fn hit_test(hwnd: win32.HWND, l: win32.LPARAM) win32.LRESULT {
             .none => {},
         }
         if (g_hit_test) |ht| {
-            if (g_ctx) |c| {
-                const x_pt = @as(f32, @floatFromInt(px)) / scale;
-                const y_pt = @as(f32, @floatFromInt(py)) / scale;
-                if (ht(c, x_pt, y_pt, g_titlebar_height)) return win32.HTCLIENT;
-            }
+            const c = surface_ctx(hwnd) orelse (g_ctx orelse return win32.HTCAPTION);
+            const x_pt = @as(f32, @floatFromInt(px)) / scale;
+            const y_pt = @as(f32, @floatFromInt(py)) / scale;
+            if (ht(c, x_pt, y_pt, g_titlebar_height)) return win32.HTCLIENT;
         }
         return win32.HTCAPTION;
     }
@@ -646,14 +686,15 @@ fn wnd_proc(
         win32.WM_ENTERSIZEMOVE,
         win32.WM_SIZE,
         win32.WM_EXITSIZEMOVE,
-        => handle_size_message(msg),
+        => handle_size_message(hwnd, msg),
         win32.WM_DISPLAYCHANGE,
         win32.WM_DPICHANGED,
         win32.WM_SETTINGCHANGE,
         => display_cache_reset(),
         win32.WM_CTLCOLOREDIT => if (handle_edit_color(w)) |r| return r,
         win32.WM_SETCURSOR => if (handle_set_cursor(l)) |r| return r,
-        win32.WM_DESTROY => return handle_destroy(),
+        win32.WM_CLOSE => return handle_close(hwnd),
+        win32.WM_DESTROY => return handle_destroy(hwnd),
         win32.WM_MOUSEMOVE,
         win32.WM_MOUSELEAVE,
         win32.WM_LBUTTONDOWN,
@@ -670,7 +711,7 @@ fn wnd_proc(
         win32.WM_SYSKEYDOWN,
         win32.WM_SYSKEYUP,
         win32.WM_CHAR,
-        => if (handle_key_message(msg, w)) |r| return r,
+        => if (handle_key_message(hwnd, msg, w)) |r| return r,
         else => {},
     }
     return win32.DefWindowProcW(hwnd, msg, w, l);
@@ -719,12 +760,12 @@ fn handle_caption_message(
             const hovered = caption_from_ht(w);
             if (hovered != g_hover_caption) {
                 g_hover_caption = hovered;
-                request_redraw();
+                request_redraw_for(hwnd);
             }
         },
         win32.WM_NCMOUSELEAVE => {
             g_tracking_nc = false;
-            clear_caption_hover();
+            clear_caption_hover(hwnd);
         },
         win32.WM_NCLBUTTONDOWN => {
             const cb = caption_from_ht(w);
@@ -747,7 +788,7 @@ fn handle_caption_message(
     return null;
 }
 
-fn handle_size_message(msg: win32.UINT) void {
+fn handle_size_message(hwnd: win32.HWND, msg: win32.UINT) void {
     switch (msg) {
         win32.WM_ENTERSIZEMOVE => {
             // The modal resize loop drives WM_SIZE synchronously and starves vsync.
@@ -755,14 +796,14 @@ fn handle_size_message(msg: win32.UINT) void {
         },
         win32.WM_SIZE => {
             if (loop.resizing.load(.seq_cst)) {
-                paint_now();
+                paint_now(hwnd);
             } else {
-                request_redraw();
+                request_redraw_for(hwnd);
             }
         },
         win32.WM_EXITSIZEMOVE => {
             loop.resizing.store(false, .seq_cst);
-            paint_now();
+            paint_now(hwnd);
         },
         else => std.debug.assert(false),
     }
@@ -782,13 +823,49 @@ fn handle_set_cursor(l: win32.LPARAM) ?win32.LRESULT {
     return 1;
 }
 
-fn handle_destroy() win32.LRESULT {
-    set_grab(false);
-    // Stop vsync first so WM_QUIT is not starved by paints against a dying HWND.
-    loop.quitting = true;
-    loop.vsync_running.store(false, .seq_cst);
-    win32.PostQuitMessage(0);
+fn handle_close(hwnd: win32.HWND) win32.LRESULT {
+    notify_window_close(hwnd);
+    retire_surface_ctx(hwnd);
+    _ = win32.DestroyWindow(hwnd);
     return 0;
+}
+
+fn handle_destroy(hwnd: win32.HWND) win32.LRESULT {
+    if (g_grab_hwnd == hwnd) set_grab(false);
+    if (g_main_hwnd == hwnd) g_main_hwnd = g_root_hwnd;
+    if (g_root_hwnd == hwnd) {
+        // Stop vsync first so WM_QUIT is not starved by paints against a dying HWND.
+        loop.quitting = true;
+        loop.stop_all_vsync();
+        win32.PostQuitMessage(0);
+    }
+    return 0;
+}
+
+fn notify_window_close(hwnd: win32.HWND) void {
+    const cb = g_window_close orelse return;
+    const ctx = g_window_close_ctx orelse return;
+    cb(ctx, @ptrFromInt(@intFromPtr(hwnd)));
+}
+
+fn retire_surface_ctx(hwnd: win32.HWND) void {
+    const closing = surface_ctx(hwnd) orelse return;
+    const fallback = if (g_root_hwnd != null and g_root_hwnd != hwnd)
+        surface_ctx(g_root_hwnd.?)
+    else
+        null;
+    if (g_ctx == closing) g_ctx = fallback;
+    if (g_dispatch) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    if (g_raw) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, 0);
 }
 
 fn handle_mouse_message(
@@ -800,11 +877,11 @@ fn handle_mouse_message(
     if (g_grabbed) return 0;
     switch (msg) {
         win32.WM_MOUSEMOVE => handle_mouse_move(hwnd, l),
-        win32.WM_MOUSELEAVE => handle_mouse_leave(),
+        win32.WM_MOUSELEAVE => handle_mouse_leave(hwnd),
         win32.WM_LBUTTONDOWN => handle_mouse_down(hwnd, l),
-        win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(d.ctx),
+        win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(dispatch_ctx(hwnd, d.ctx)),
         win32.WM_RBUTTONDOWN => handle_mouse_right_down(hwnd, l),
-        win32.WM_MOUSEWHEEL => handle_mouse_wheel(w),
+        win32.WM_MOUSEWHEEL => handle_mouse_wheel(hwnd, w),
         win32.WM_RBUTTONUP,
         win32.WM_MBUTTONDOWN,
         win32.WM_MBUTTONUP,
@@ -816,63 +893,63 @@ fn handle_mouse_message(
 }
 
 fn handle_mouse_move(hwnd: win32.HWND, l: win32.LPARAM) void {
-    clear_caption_hover();
+    clear_caption_hover(hwnd);
     if (g_dispatch) |d| {
         track_mouse_leave(hwnd);
         const p = dispatch_point(hwnd, l);
-        d.on_move(d.ctx, p[0], p[1]);
+        d.on_move(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
 }
 
-fn handle_mouse_leave() void {
+fn handle_mouse_leave(hwnd: win32.HWND) void {
     g_tracking_mouse = false;
-    if (g_dispatch) |d| d.on_exit(d.ctx);
+    if (g_dispatch) |d| d.on_exit(dispatch_ctx(hwnd, d.ctx));
 }
 
 fn handle_mouse_down(hwnd: win32.HWND, l: win32.LPARAM) void {
     if (g_dispatch) |d| {
         const p = dispatch_point(hwnd, l);
-        d.on_down(d.ctx, p[0], p[1]);
+        d.on_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
 }
 
 fn handle_mouse_right_down(hwnd: win32.HWND, l: win32.LPARAM) void {
     if (g_dispatch) |d| {
         const p = dispatch_point(hwnd, l);
-        d.on_right_down(d.ctx, p[0], p[1]);
+        d.on_right_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
 }
 
-fn handle_mouse_wheel(w: win32.WPARAM) void {
+fn handle_mouse_wheel(hwnd: win32.HWND, w: win32.WPARAM) void {
     if (g_dispatch) |d| {
         const raw_delta = win32.get_wheel_delta_wparam(w);
         const notches = @as(f32, @floatFromInt(raw_delta)) / win32.WHEEL_DELTA;
-        d.on_scroll(d.ctx, 0, notches * 40.0);
+        d.on_scroll(dispatch_ctx(hwnd, d.ctx), 0, notches * 40.0);
     }
 }
 
-fn handle_key_message(msg: win32.UINT, w: win32.WPARAM) ?win32.LRESULT {
+fn handle_key_message(hwnd: win32.HWND, msg: win32.UINT, w: win32.WPARAM) ?win32.LRESULT {
     if (g_grabbed) return 0;
     switch (msg) {
-        win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => return handle_key_down(w),
+        win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => return handle_key_down(hwnd, w),
         win32.WM_KEYUP, win32.WM_SYSKEYUP => return 0,
-        win32.WM_CHAR => return handle_char(w),
+        win32.WM_CHAR => return handle_char(hwnd, w),
         else => std.debug.assert(false),
     }
     return null;
 }
 
-fn handle_key_down(w: win32.WPARAM) ?win32.LRESULT {
+fn handle_key_down(hwnd: win32.HWND, w: win32.WPARAM) ?win32.LRESULT {
     if (g_dispatch) |d| {
         if (key_code_for_vk(w)) |code| {
-            d.on_key(d.ctx, .{ .code = code, .ch = 0, .mods = key_mods() });
+            d.on_key(dispatch_ctx(hwnd, d.ctx), .{ .code = code, .ch = 0, .mods = key_mods() });
             return 0;
         }
     }
     return null;
 }
 
-fn handle_char(w: win32.WPARAM) win32.LRESULT {
+fn handle_char(hwnd: win32.HWND, w: win32.WPARAM) win32.LRESULT {
     if (g_dispatch) |d| {
         const mods = key_mods();
         const raw: u21 = @intCast(w & 0x10FFFF);
@@ -880,7 +957,7 @@ fn handle_char(w: win32.WPARAM) win32.LRESULT {
         const printable = ch >= 0x20 and ch != 0x7F;
         const cmd_letter = mods.cmd and ch >= 'a' and ch <= 'z';
         if (printable or cmd_letter) {
-            d.on_key(d.ctx, .{ .code = .char, .ch = ch, .mods = mods });
+            d.on_key(dispatch_ctx(hwnd, d.ctx), .{ .code = .char, .ch = ch, .mods = mods });
         }
     }
     return 0;
@@ -911,42 +988,46 @@ fn handle_raw_input(hwnd: win32.HWND, w: win32.WPARAM, l: win32.LPARAM) win32.LR
         return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
     }
     switch (raw.header.dwType) {
-        win32.RIM_TYPEMOUSE => raw_mouse(&raw.data.mouse),
-        win32.RIM_TYPEKEYBOARD => raw_keyboard(&raw.data.keyboard),
+        win32.RIM_TYPEMOUSE => raw_mouse(hwnd, &raw.data.mouse),
+        win32.RIM_TYPEKEYBOARD => raw_keyboard(hwnd, &raw.data.keyboard),
         else => {},
     }
     return win32.DefWindowProcW(hwnd, win32.WM_INPUT, w, l);
 }
 
-fn raw_mouse(m: *const win32.RAWMOUSE) void {
+fn raw_mouse(hwnd: win32.HWND, m: *const win32.RAWMOUSE) void {
     const d = g_raw orelse return;
+    const ctx = dispatch_ctx(hwnd, d.ctx);
     const relative = (m.usFlags & win32.MOUSE_MOVE_ABSOLUTE) == 0;
     if (relative and (m.lLastX != 0 or m.lLastY != 0)) {
-        d.on_event(d.ctx, .{ .motion = .{
+        d.on_event(ctx, .{ .motion = .{
             .dx = @floatFromInt(m.lLastX),
             .dy = @floatFromInt(m.lLastY),
         } });
     }
     const mods = mods_from_keys();
     const flags = m.buttons.data.usButtonFlags;
-    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_DOWN) != 0) raw_button(.left, true, mods);
-    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_UP) != 0) raw_button(.left, false, mods);
-    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_DOWN) != 0) raw_button(.right, true, mods);
-    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_UP) != 0) raw_button(.right, false, mods);
-    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0) raw_button(.middle, true, mods);
-    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_UP) != 0) raw_button(.middle, false, mods);
-    if ((flags & win32.RI_MOUSE_BUTTON_4_DOWN) != 0) raw_button(.other, true, mods);
-    if ((flags & win32.RI_MOUSE_BUTTON_4_UP) != 0) raw_button(.other, false, mods);
-    if ((flags & win32.RI_MOUSE_BUTTON_5_DOWN) != 0) raw_button(.other, true, mods);
-    if ((flags & win32.RI_MOUSE_BUTTON_5_UP) != 0) raw_button(.other, false, mods);
-    if ((flags & win32.RI_MOUSE_WHEEL) != 0) raw_wheel(0, wheel_units(m.buttons.data.usButtonData));
+    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_DOWN) != 0) raw_button(ctx, .left, true, mods);
+    if ((flags & win32.RI_MOUSE_LEFT_BUTTON_UP) != 0) raw_button(ctx, .left, false, mods);
+    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_DOWN) != 0) raw_button(ctx, .right, true, mods);
+    if ((flags & win32.RI_MOUSE_RIGHT_BUTTON_UP) != 0) raw_button(ctx, .right, false, mods);
+    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0) raw_button(ctx, .middle, true, mods);
+    if ((flags & win32.RI_MOUSE_MIDDLE_BUTTON_UP) != 0) raw_button(ctx, .middle, false, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_4_DOWN) != 0) raw_button(ctx, .other, true, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_4_UP) != 0) raw_button(ctx, .other, false, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_5_DOWN) != 0) raw_button(ctx, .other, true, mods);
+    if ((flags & win32.RI_MOUSE_BUTTON_5_UP) != 0) raw_button(ctx, .other, false, mods);
+    if ((flags & win32.RI_MOUSE_WHEEL) != 0) {
+        raw_wheel(ctx, 0, wheel_units(m.buttons.data.usButtonData));
+    }
     if ((flags & win32.RI_MOUSE_HWHEEL) != 0) {
-        raw_wheel(wheel_units(m.buttons.data.usButtonData), 0);
+        raw_wheel(ctx, wheel_units(m.buttons.data.usButtonData), 0);
     }
 }
 
-fn raw_keyboard(k: *const win32.RAWKEYBOARD) void {
+fn raw_keyboard(hwnd: win32.HWND, k: *const win32.RAWKEYBOARD) void {
     const d = g_raw orelse return;
+    const ctx = dispatch_ctx(hwnd, d.ctx);
     const down = (k.Flags & win32.RI_KEY_BREAK) == 0;
     const scancode = raw_scancode(k.MakeCode, k.Flags);
     if (down and k.VKey == @as(win32.WORD, @intCast(win32.VK_ESCAPE))) {
@@ -954,7 +1035,7 @@ fn raw_keyboard(k: *const win32.RAWKEYBOARD) void {
         return;
     }
     if (scancode == 0) return;
-    d.on_event(d.ctx, .{ .key = .{
+    d.on_event(ctx, .{ .key = .{
         .scancode = scancode,
         .down = down,
         .repeat = false,
@@ -969,15 +1050,15 @@ fn raw_scancode(make_code: win32.WORD, flags: win32.WORD) u16 {
     return make_code;
 }
 
-fn raw_button(button: input.Button, down: bool, mods: input.Mods) void {
+fn raw_button(ctx: *anyopaque, button: input.Button, down: bool, mods: input.Mods) void {
     const d = g_raw orelse return;
-    d.on_event(d.ctx, .{ .button = .{ .button = button, .down = down, .mods = mods } });
+    d.on_event(ctx, .{ .button = .{ .button = button, .down = down, .mods = mods } });
 }
 
-fn raw_wheel(dx: f32, dy: f32) void {
+fn raw_wheel(ctx: *anyopaque, dx: f32, dy: f32) void {
     const d = g_raw orelse return;
     if (dx == 0 and dy == 0) return;
-    d.on_event(d.ctx, .{ .wheel = .{ .dx = dx, .dy = dy } });
+    d.on_event(ctx, .{ .wheel = .{ .dx = dx, .dy = dy } });
 }
 
 fn wheel_units(data: win32.WORD) f32 {
@@ -1012,7 +1093,6 @@ fn key_state_toggled(vk: win32.WPARAM) bool {
 // Focused text fields use one native EDIT child so IME/caret behavior stays native.
 fn ensure_edit(parent: win32.HWND) ?win32.HWND {
     if (g_edit) |e| return e;
-    g_main_hwnd = parent;
     const instance = win32.GetModuleHandleW(null);
     g_edit = win32.CreateWindowExW(
         0,
@@ -1128,19 +1208,16 @@ fn seed_text_field(edit: win32.HWND, initial: []const u8, secure: bool, id: u32)
 }
 
 pub fn hide_text_field(handle: CustomShellHandle) void {
-    _ = handle; // the Windows backend runs one window, so it always owns the editor
     if (!g_field_visible) return;
     if (g_edit) |e| _ = win32.ShowWindow(e, win32.SW_HIDE);
-    if (g_main_hwnd) |m| _ = win32.SetFocus(m);
+    _ = win32.SetFocus(handle.window);
     g_field_visible = false;
 }
 
-// The Windows backend runs a single window torn down at process exit, so it has
-// no separate per-window close path to hook.
 pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
 pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
-    _ = cb;
-    _ = ctx;
+    g_window_close = cb;
+    g_window_close_ctx = ctx;
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {

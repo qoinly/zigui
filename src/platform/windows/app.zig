@@ -56,7 +56,12 @@ pub const App = struct {
                     // DestroyWindow -> WM_DESTROY), which sets quitting; re-check so
                     // a tick never paints a window that is already going away.
                     if (!loop.quitting) {
-                        if (loop.vsync_cb) |cb| cb(loop.vsync_ctx);
+                        const token: usize = @intCast(msg.wParam);
+                        if (loop.get_vsync_slot(token)) |slot| {
+                            if (slot.running.load(.seq_cst)) {
+                                if (slot.callback) |cb| cb(slot.context);
+                            }
+                        }
                     }
                 }
                 continue;

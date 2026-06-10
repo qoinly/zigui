@@ -309,8 +309,8 @@ pub const App = struct {
     // Opens an additional window onto the already-running app. Its display link
     // joins the main loop, so this returns at once rather than blocking like run.
     // Call it while run is pumping (e.g. from a click), each window with its own
-    // state + views; the identity (title/id/size) rides in opts. Per-window input
-    // routing is wired on the macOS backend; the Windows backend stays single.
+    // state + views; the identity (title/id/size) rides in opts. Platform
+    // backends route input by native window so callbacks reach the right state.
     pub fn open_window(
         self: *App,
         opts: WindowOptions,
