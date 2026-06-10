@@ -71,7 +71,9 @@ const FrameSurfaceState = struct {
 
 const SurfaceFormat = enum { bgra, nv12, shared_nv12 };
 const Plane = enum { luma, chroma };
-var shared_frame_pixel: u8 = 0;
+// Shared-handle surfaces never read CPU pixels, but the legacy field stays
+// non-null so old pointer-shape checks cannot trip over this format.
+const shared_frame_pixel: u8 = 0;
 
 // External frame surface. CPU-backed surfaces reuse upload textures; shared
 // surfaces cache opened SRVs for a decoder-owned DXGI handle.
@@ -144,7 +146,7 @@ pub const FrameSurface = struct {
             .width = width,
             .height = height,
             .stride = width,
-            .pixels = @ptrCast(&shared_frame_pixel),
+            .pixels = @ptrCast(@constCast(&shared_frame_pixel)),
             .chroma_stride = width,
             .shared_luma = luma,
             .shared_chroma = chroma,
@@ -397,11 +399,11 @@ pub const Renderer = struct {
             0,
             0,
         );
-        if (!self.create_shared_plane(width, height, dxgi.DXGI_FORMAT_R8_UNORM, &out)) {
+        if (!self.create_shared_plane(width, height, .luma, &out)) {
             out.deinit();
             return null;
         }
-        if (!self.create_shared_plane(width / 2, height / 2, dxgi.DXGI_FORMAT_R8G8_UNORM, &out)) {
+        if (!self.create_shared_plane(width / 2, height / 2, .chroma, &out)) {
             out.deinit();
             return null;
         }
@@ -701,12 +703,13 @@ pub const Renderer = struct {
         self: *Renderer,
         width: u32,
         height: u32,
-        format: u32,
+        plane: Plane,
         surface: *FrameSurface,
     ) bool {
         std.debug.assert(width > 0);
         std.debug.assert(height > 0);
-        const chroma = format == dxgi.DXGI_FORMAT_R8G8_UNORM;
+        const chroma = plane == .chroma;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
         const tex_slot = if (chroma) &surface.state.owner_chroma_tex else &surface.state.owner_tex;
         const mutex_slot = if (chroma)
             &surface.state.owner_chroma_mutex
