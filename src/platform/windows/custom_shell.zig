@@ -824,6 +824,7 @@ fn handle_set_cursor(l: win32.LPARAM) ?win32.LRESULT {
 }
 
 fn handle_close(hwnd: win32.HWND) win32.LRESULT {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
     notify_window_close(hwnd);
     retire_surface_ctx(hwnd);
     _ = win32.DestroyWindow(hwnd);
@@ -831,6 +832,7 @@ fn handle_close(hwnd: win32.HWND) win32.LRESULT {
 }
 
 fn handle_destroy(hwnd: win32.HWND) win32.LRESULT {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
     if (g_grab_hwnd == hwnd) set_grab(false);
     if (g_main_hwnd == hwnd) g_main_hwnd = g_root_hwnd;
     if (g_root_hwnd == hwnd) {
@@ -843,12 +845,14 @@ fn handle_destroy(hwnd: win32.HWND) win32.LRESULT {
 }
 
 fn notify_window_close(hwnd: win32.HWND) void {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
     const cb = g_window_close orelse return;
     const ctx = g_window_close_ctx orelse return;
     cb(ctx, @ptrFromInt(@intFromPtr(hwnd)));
 }
 
 fn retire_surface_ctx(hwnd: win32.HWND) void {
+    std.debug.assert(@intFromPtr(hwnd) != 0);
     const closing = surface_ctx(hwnd) orelse return;
     const fallback = if (g_root_hwnd != null and g_root_hwnd != hwnd)
         surface_ctx(g_root_hwnd.?)

@@ -57,7 +57,7 @@ pub const App = struct {
                     // a tick never paints a window that is already going away.
                     if (!loop.quitting) {
                         const token: usize = @intCast(msg.wParam);
-                        if (loop.get_vsync_slot(token)) |slot| {
+                        if (loop.maybe_vsync_slot(token)) |slot| {
                             if (slot.running.load(.seq_cst)) {
                                 if (slot.callback) |cb| cb(slot.context);
                             }

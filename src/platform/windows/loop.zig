@@ -44,11 +44,17 @@ pub fn alloc_vsync_slot(callback: VsyncCallback, context: ?*anyopaque) ?usize {
 }
 
 pub fn get_vsync_slot(token: usize) ?*VsyncSlot {
+    std.debug.assert(token != 0);
+    return maybe_vsync_slot(token);
+}
+
+pub fn maybe_vsync_slot(token: usize) ?*VsyncSlot {
     if (token == 0 or token > MAX_VSYNC_LINKS) return null;
     return &vsync_slots[token - 1];
 }
 
 pub fn free_vsync_slot(token: usize) void {
+    std.debug.assert(token != 0);
     const slot = get_vsync_slot(token) orelse return;
     slot.running.store(false, .seq_cst);
     slot.callback = null;
@@ -56,6 +62,7 @@ pub fn free_vsync_slot(token: usize) void {
 }
 
 pub fn stop_all_vsync() void {
+    std.debug.assert(vsync_slots.len == MAX_VSYNC_LINKS);
     for (&vsync_slots) |*slot| {
         slot.running.store(false, .seq_cst);
     }
