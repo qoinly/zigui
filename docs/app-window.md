@@ -17,7 +17,7 @@ defer app.deinit();
 |---|---|---|---|
 | `title` | `[]const u8` | `""` | window title |
 | `size` | `[2]f32` | required | initial logical size; asserts both `> 0` |
-| `min_size` | `?[2]f32` | `null` | resize floor; null falls back to `720 x 480` |
+| `min_size` | `?[2]f32` | `null` | resize floor; null falls back to `320 x 240` |
 
 zigui draws the window chrome (the title band, traffic-light gutter, the rest);
 you style the content in your tree.
@@ -148,6 +148,53 @@ zigui.row(.{ .pad = .{ .px = 24 } }, kids)
 | `.xl` | 24 |
 | `.xxl` | 32 |
 | `.px = N` | exact |
+
+## Multiple windows
+
+`run` opens the first window and blocks. To open more, call `open_window` while
+`run` is going (i.e. from a click). Each extra window has its own state and views;
+the title, id, and size go in the options.
+
+```zig
+fn open_panel(app: *App) void {
+    app.open_window(.{ .title = "Panel" }, &app.panel, .{ .body = panel_view }) catch {};
+}
+```
+
+```zig
+pub fn open_window(opts: WindowOptions, state, comptime views) !void
+```
+
+| `WindowOptions` | Type | Default | Meaning |
+|---|---|---|---|
+| `title` | `[]const u8` | `""` | empty falls back to an engine default (`Window N`) |
+| `id` | `u32` | `0` | window identity; 0 lets the engine assign a fresh one |
+| `size` | `?[2]f32` | `null` | null inherits the main window's size |
+| `min_size` | `?[2]f32` | `null` | null inherits the main window's floor |
+
+Each window runs its own render loop and routes its own input, so callbacks reach
+the right state. The shared text editor follows the key window, so typing never
+crosses windows. Closing an extra window tears it down; closing the main window
+quits the app.
+
+`on_window_closed` registers a handler called when an extra window closes, so the
+app can drop that window's state:
+
+```zig
+app.on_window_closed(on_closed);   // fn (?*anyopaque, id: u32) void
+```
+
+### Which window is rendering
+
+A view shared across windows reads which one it is drawing:
+
+| Fn | Meaning |
+|---|---|
+| `window_id()` | the rendering window's id (the first window is `1`) |
+| `window_title()` | its title |
+| `window_is_key()` | whether it holds keyboard focus |
+
+See `examples/multiwindow_demo.zig`.
 
 ## deinit
 
