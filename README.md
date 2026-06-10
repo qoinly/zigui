@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  Yet another native GUI library for Zig, but cross-platform. (early stage, macOS first)
+  Yet another native GUI library for Zig, but cross-platform. (early stage)
 </p>
 
 ## Requirements
 
 - Zig 0.16.0
-- macOS (Metal). Windows in progress.
+- macOS (Metal) or Windows (Direct3D 11)
 
 ## Install
 
@@ -36,8 +36,9 @@ const zigui = @import("zigui");
 
 ## Docs
 
-The API docs live in [docs/](docs/README.md) - app & window, layout, theming,
-the kit, and rendering.
+The API docs live in [docs/](docs/README.md) - app & window, layout, theming, the
+kit, rendering, plus external frames, input capture, and system integration
+(clipboard, fullscreen, displays).
 
 ## Build from source
 
@@ -73,7 +74,7 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 | Platform | Status | Renderer |
 |---|---|---|
 | macOS | works | Metal |
-| Windows | partial | Direct3D 11 |
+| Windows | works | Direct3D 11 |
 | Linux | not started | - |
 
 What works:
@@ -92,17 +93,20 @@ What works:
   depth-ordered hit-testing and drag capture.
 - Overlays - dialog, sheet, popover, nested menus - drawn over a blurred backdrop.
 - Custom window chrome: painted title band, native traffic lights on macOS,
-  drag-to-move, double-click zoom.
+  caption buttons on Windows, drag-to-move, double-click zoom.
+- Multiple windows, each with its own state, render loop, and input routing.
+- External frames: draw a decoded video / remote screen as a node (zero-copy NV12,
+  YUV->RGB on the GPU).
+- Input capture: grab the mouse and keyboard for raw relative motion + scancodes.
+- System integration: clipboard read/write + change-notify, native fullscreen, and
+  display enumeration.
 - SF Symbols on macOS, with a bundled Lucide fallback. Over 100 icon names
   resolve on either path.
 
 ## Limitations
 
-- Platforms: macOS is the only one that's solid. Windows is partial - the
-  custom chrome works, but the native window, sidebar, toolbar, and file-dialog
-  APIs are stubs. No Linux.
-- One window per process. Core state is process-global, so there's no
-  multi-window.
+- Linux is not started.
+- On Windows, native file dialogs and the detached-panel helpers aren't there yet.
 - No accessibility. Nothing wires up VoiceOver or NSAccessibility roles and
   labels.
 - Text is BMP only. No IME composition (so no CJK input), no emoji or colour
@@ -114,6 +118,18 @@ What works:
   children per line (128). Go over and release builds drop the excess without
   warning.
 
+## Acknowledgments
+
+Thanks to the projects zigui learned from:
+
+- [GPUI](https://www.gpui.rs/) and [GPUI Component](https://github.com/longbridge/gpui-component) -
+  the GPU rendering approach and the component kit.
+- [shadcn/ui](https://ui.shadcn.com/) - the design we based ours on.
+- [Clay](https://github.com/nicbarker/clay) - the inspiration for the
+  immediate-mode layout.
+- [Lucide](https://lucide.dev/) - the bundled icons, used under the
+  [ISC license](https://github.com/lucide-icons/lucide/blob/main/LICENSE).
+
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Bundled Lucide icons are ISC - see Acknowledgments.

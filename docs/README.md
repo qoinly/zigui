@@ -4,7 +4,7 @@ zigui draws native UI on the GPU. You build a tree of nodes and return it from a
 view function; zigui lays it out and draws it. The tree is rebuilt every frame, so
 the UI is always a function of your state.
 
-macOS only. Zig 0.16.0.
+macOS and Windows. Zig 0.16.0.
 
 ## A window
 
@@ -67,8 +67,11 @@ Variants exist for callbacks that carry an argument: `zigui.on_id` (an id),
 
 ## Docs
 
-- [App & window](app-window.md)
+- [App & window](app-window.md) - windows, views, callbacks, multi-window
 - [Layout](layout.md)
 - [Theming](theming.md)
 - [Kit](kit/overview.md)
 - [Rendering](rendering.md)
+- [External frames](frames.md) - draw a decoded video / remote screen
+- [Input capture](input.md) - grab raw mouse + keyboard
+- [System integration](system.md) - clipboard, fullscreen, displays
