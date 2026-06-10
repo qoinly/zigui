@@ -1,164 +1,153 @@
-// zigui - library only. Exposes a single "zigui" module + tests. Consumers get
-// the platform frameworks via the module link list, so they do not have to
-// repeat the linkage themselves. Examples (e.g. examples/showcase) are their
-// own standalone builds.
+// zigui - library only. Consumers inherit the platform link list, so they do not
+// have to repeat it. Examples (e.g. examples/showcase) are standalone builds.
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zigui", .{
+    const zigui = b.addModule("zigui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // Platform link list; consumers inherit these through the module.
-    switch (target.result.os.tag) {
-        .macos => {
-            mod.linkFramework("Cocoa", .{});
-            mod.linkFramework("AppKit", .{});
-            mod.linkFramework("Foundation", .{});
-            mod.linkFramework("Metal", .{});
-            mod.linkFramework("MetalPerformanceShaders", .{});
-            mod.linkFramework("QuartzCore", .{});
-            mod.linkFramework("CoreVideo", .{});
-            mod.linkFramework("CoreText", .{});
-            mod.linkFramework("CoreGraphics", .{});
-            mod.link_libc = true;
-        },
-        .windows => {
-            // d3dcompiler_47.dll is loaded at runtime, so it is not linked here.
-            mod.linkSystemLibrary("user32", .{});
-            mod.linkSystemLibrary("gdi32", .{});
-            mod.linkSystemLibrary("d3d11", .{});
-            mod.linkSystemLibrary("dxgi", .{});
-            mod.linkSystemLibrary("dwrite", .{});
-            mod.linkSystemLibrary("dwmapi", .{});
-            mod.linkSystemLibrary("ole32", .{});
-        },
-        else => @panic("zigui: unsupported target OS"),
-    }
+    link_platform(zigui, target);
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    const zigui_tests = b.addTest(.{ .root_module = zigui });
+    const run_zigui_tests = b.addRunArtifact(zigui_tests);
 
     const test_step = b.step("test", "Run zigui tests");
-    test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_zigui_tests.step);
 
-    // Example: hello - wired into the root build (not standalone like the
-    // showcase). It is the minimal smoke test for the public API: compiled on
-    // every `zig build`; `zig build hello` runs it.
-    const hello_mod = b.createModule(.{
-        .root_source_file = b.path("examples/hello.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
-    });
-    const hello_exe = b.addExecutable(.{ .name = "hello", .root_module = hello_mod });
-    b.installArtifact(hello_exe);
-    const hello_run = b.addRunArtifact(hello_exe);
-    const hello_step = b.step("hello", "Build + run the hello example");
-    hello_step.dependOn(&hello_run.step);
+    add_examples(b, zigui, target, optimize);
+    add_icongen(b);
+}
 
-    // Example: frame-demo - smoke test for the external-frame primitive.
-    const frame_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/frame_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
+fn link_platform(zigui: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    switch (target.result.os.tag) {
+        .macos => link_macos(zigui),
+        .windows => link_windows(zigui),
+        else => @panic("zigui: unsupported target OS"),
+    }
+}
+
+fn link_macos(zigui: *std.Build.Module) void {
+    zigui.linkFramework("Cocoa", .{});
+    zigui.linkFramework("AppKit", .{});
+    zigui.linkFramework("Foundation", .{});
+    zigui.linkFramework("Metal", .{});
+    zigui.linkFramework("MetalPerformanceShaders", .{});
+    zigui.linkFramework("QuartzCore", .{});
+    zigui.linkFramework("CoreVideo", .{});
+    zigui.linkFramework("CoreText", .{});
+    zigui.linkFramework("CoreGraphics", .{});
+    zigui.link_libc = true;
+}
+
+fn link_windows(zigui: *std.Build.Module) void {
+    // d3dcompiler_47.dll is loaded at runtime, so it is not linked here.
+    zigui.linkSystemLibrary("user32", .{});
+    zigui.linkSystemLibrary("gdi32", .{});
+    zigui.linkSystemLibrary("d3d11", .{});
+    zigui.linkSystemLibrary("dxgi", .{});
+    zigui.linkSystemLibrary("dwrite", .{});
+    zigui.linkSystemLibrary("dwmapi", .{});
+    zigui.linkSystemLibrary("shcore", .{});
+    zigui.linkSystemLibrary("ole32", .{});
+}
+
+fn add_examples(
+    b: *std.Build,
+    zigui: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    add_example(b, zigui, target, optimize, .{
+        .name = "hello",
+        .source = "examples/hello.zig",
+        .description = "Build + run the hello example",
     });
-    const frame_demo_exe = b.addExecutable(.{
+    add_example(b, zigui, target, optimize, .{
         .name = "frame-demo",
-        .root_module = frame_demo_mod,
+        .source = "examples/frame_demo.zig",
+        .description = "Build + run the external-frame demo",
     });
-    b.installArtifact(frame_demo_exe);
-    const frame_demo_run = b.addRunArtifact(frame_demo_exe);
-    const frame_demo_step = b.step("frame-demo", "Build + run the external-frame demo");
-    frame_demo_step.dependOn(&frame_demo_run.step);
-
-    // Example: input-demo - smoke test for the raw input-capture (grab) path.
-    const input_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/input_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
-    });
-    const input_demo_exe = b.addExecutable(.{
+    add_example(b, zigui, target, optimize, .{
         .name = "input-demo",
-        .root_module = input_demo_mod,
+        .source = "examples/input_demo.zig",
+        .description = "Build + run the input-capture demo",
     });
-    b.installArtifact(input_demo_exe);
-    const input_demo_run = b.addRunArtifact(input_demo_exe);
-    const input_demo_step = b.step("input-demo", "Build + run the input-capture demo");
-    input_demo_step.dependOn(&input_demo_run.step);
-
-    // Example: clipboard-demo - smoke test for clipboard read/write + change-notify.
-    const clip_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/clipboard_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
-    });
-    const clip_demo_exe = b.addExecutable(.{
+    add_example(b, zigui, target, optimize, .{
         .name = "clipboard-demo",
-        .root_module = clip_demo_mod,
+        .source = "examples/clipboard_demo.zig",
+        .description = "Build + run the clipboard demo",
     });
-    b.installArtifact(clip_demo_exe);
-    const clip_demo_run = b.addRunArtifact(clip_demo_exe);
-    const clip_demo_step = b.step("clipboard-demo", "Build + run the clipboard demo");
-    clip_demo_step.dependOn(&clip_demo_run.step);
-
-    // Example: display-demo - smoke test for display enumeration + fullscreen toggle.
-    const disp_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/display_demo.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
-    });
-    const disp_demo_exe = b.addExecutable(.{
+    add_example(b, zigui, target, optimize, .{
         .name = "display-demo",
-        .root_module = disp_demo_mod,
+        .source = "examples/display_demo.zig",
+        .description = "Build + run the display/fullscreen demo",
     });
-    b.installArtifact(disp_demo_exe);
-    const disp_demo_run = b.addRunArtifact(disp_demo_exe);
-    const disp_demo_step = b.step("display-demo", "Build + run the display/fullscreen demo");
-    disp_demo_step.dependOn(&disp_demo_run.step);
+    add_example(b, zigui, target, optimize, .{
+        .name = "multiwindow-demo",
+        .source = "examples/multiwindow_demo.zig",
+        .description = "Build + run the multi-window demo",
+    });
+}
 
-    // Example: multiwindow-demo - smoke test for the multi-window open path.
-    const mw_demo_mod = b.createModule(.{
-        .root_source_file = b.path("examples/multiwindow_demo.zig"),
+const Example = struct {
+    name: []const u8,
+    source: []const u8,
+    description: []const u8,
+};
+
+fn add_example(
+    b: *std.Build,
+    zigui: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    example: Example,
+) void {
+    const example_root = b.createModule(.{
+        .root_source_file = b.path(example.source),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zigui", .module = mod }},
+        .imports = &.{.{ .name = "zigui", .module = zigui }},
     });
-    const mw_demo_exe = b.addExecutable(.{
-        .name = "multiwindow-demo",
-        .root_module = mw_demo_mod,
+    const example_exe = b.addExecutable(.{
+        .name = example.name,
+        .root_module = example_root,
     });
-    b.installArtifact(mw_demo_exe);
-    const mw_demo_run = b.addRunArtifact(mw_demo_exe);
-    const mw_demo_step = b.step("multiwindow-demo", "Build + run the multi-window demo");
-    mw_demo_step.dependOn(&mw_demo_run.step);
+    b.installArtifact(example_exe);
+    const example_run = b.addRunArtifact(example_exe);
+    const example_step = b.step(example.name, example.description);
+    example_step.dependOn(&example_run.step);
+}
 
-    // Offline codegen: regenerate src/icon_lucide_data.zig from the Lucide SVG
-    // set. The SVG dir lives outside the repo, so it must be passed:
-    //   zig build icongen -Dlucide-dir=/path/to/lucide/icons
-    const icongen_mod = b.createModule(.{
+fn add_icongen(b: *std.Build) void {
+    const icongen_root = b.createModule(.{
         .root_source_file = b.path("tools/icongen.zig"),
         .target = b.graph.host, // a host tool: it runs at build time, never ships
         .optimize = .Debug,
     });
-    const icongen_exe = b.addExecutable(.{ .name = "icongen", .root_module = icongen_mod });
-    const icongen_step = b.step("icongen", "Regenerate src/icon_lucide_data.zig from Lucide SVGs (-Dlucide-dir=<path>)");
-    if (b.option([]const u8, "lucide-dir", "Lucide SVG icons dir for `zig build icongen`")) |lucide_dir| {
+    const icongen_exe = b.addExecutable(.{ .name = "icongen", .root_module = icongen_root });
+    const icongen_step = b.step(
+        "icongen",
+        "Regenerate src/icon_lucide_data.zig from Lucide SVGs",
+    );
+    const lucide_dir_option = b.option(
+        []const u8,
+        "lucide-dir",
+        "Lucide SVG icons dir for `zig build icongen`",
+    );
+    if (lucide_dir_option) |lucide_dir| {
         const run = b.addRunArtifact(icongen_exe);
         run.setCwd(b.path(".")); // it writes the out path relative to the repo root
         run.has_side_effects = true; // rewrites a source file: never skip on cache hit
         run.addArgs(&.{ lucide_dir, "src/icon_lucide_data.zig" });
         icongen_step.dependOn(&run.step);
     } else {
-        icongen_step.dependOn(&b.addFail("icongen needs -Dlucide-dir=<path to the Lucide icons dir>").step);
+        const fail = b.addFail("icongen needs -Dlucide-dir=<path to Lucide icons>");
+        icongen_step.dependOn(&fail.step);
     }
 }

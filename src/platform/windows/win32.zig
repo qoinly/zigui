@@ -11,6 +11,7 @@ pub const BOOL = i32;
 pub const DWORD = u32;
 pub const UINT = u32;
 pub const WORD = u16;
+pub const BYTE = u8;
 pub const ATOM = u16;
 pub const LONG = i32;
 pub const WCHAR = u16;
@@ -25,9 +26,12 @@ pub const HCURSOR = *opaque {};
 pub const HBRUSH = *opaque {};
 pub const HMENU = *opaque {};
 pub const HDC = *opaque {};
+pub const HMONITOR = *opaque {};
 pub const HFONT = *opaque {};
 pub const HGDIOBJ = *opaque {};
 pub const HGLOBAL = *anyopaque;
+pub const HRAWINPUT = *opaque {};
+pub const HANDLE = *opaque {};
 pub const COLORREF = u32;
 
 pub const TRUE: BOOL = 1;
@@ -55,6 +59,8 @@ pub const MSG = extern struct {
 };
 
 pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+pub const MONITORENUMPROC =
+    *const fn (HMONITOR, ?HDC, *RECT, LPARAM) callconv(.winapi) BOOL;
 
 pub const WNDCLASSEXW = extern struct {
     cbSize: UINT,
@@ -100,6 +106,59 @@ pub const TRACKMOUSEEVENT = extern struct {
     dwFlags: DWORD,
     hwndTrack: ?HWND,
     dwHoverTime: DWORD,
+};
+
+pub const RAWINPUTDEVICE = extern struct {
+    usUsagePage: WORD,
+    usUsage: WORD,
+    dwFlags: DWORD,
+    hwndTarget: ?HWND,
+};
+
+pub const RAWINPUTHEADER = extern struct {
+    dwType: DWORD,
+    dwSize: DWORD,
+    hDevice: ?*anyopaque,
+    wParam: WPARAM,
+};
+
+pub const RAWMOUSE = extern struct {
+    usFlags: WORD,
+    buttons: extern union {
+        ulButtons: DWORD,
+        data: extern struct {
+            usButtonFlags: WORD,
+            usButtonData: WORD,
+        },
+    },
+    ulRawButtons: DWORD,
+    lLastX: LONG,
+    lLastY: LONG,
+    ulExtraInformation: DWORD,
+};
+
+pub const RAWKEYBOARD = extern struct {
+    MakeCode: WORD,
+    Flags: WORD,
+    Reserved: WORD,
+    VKey: WORD,
+    Message: UINT,
+    ExtraInformation: DWORD,
+};
+
+pub const RAWHID = extern struct {
+    dwSizeHid: DWORD,
+    dwCount: DWORD,
+    bRawData: [1]BYTE,
+};
+
+pub const RAWINPUT = extern struct {
+    header: RAWINPUTHEADER,
+    data: extern union {
+        mouse: RAWMOUSE,
+        keyboard: RAWKEYBOARD,
+        hid: RAWHID,
+    },
 };
 
 // Window class style.
@@ -167,6 +226,13 @@ pub const MONITORINFO = extern struct {
     rcWork: RECT,
     dwFlags: DWORD,
 };
+pub const MONITORINFOF_PRIMARY: DWORD = 0x00000001;
+
+pub const MONITOR_DPI_TYPE = enum(UINT) {
+    effective = 0,
+    angular = 1,
+    raw = 2,
+};
 
 // Window messages.
 pub const WM_DESTROY: UINT = 0x0002;
@@ -178,14 +244,20 @@ pub const WM_QUIT: UINT = 0x0012;
 pub const WM_ERASEBKGND: UINT = 0x0014;
 pub const WM_ACTIVATE: UINT = 0x0006;
 pub const WM_SETCURSOR: UINT = 0x0020;
+pub const WM_SETTINGCHANGE: UINT = 0x001A;
 pub const WM_GETMINMAXINFO: UINT = 0x0024;
+pub const WM_KILLFOCUS: UINT = 0x0008;
+pub const WM_DISPLAYCHANGE: UINT = 0x007E;
 pub const WM_NCCALCSIZE: UINT = 0x0083;
 pub const WM_NCHITTEST: UINT = 0x0084;
+pub const WM_INPUT: UINT = 0x00FF;
 pub const WM_MOUSEMOVE: UINT = 0x0200;
 pub const WM_LBUTTONDOWN: UINT = 0x0201;
 pub const WM_LBUTTONUP: UINT = 0x0202;
 pub const WM_RBUTTONDOWN: UINT = 0x0204;
 pub const WM_RBUTTONUP: UINT = 0x0205;
+pub const WM_MBUTTONDOWN: UINT = 0x0207;
+pub const WM_MBUTTONUP: UINT = 0x0208;
 pub const WM_MOUSEWHEEL: UINT = 0x020A;
 pub const WM_MOUSEHWHEEL: UINT = 0x020E;
 pub const WM_MOUSELEAVE: UINT = 0x02A3;
@@ -197,6 +269,7 @@ pub const WM_KEYDOWN: UINT = 0x0100;
 pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
+pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_DPICHANGED: UINT = 0x02E0;
 // First message id free for application use; the vsync tick rides on it.
 pub const WM_APP: UINT = 0x8000;
@@ -234,6 +307,32 @@ pub const HTBOTTOMRIGHT: LRESULT = 17;
 pub const TME_LEAVE: DWORD = 0x00000002;
 pub const TME_NONCLIENT: DWORD = 0x00000010;
 
+// Raw input constants.
+pub const HID_USAGE_PAGE_GENERIC: WORD = 0x01;
+pub const HID_USAGE_GENERIC_MOUSE: WORD = 0x02;
+pub const HID_USAGE_GENERIC_KEYBOARD: WORD = 0x06;
+pub const RID_INPUT: UINT = 0x10000003;
+pub const RIM_TYPEMOUSE: DWORD = 0;
+pub const RIM_TYPEKEYBOARD: DWORD = 1;
+pub const RIM_TYPEHID: DWORD = 2;
+pub const RAW_INPUT_ERROR: UINT = std.math.maxInt(UINT);
+pub const MOUSE_MOVE_ABSOLUTE: WORD = 0x0001;
+pub const RI_MOUSE_LEFT_BUTTON_DOWN: WORD = 0x0001;
+pub const RI_MOUSE_LEFT_BUTTON_UP: WORD = 0x0002;
+pub const RI_MOUSE_RIGHT_BUTTON_DOWN: WORD = 0x0004;
+pub const RI_MOUSE_RIGHT_BUTTON_UP: WORD = 0x0008;
+pub const RI_MOUSE_MIDDLE_BUTTON_DOWN: WORD = 0x0010;
+pub const RI_MOUSE_MIDDLE_BUTTON_UP: WORD = 0x0020;
+pub const RI_MOUSE_BUTTON_4_DOWN: WORD = 0x0040;
+pub const RI_MOUSE_BUTTON_4_UP: WORD = 0x0080;
+pub const RI_MOUSE_BUTTON_5_DOWN: WORD = 0x0100;
+pub const RI_MOUSE_BUTTON_5_UP: WORD = 0x0200;
+pub const RI_MOUSE_WHEEL: WORD = 0x0400;
+pub const RI_MOUSE_HWHEEL: WORD = 0x0800;
+pub const RI_KEY_BREAK: WORD = 0x0001;
+pub const RI_KEY_E0: WORD = 0x0002;
+pub const RI_KEY_E1: WORD = 0x0004;
+
 // GetSystemMetrics indices for the maximize-inset frame padding.
 pub const SM_CXFRAME: i32 = 32;
 pub const SM_CYFRAME: i32 = 33;
@@ -251,6 +350,7 @@ pub const VK_RETURN: WPARAM = 0x0D;
 pub const VK_SHIFT: WPARAM = 0x10;
 pub const VK_CONTROL: WPARAM = 0x11;
 pub const VK_MENU: WPARAM = 0x12;
+pub const VK_CAPITAL: WPARAM = 0x14;
 pub const VK_ESCAPE: WPARAM = 0x1B;
 pub const VK_PRIOR: WPARAM = 0x21;
 pub const VK_NEXT: WPARAM = 0x22;
@@ -263,6 +363,12 @@ pub const VK_DOWN: WPARAM = 0x28;
 pub const VK_DELETE: WPARAM = 0x2E;
 pub const VK_LWIN: WPARAM = 0x5B;
 pub const VK_RWIN: WPARAM = 0x5C;
+pub const VK_LSHIFT: WPARAM = 0xA0;
+pub const VK_RSHIFT: WPARAM = 0xA1;
+pub const VK_LCONTROL: WPARAM = 0xA2;
+pub const VK_RCONTROL: WPARAM = 0xA3;
+pub const VK_LMENU: WPARAM = 0xA4;
+pub const VK_RMENU: WPARAM = 0xA5;
 
 // GetKeyState high bit = key down.
 pub const KEY_DOWN_MASK: u16 = 0x8000;
@@ -335,9 +441,15 @@ pub extern "user32" fn PostThreadMessageW(
 ) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
-pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?HMONITOR;
+pub extern "user32" fn EnumDisplayMonitors(
+    hdc: ?HDC,
+    clip: ?*const RECT,
+    proc: MONITORENUMPROC,
+    data: LPARAM,
+) callconv(.winapi) BOOL;
 pub extern "user32" fn GetMonitorInfoW(
-    monitor: ?*anyopaque,
+    monitor: HMONITOR,
     info: *MONITORINFO,
 ) callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowLongPtrW(
@@ -348,13 +460,28 @@ pub extern "user32" fn SetWindowLongPtrW(
 pub extern "user32" fn GetWindowLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) isize;
 pub extern "user32" fn LoadCursorW(instance: ?HINSTANCE, name: LPCWSTR) callconv(.winapi) ?HCURSOR;
 pub extern "user32" fn SetCursor(cursor: ?HCURSOR) callconv(.winapi) ?HCURSOR;
+pub extern "user32" fn ShowCursor(show: BOOL) callconv(.winapi) i32;
 pub extern "user32" fn SetForegroundWindow(hwnd: HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 pub extern "user32" fn SetFocus(hwnd: ?HWND) callconv(.winapi) ?HWND;
 pub extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.winapi) UINT;
 pub extern "user32" fn SetProcessDpiAwarenessContext(value: ?*anyopaque) callconv(.winapi) BOOL;
 pub extern "user32" fn ScreenToClient(hwnd: HWND, pt: *POINT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetCursorPos(pt: *POINT) callconv(.winapi) BOOL;
+pub extern "user32" fn ClipCursor(rect: ?*const RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn TrackMouseEvent(ev: *TRACKMOUSEEVENT) callconv(.winapi) BOOL;
+pub extern "user32" fn RegisterRawInputDevices(
+    devices: [*]const RAWINPUTDEVICE,
+    count: UINT,
+    size: UINT,
+) callconv(.winapi) BOOL;
+pub extern "user32" fn GetRawInputData(
+    input: HRAWINPUT,
+    command: UINT,
+    data: ?*anyopaque,
+    size: *UINT,
+    header_size: UINT,
+) callconv(.winapi) UINT;
 pub extern "user32" fn GetKeyState(vk: i32) callconv(.winapi) i16;
 pub extern "user32" fn GetSystemMetrics(index: i32) callconv(.winapi) i32;
 pub extern "user32" fn IsZoomed(hwnd: HWND) callconv(.winapi) BOOL;
@@ -380,6 +507,7 @@ pub extern "user32" fn CloseClipboard() callconv(.winapi) BOOL;
 pub extern "user32" fn EmptyClipboard() callconv(.winapi) BOOL;
 pub extern "user32" fn GetClipboardData(format: UINT) callconv(.winapi) ?HGLOBAL;
 pub extern "user32" fn SetClipboardData(format: UINT, mem: HGLOBAL) callconv(.winapi) ?HGLOBAL;
+pub extern "user32" fn GetClipboardSequenceNumber() callconv(.winapi) DWORD;
 
 pub extern "kernel32" fn GlobalAlloc(flags: UINT, bytes: usize) callconv(.winapi) ?HGLOBAL;
 pub extern "kernel32" fn GlobalLock(mem: HGLOBAL) callconv(.winapi) ?*anyopaque;
@@ -408,6 +536,12 @@ pub extern "gdi32" fn CreateFontW(
 ) callconv(.winapi) ?HFONT;
 
 pub extern "dwmapi" fn DwmFlush() callconv(.winapi) HRESULT;
+pub extern "shcore" fn GetDpiForMonitor(
+    monitor: HMONITOR,
+    dpi_type: MONITOR_DPI_TYPE,
+    dpi_x: *UINT,
+    dpi_y: *UINT,
+) callconv(.winapi) HRESULT;
 pub extern "dwmapi" fn DwmSetWindowAttribute(
     hwnd: HWND,
     attr: DWORD,

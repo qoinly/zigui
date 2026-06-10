@@ -137,6 +137,7 @@ pub const PaintContext = struct {
     scale_factor: f32 = 2.0,
     last_pane_w: f32 = 0,
     last_pane_h: f32 = 0,
+    run_state: ?*RunState = null,
 
     pub fn init(
         self: *PaintContext,
@@ -591,9 +592,8 @@ pub const RunState = struct {
     user_cb: PaintCallback,
 };
 
-// Windows repaints synchronously from WM_SIZE (paint_now), which has no display
-// link to carry a per-window context, so it targets the last started loop -
-// correct while only one window exists on Windows.
+// Fallback for the old single-window Windows path before an HWND has bound its
+// paint context. Normal Windows WM_SIZE now arrives with the per-window context.
 var g_resize_state: ?*RunState = null;
 
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
@@ -669,8 +669,11 @@ fn redraw_thunk(ctx: *anyopaque) void {
 // Full paint cycle, run synchronously from WM_SIZE so a live resize re-renders
 // at each step instead of stretching the last frame.
 fn paint_now_thunk(ctx: *anyopaque) void {
-    _ = ctx;
-    if (g_resize_state) |s| paint_tick_thunk(@ptrCast(s));
+    std.debug.assert(@intFromPtr(ctx) != 0);
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    const s = paint.run_state orelse (g_resize_state orelse return);
+    std.debug.assert(s.paint_ctx == paint);
+    paint_tick_thunk(@ptrCast(s));
 }
 
 pub fn start_paint_loop(
@@ -682,6 +685,7 @@ pub fn start_paint_loop(
     std.debug.assert(@intFromPtr(run_state) != 0);
     std.debug.assert(@intFromPtr(paint) != 0);
     run_state.* = .{ .paint_ctx = paint, .user_ctx = ctx, .user_cb = cb };
+    paint.run_state = run_state;
     if (builtin.os.tag == .windows) g_resize_state = run_state;
     custom_shell.register_hit_test(hit_test_thunk, redraw_thunk, @ptrCast(paint));
     if (builtin.os.tag == .windows) custom_shell.register_paint_now(paint_now_thunk);
@@ -703,6 +707,7 @@ pub fn start_paint_loop(
         @ptrCast(run_state),
         paint_tick_thunk,
     );
+    errdefer dl.deinit();
     try dl.start();
     return dl;
 }

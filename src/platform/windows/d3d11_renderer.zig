@@ -25,9 +25,8 @@ const MAX_COLOR_SPRITES = 256;
 const MAX_POLYLINES = 1024;
 const MAX_LINES = 1024;
 const MAX_RINGS = 256;
+const MAX_FRAMES = 8;
 
-// Mirrors the macOS renderer's symbol so the shared renderer facade compiles. The
-// Windows backend draws no external frames, so the value is otherwise unused here.
 pub const max_frames_in_flight: u32 = 3;
 
 // Modal-backdrop blur radius in points; scaled to pixels at draw time so the
@@ -52,6 +51,175 @@ const InstanceBuffer = struct {
     srv: ?*anyopaque = null,
     stride: u32 = 0,
     capacity: u32 = 0,
+};
+
+const FrameSurfaceState = struct {
+    tex: ?*anyopaque = null,
+    srv: ?*anyopaque = null,
+    chroma_tex: ?*anyopaque = null,
+    chroma_srv: ?*anyopaque = null,
+    mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    chroma_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    owner_tex: ?*anyopaque = null,
+    owner_chroma_tex: ?*anyopaque = null,
+    owner_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    owner_chroma_mutex: ?*dxgi.IDXGIKeyedMutex = null,
+    shared_acquired: bool = false,
+    // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
+    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+};
+
+const SurfaceFormat = enum { bgra, nv12, shared_nv12 };
+const Plane = enum { luma, chroma };
+// Shared-handle surfaces never read CPU pixels, but the legacy field stays
+// non-null so old pointer-shape checks cannot trip over this format.
+const shared_frame_pixel: u8 = 0;
+
+// External frame surface. CPU-backed surfaces reuse upload textures; shared
+// surfaces cache opened SRVs for a decoder-owned DXGI handle.
+pub const FrameSurface = struct {
+    format: SurfaceFormat,
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixels: [*]u8,
+    chroma_stride: u32 = 0,
+    chroma_pixels: ?[*]u8 = null,
+    shared_luma: ?win32.HANDLE = null,
+    shared_chroma: ?win32.HANDLE = null,
+    shared_acquire_key: u64 = 0,
+    shared_release_key: u64 = 0,
+    state: FrameSurfaceState = .{},
+
+    pub fn init_bgra(width: u32, height: u32, stride: u32, pixels: [*]u8) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(stride >= width * 4);
+        return .{
+            .format = .bgra,
+            .width = width,
+            .height = height,
+            .stride = stride,
+            .pixels = pixels,
+        };
+    }
+
+    pub fn init_nv12(
+        width: u32,
+        height: u32,
+        y_stride: u32,
+        y_pixels: [*]u8,
+        uv_stride: u32,
+        uv_pixels: [*]u8,
+    ) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        std.debug.assert(y_stride >= width);
+        std.debug.assert(uv_stride >= width);
+        return .{
+            .format = .nv12,
+            .width = width,
+            .height = height,
+            .stride = y_stride,
+            .pixels = y_pixels,
+            .chroma_stride = uv_stride,
+            .chroma_pixels = uv_pixels,
+        };
+    }
+
+    pub fn init_shared_nv12(
+        width: u32,
+        height: u32,
+        luma: win32.HANDLE,
+        chroma: win32.HANDLE,
+        acquire_key: u64,
+        release_key: u64,
+    ) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        return .{
+            .format = .shared_nv12,
+            .width = width,
+            .height = height,
+            .stride = width,
+            .pixels = @ptrCast(@constCast(&shared_frame_pixel)),
+            .chroma_stride = width,
+            .shared_luma = luma,
+            .shared_chroma = chroma,
+            .shared_acquire_key = acquire_key,
+            .shared_release_key = release_key,
+        };
+    }
+
+    pub fn available(self: *const FrameSurface) bool {
+        std.debug.assert(self.state.refs.load(.acquire) >= 1);
+        return self.state.refs.load(.acquire) == 1;
+    }
+
+    pub fn deinit(self: *FrameSurface) void {
+        std.debug.assert(self.state.refs.load(.acquire) == 1);
+        release_shared_sync(self);
+        release_shared_owner(self);
+        release_shared_import(self);
+        com.release(&self.state.chroma_srv);
+        com.release(&self.state.chroma_tex);
+        com.release(&self.state.srv);
+        com.release(&self.state.tex);
+    }
+
+    fn release_shared_owner(self: *FrameSurface) void {
+        com.release(&self.state.owner_chroma_mutex);
+        com.release(&self.state.owner_mutex);
+        com.release(&self.state.owner_chroma_tex);
+        com.release(&self.state.owner_tex);
+    }
+
+    fn release_shared_import(self: *FrameSurface) void {
+        com.release(&self.state.chroma_mutex);
+        com.release(&self.state.mutex);
+    }
+};
+
+fn query_keyed_mutex(tex: *anyopaque, out: *?*dxgi.IDXGIKeyedMutex) win32.HRESULT {
+    var raw: ?*anyopaque = null;
+    const hr = com.query_interface(tex, &dxgi.IID_IDXGIKeyedMutex, &raw);
+    if (com.failed(hr)) return hr;
+    out.* = @ptrCast(@alignCast(raw.?));
+    return hr;
+}
+
+fn shared_handle(tex: *anyopaque) ?win32.HANDLE {
+    var raw: ?*anyopaque = null;
+    if (com.failed(com.query_interface(tex, &dxgi.IID_IDXGIResource, &raw))) return null;
+    var res: ?*dxgi.IDXGIResource = @ptrCast(@alignCast(raw.?));
+    defer com.release(&res);
+    var handle: ?win32.HANDLE = null;
+    if (com.failed(res.?.get_shared_handle(&handle))) return null;
+    return handle;
+}
+
+fn release_shared_sync(surface: *FrameSurface) void {
+    if (!surface.state.shared_acquired) return;
+    if (surface.state.chroma_mutex) |mutex| _ = mutex.release_sync(surface.shared_release_key);
+    if (surface.state.mutex) |mutex| _ = mutex.release_sync(surface.shared_release_key);
+    surface.state.shared_acquired = false;
+}
+
+const FrameGpu = extern struct {
+    bounds: [4]f32,
+    clip_bounds: [4]f32,
+    opacity: f32,
+    _pad: [3]f32 = .{ 0, 0, 0 },
+    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+
+    comptime {
+        std.debug.assert(@sizeOf(FrameGpu) == 96);
+        std.debug.assert(@offsetOf(FrameGpu, "csc") == 48);
+    }
 };
 
 // An offscreen color target usable as both a render target and a sampled
@@ -81,6 +249,8 @@ pub const Renderer = struct {
     polyline_pipeline: Pipeline = .{},
     line_pipeline: Pipeline = .{},
     ring_pipeline: Pipeline = .{},
+    frame_pipeline: Pipeline = .{},
+    frame_nv12_pipeline: Pipeline = .{},
 
     quad_buffer: InstanceBuffer = .{},
     sprite_buffer: InstanceBuffer = .{},
@@ -95,6 +265,7 @@ pub const Renderer = struct {
 
     viewport_cb: ?*anyopaque = null,
     blur_cb: ?*anyopaque = null,
+    frame_cb: ?*anyopaque = null,
     blend_state: ?*anyopaque = null,
     raster_state: ?*anyopaque = null,
     raster_state_scissor: ?*anyopaque = null,
@@ -182,6 +353,7 @@ pub const Renderer = struct {
         com.release(&self.rtv);
         com.release(&self.viewport_cb);
         com.release(&self.blur_cb);
+        com.release(&self.frame_cb);
         com.release(&self.blend_state);
         com.release(&self.raster_state);
         com.release(&self.raster_state_scissor);
@@ -196,9 +368,10 @@ pub const Renderer = struct {
             com.release(&ib.buffer);
         }
         for ([_]*Pipeline{
-            &self.quad_pipeline,     &self.text_pipeline,   &self.color_sprite_pipeline,
-            &self.polyline_pipeline, &self.line_pipeline,   &self.ring_pipeline,
-            &self.blit_pipeline,     &self.blur_h_pipeline, &self.blur_v_pipeline,
+            &self.quad_pipeline,     &self.text_pipeline,       &self.color_sprite_pipeline,
+            &self.polyline_pipeline, &self.line_pipeline,       &self.ring_pipeline,
+            &self.frame_pipeline,    &self.frame_nv12_pipeline, &self.blit_pipeline,
+            &self.blur_h_pipeline,   &self.blur_v_pipeline,
         }) |p| {
             com.release(&p.vs);
             com.release(&p.ps);
@@ -212,38 +385,377 @@ pub const Renderer = struct {
         return @ptrCast(self.device);
     }
 
-    // External-frame API. The Windows backend draws no external frames, so these
-    // satisfy the shared renderer interface and import nothing; a frame node draws
-    // nothing here.
+    pub fn create_shared_nv12_surface(self: *Renderer, width: u32, height: u32) ?FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+
+        var out = FrameSurface.init_shared_nv12(
+            width,
+            height,
+            @ptrFromInt(1),
+            @ptrFromInt(1),
+            0,
+            0,
+        );
+        if (!self.create_shared_plane(width, height, .luma, &out)) {
+            out.deinit();
+            return null;
+        }
+        if (!self.create_shared_plane(width / 2, height / 2, .chroma, &out)) {
+            out.deinit();
+            return null;
+        }
+        std.debug.assert(out.shared_luma != null);
+        std.debug.assert(out.shared_chroma != null);
+        return out;
+    }
+
+    pub fn update_shared_nv12_surface(
+        self: *Renderer,
+        surface: *FrameSurface,
+        y: [*]const u8,
+        y_stride: u32,
+        uv: [*]const u8,
+        uv_stride: u32,
+    ) bool {
+        std.debug.assert(surface.format == .shared_nv12);
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        std.debug.assert(y_stride >= surface.width);
+        std.debug.assert(uv_stride >= surface.width);
+        const tex = surface.state.owner_tex orelse return false;
+        const chroma_tex = surface.state.owner_chroma_tex orelse return false;
+        const mutex = surface.state.owner_mutex orelse return false;
+        const chroma_mutex = surface.state.owner_chroma_mutex orelse return false;
+        if (com.failed(mutex.acquire_sync(surface.shared_release_key, 0))) return false;
+        var chroma_acquired = false;
+        defer {
+            if (chroma_acquired) _ = chroma_mutex.release_sync(surface.shared_acquire_key);
+            _ = mutex.release_sync(surface.shared_acquire_key);
+        }
+        if (com.failed(chroma_mutex.acquire_sync(surface.shared_release_key, 0))) return false;
+        chroma_acquired = true;
+        self.context.update_subresource(tex, 0, null, y, y_stride, 0);
+        self.context.update_subresource(chroma_tex, 0, null, uv, uv_stride, 0);
+        return true;
+    }
+
+    // The shared facade keeps the macOS import name; Windows accepts CPU-backed
+    // frame surfaces and returns the SRVs needed by their format.
     pub const Nv12Textures = struct {
         luma: *anyopaque,
-        chroma: *anyopaque,
+        chroma: ?*anyopaque,
         cv_luma: *anyopaque,
-        cv_chroma: *anyopaque,
+        cv_chroma: ?*anyopaque,
         width: u32,
         height: u32,
     };
 
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
-        _ = self;
-        _ = pixel_buffer;
-        return null;
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        return switch (surface.format) {
+            .bgra => self.import_bgra(surface),
+            .nv12 => self.import_nv12_surface(surface),
+            .shared_nv12 => self.import_shared_nv12_surface(surface),
+        };
     }
 
     pub fn release_cv_texture(ref: *anyopaque) void {
-        _ = ref;
+        const surface: *FrameSurface = @ptrCast(@alignCast(ref));
+        if (surface.format == .shared_nv12) release_shared_sync(surface);
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
     }
 
     pub fn retain_surface(pixel_buffer: *anyopaque) void {
-        _ = pixel_buffer;
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
     }
 
     pub fn release_surface(pixel_buffer: *anyopaque) void {
-        _ = pixel_buffer;
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
     }
 
     pub fn flush_texture_cache(self: *Renderer) void {
         _ = self;
+    }
+
+    fn import_bgra(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        std.debug.assert(surface.stride >= surface.width * 4);
+        self.ensure_bgra_surface(surface);
+        const tex = surface.state.tex orelse return null;
+        const srv = surface.state.srv orelse return null;
+        self.context.update_subresource(tex, 0, null, surface.pixels, surface.stride, 0);
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = srv,
+            .chroma = null,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn import_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width % 2 == 0);
+        std.debug.assert(surface.height % 2 == 0);
+        std.debug.assert(surface.stride >= surface.width);
+        std.debug.assert(surface.chroma_stride >= surface.width);
+        std.debug.assert(surface.chroma_pixels != null);
+        self.ensure_nv12_surface(surface);
+        const luma = surface.state.srv orelse return null;
+        const chroma = surface.state.chroma_srv orelse return null;
+        self.context.update_subresource(
+            surface.state.tex.?,
+            0,
+            null,
+            surface.pixels,
+            surface.stride,
+            0,
+        );
+        self.context.update_subresource(
+            surface.state.chroma_tex.?,
+            0,
+            null,
+            surface.chroma_pixels.?,
+            surface.chroma_stride,
+            0,
+        );
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = luma,
+            .chroma = chroma,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn import_shared_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width % 2 == 0);
+        std.debug.assert(surface.height % 2 == 0);
+        std.debug.assert(surface.shared_luma != null);
+        std.debug.assert(surface.shared_chroma != null);
+        self.ensure_shared_nv12_surface(surface);
+        const luma = surface.state.srv orelse return null;
+        const chroma = surface.state.chroma_srv orelse return null;
+        const mutex = surface.state.mutex orelse return null;
+        const chroma_mutex = surface.state.chroma_mutex orelse return null;
+        std.debug.assert(!surface.state.shared_acquired);
+        if (com.failed(mutex.acquire_sync(surface.shared_acquire_key, 0))) return null;
+        if (com.failed(chroma_mutex.acquire_sync(surface.shared_acquire_key, 0))) {
+            _ = mutex.release_sync(surface.shared_release_key);
+            return null;
+        }
+        surface.state.shared_acquired = true;
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = luma,
+            .chroma = chroma,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn ensure_bgra_surface(self: *Renderer, surface: *FrameSurface) void {
+        if (surface.state.tex != null and surface.state.srv != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.srv == null);
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = surface.width,
+            .Height = surface.height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, null, &surface.state.tex))) return;
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        const hr = self.device.create_srv(surface.state.tex.?, &srv_desc, &surface.state.srv);
+        if (com.failed(hr)) {
+            com.release(&surface.state.tex);
+        }
+    }
+
+    fn ensure_nv12_surface(self: *Renderer, surface: *FrameSurface) void {
+        if (surface.state.tex != null and surface.state.chroma_tex != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.chroma_tex == null);
+        self.ensure_plane(surface, .luma);
+        self.ensure_plane(surface, .chroma);
+        if (surface.state.tex == null or surface.state.chroma_tex == null) {
+            com.release(&surface.state.chroma_srv);
+            com.release(&surface.state.chroma_tex);
+            com.release(&surface.state.srv);
+            com.release(&surface.state.tex);
+        }
+    }
+
+    fn ensure_shared_nv12_surface(self: *Renderer, surface: *FrameSurface) void {
+        if (surface.state.srv != null and surface.state.chroma_srv != null) return;
+        std.debug.assert(surface.state.tex == null);
+        std.debug.assert(surface.state.chroma_tex == null);
+        self.open_shared_plane(surface, .luma);
+        self.open_shared_plane(surface, .chroma);
+        if (surface.state.srv == null or surface.state.chroma_srv == null) {
+            com.release(&surface.state.chroma_srv);
+            com.release(&surface.state.chroma_tex);
+            com.release(&surface.state.chroma_mutex);
+            com.release(&surface.state.srv);
+            com.release(&surface.state.tex);
+            com.release(&surface.state.mutex);
+        }
+    }
+
+    fn ensure_plane(self: *Renderer, surface: *FrameSurface, plane: Plane) void {
+        const chroma = plane == .chroma;
+        const width = if (chroma) surface.width / 2 else surface.width;
+        const height = if (chroma) surface.height / 2 else surface.height;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = format,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        const tex_slot = if (chroma) &surface.state.chroma_tex else &surface.state.tex;
+        const srv_slot = if (chroma) &surface.state.chroma_srv else &surface.state.srv;
+        if (com.failed(self.device.create_texture2d(&desc, null, tex_slot))) return;
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = format,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        const hr = self.device.create_srv(tex_slot.*.?, &srv_desc, srv_slot);
+        if (com.failed(hr)) {
+            com.release(tex_slot);
+        }
+    }
+
+    fn open_shared_plane(self: *Renderer, surface: *FrameSurface, plane: Plane) void {
+        const chroma = plane == .chroma;
+        const handle = if (chroma) surface.shared_chroma else surface.shared_luma;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        const tex_slot = if (chroma) &surface.state.chroma_tex else &surface.state.tex;
+        const srv_slot = if (chroma) &surface.state.chroma_srv else &surface.state.srv;
+        const mutex_slot = if (chroma) &surface.state.chroma_mutex else &surface.state.mutex;
+        std.debug.assert(handle != null);
+        if (com.failed(self.device.open_shared_resource(
+            handle.?,
+            &dxgi.IID_ID3D11Texture2D,
+            tex_slot,
+        ))) return;
+        if (!valid_shared_plane_desc(tex_slot.*.?, surface, plane)) {
+            com.release(tex_slot);
+            return;
+        }
+        if (com.failed(query_keyed_mutex(tex_slot.*.?, mutex_slot))) {
+            com.release(tex_slot);
+            return;
+        }
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = format,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        if (com.failed(self.device.create_srv(tex_slot.*.?, &srv_desc, srv_slot))) {
+            com.release(mutex_slot);
+            com.release(tex_slot);
+        }
+    }
+
+    fn create_shared_plane(
+        self: *Renderer,
+        width: u32,
+        height: u32,
+        plane: Plane,
+        surface: *FrameSurface,
+    ) bool {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        const chroma = plane == .chroma;
+        const format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        const tex_slot = if (chroma) &surface.state.owner_chroma_tex else &surface.state.owner_tex;
+        const mutex_slot = if (chroma)
+            &surface.state.owner_chroma_mutex
+        else
+            &surface.state.owner_mutex;
+        const handle_slot = if (chroma) &surface.shared_chroma else &surface.shared_luma;
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = format,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = d3d11.D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, null, tex_slot))) return false;
+        if (com.failed(query_keyed_mutex(tex_slot.*.?, mutex_slot))) {
+            com.release(tex_slot);
+            return false;
+        }
+        handle_slot.* = shared_handle(tex_slot.*.?) orelse {
+            com.release(mutex_slot);
+            com.release(tex_slot);
+            return false;
+        };
+        return true;
+    }
+
+    fn valid_shared_plane_desc(tex: *anyopaque, surface: *FrameSurface, plane: Plane) bool {
+        const chroma = plane == .chroma;
+        const want_w = if (chroma) surface.width / 2 else surface.width;
+        const want_h = if (chroma) surface.height / 2 else surface.height;
+        const want_format = if (chroma) dxgi.DXGI_FORMAT_R8G8_UNORM else dxgi.DXGI_FORMAT_R8_UNORM;
+        var desc: d3d11.D3D11_TEXTURE2D_DESC = undefined;
+        const t: *d3d11.ID3D11Texture2D = @ptrCast(@alignCast(tex));
+        t.get_desc(&desc);
+        if (desc.Width != want_w or desc.Height != want_h) return false;
+        if (desc.MipLevels != 1 or desc.ArraySize != 1) return false;
+        if (desc.Format != want_format) return false;
+        if (desc.SampleDesc.Count != 1) return false;
+        if (desc.BindFlags & d3d11.D3D11_BIND_SHADER_RESOURCE == 0) return false;
+        if (desc.MiscFlags & d3d11.D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX == 0) return false;
+        return true;
     }
 
     pub fn request_redraw(self: *Renderer) void {
@@ -598,8 +1110,7 @@ pub const Renderer = struct {
                     self.ring_pipeline,
                     batch,
                 ),
-                // The Windows backend draws no external frames; nothing to encode.
-                .frame => {},
+                .frame => self.encode_frame_batch(batch),
             }
         }
         if (sprites.len > 0) {
@@ -620,6 +1131,55 @@ pub const Renderer = struct {
                 atlas,
             );
         }
+    }
+
+    fn encode_frame_batch(self: *Renderer, batch: []const Primitive) void {
+        const cb = self.frame_cb orelse return;
+        if (batch.len > MAX_FRAMES) return;
+        var null_srv = [_]?*anyopaque{null};
+        var frame_cbs = [_]?*anyopaque{cb};
+        self.context.vs_set_constant_buffers(1, 1, &frame_cbs);
+        self.context.ps_set_constant_buffers(1, 1, &frame_cbs);
+        for (batch) |prim| {
+            const f = prim.frame;
+            const nv12 = f.tex_cbcr != null;
+            const pipeline = if (nv12) self.frame_nv12_pipeline else self.frame_pipeline;
+            const vs = pipeline.vs orelse continue;
+            const ps = pipeline.ps orelse continue;
+            const srv = f.tex orelse continue;
+            if (!self.update_frame_cb(cb, f)) continue;
+            self.context.vs_set_shader(vs);
+            self.context.ps_set_shader(ps);
+            var srvs = [_]?*anyopaque{srv};
+            self.context.ps_set_shader_resources(0, 1, &srvs);
+            if (f.tex_cbcr) |chroma| {
+                var chroma_srvs = [_]?*anyopaque{chroma};
+                self.context.ps_set_shader_resources(1, 1, &chroma_srvs);
+            }
+            self.context.draw_instanced(6, 1, 0, 0);
+            self.context.ps_set_shader_resources(0, 1, &null_srv);
+            self.context.ps_set_shader_resources(1, 1, &null_srv);
+        }
+    }
+
+    fn update_frame_cb(self: *Renderer, cb: *anyopaque, f: primitives.Frame) bool {
+        var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
+        if (com.failed(self.context.map(cb, 0, d3d11.D3D11_MAP_WRITE_DISCARD, &mapped)))
+            return false;
+        const ptr = mapped.pData orelse {
+            self.context.unmap(cb, 0);
+            return false;
+        };
+        const dst: *FrameGpu = @ptrCast(@alignCast(ptr));
+        dst.* = .{
+            .bounds = f.bounds,
+            .clip_bounds = f.clip_bounds,
+            .opacity = f.opacity,
+            // BGRA ignores this; NV12 reads the same uniform layout.
+            .csc = f.csc,
+        };
+        self.context.unmap(cb, 0);
+        return true;
     }
 
     fn encode_prim_batch(
@@ -726,6 +1286,12 @@ pub const Renderer = struct {
             "ring_chart_vertex",
             "ring_chart_fragment",
         );
+        self.frame_pipeline = try self.make_pipeline(compile, "frame_vertex", "frame_fragment");
+        self.frame_nv12_pipeline = try self.make_pipeline(
+            compile,
+            "frame_vertex",
+            "frame_nv12_fragment",
+        );
         self.blit_pipeline = try self.make_pipeline(compile, "blit_vertex", "blit_fragment");
         self.blur_h_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_h_fragment");
         self.blur_v_pipeline = try self.make_pipeline(compile, "blit_vertex", "blur_v_fragment");
@@ -827,6 +1393,19 @@ pub const Renderer = struct {
         if (com.failed(self.device.create_buffer(&cb_desc, null, &blur_cb)))
             return error.BufferCreateFailed;
         self.blur_cb = blur_cb;
+
+        const frame_cb_desc = d3d11.D3D11_BUFFER_DESC{
+            .ByteWidth = @sizeOf(FrameGpu),
+            .Usage = d3d11.D3D11_USAGE_DYNAMIC,
+            .BindFlags = d3d11.D3D11_BIND_CONSTANT_BUFFER,
+            .CPUAccessFlags = d3d11.D3D11_CPU_ACCESS_WRITE,
+            .MiscFlags = 0,
+            .StructureByteStride = 0,
+        };
+        var frame_cb: ?*anyopaque = null;
+        if (com.failed(self.device.create_buffer(&frame_cb_desc, null, &frame_cb)))
+            return error.BufferCreateFailed;
+        self.frame_cb = frame_cb;
     }
 
     fn make_instance_buffer(self: *Renderer, stride: u32, capacity: u32) Error!InstanceBuffer {

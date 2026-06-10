@@ -1,0 +1,21 @@
+* text=auto
+
+*.zig text eol=lf
+*.zon text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.hlsl text eol=lf
+*.metal text eol=lf
+*.svg text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
