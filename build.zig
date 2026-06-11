@@ -88,16 +88,6 @@ fn add_examples(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
-    if (target.result.os.tag == .linux) {
-        // On Linux only the window demo links - it is the lone example that
-        // does not pull in the renderer.
-        add_example(b, zigui, target, optimize, .{
-            .name = "linux-window",
-            .source = "examples/linux_window.zig",
-            .description = "Build + run the Linux window demo",
-        });
-        return;
-    }
     add_example(b, zigui, target, optimize, .{
         .name = "hello",
         .source = "examples/hello.zig",

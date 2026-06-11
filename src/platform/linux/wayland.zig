@@ -56,6 +56,11 @@ const Fns = struct {
     wl_display_roundtrip: *const fn (*wl_display) callconv(.c) c_int,
     wl_display_dispatch: *const fn (*wl_display) callconv(.c) c_int,
     wl_display_flush: *const fn (*wl_display) callconv(.c) c_int,
+    wl_display_get_fd: *const fn (*wl_display) callconv(.c) c_int,
+    wl_display_prepare_read: *const fn (*wl_display) callconv(.c) c_int,
+    wl_display_read_events: *const fn (*wl_display) callconv(.c) c_int,
+    wl_display_cancel_read: *const fn (*wl_display) callconv(.c) void,
+    wl_display_dispatch_pending: *const fn (*wl_display) callconv(.c) c_int,
     wl_proxy_marshal_array_flags: *const fn (
         *wl_proxy,
         u32,
@@ -141,6 +146,14 @@ pub const wl_output_interface: wl_interface = .{
 pub const wl_seat_interface: wl_interface = .{
     .name = "wl_seat",
     .version = 9,
+    .method_count = 0,
+    .methods = null,
+    .event_count = 0,
+    .events = null,
+};
+pub const wl_touch_interface: wl_interface = .{
+    .name = "wl_touch",
+    .version = 5,
     .method_count = 0,
     .methods = null,
     .event_count = 0,
@@ -280,6 +293,95 @@ pub const wl_buffer_interface: wl_interface = .{
     },
 };
 
+pub const wl_seat_input_interface: wl_interface = .{
+    .name = "wl_seat",
+    .version = 5,
+    .method_count = 4,
+    .methods = &[_]wl_message{
+        .{
+            .name = "get_pointer",
+            .signature = "n",
+            .types = &[_]?*const wl_interface{&wl_pointer_interface},
+        },
+        .{
+            .name = "get_keyboard",
+            .signature = "n",
+            .types = &[_]?*const wl_interface{&wl_keyboard_interface},
+        },
+        .{
+            .name = "get_touch",
+            .signature = "n",
+            .types = &[_]?*const wl_interface{&wl_touch_interface},
+        },
+        .{ .name = "release", .signature = "5", .types = &null_types },
+    },
+    .event_count = 2,
+    .events = &[_]wl_message{
+        .{ .name = "capabilities", .signature = "u", .types = &null_types },
+        .{ .name = "name", .signature = "2s", .types = &null_types },
+    },
+};
+
+pub const wl_pointer_interface: wl_interface = .{
+    .name = "wl_pointer",
+    .version = 5,
+    .method_count = 2,
+    .methods = &[_]wl_message{
+        .{
+            .name = "set_cursor",
+            .signature = "u?oii",
+            .types = &[_]?*const wl_interface{ null, &wl_surface_interface, null, null },
+        },
+        .{ .name = "release", .signature = "3", .types = &null_types },
+    },
+    .event_count = 9,
+    .events = &[_]wl_message{
+        .{
+            .name = "enter",
+            .signature = "uoff",
+            .types = &[_]?*const wl_interface{ null, &wl_surface_interface, null, null },
+        },
+        .{
+            .name = "leave",
+            .signature = "uo",
+            .types = &[_]?*const wl_interface{ null, &wl_surface_interface },
+        },
+        .{ .name = "motion", .signature = "uff", .types = &null_types },
+        .{ .name = "button", .signature = "uuuu", .types = &null_types },
+        .{ .name = "axis", .signature = "uuf", .types = &null_types },
+        .{ .name = "frame", .signature = "5", .types = &null_types },
+        .{ .name = "axis_source", .signature = "5u", .types = &null_types },
+        .{ .name = "axis_stop", .signature = "5uu", .types = &null_types },
+        .{ .name = "axis_discrete", .signature = "5ui", .types = &null_types },
+    },
+};
+
+pub const wl_keyboard_interface: wl_interface = .{
+    .name = "wl_keyboard",
+    .version = 5,
+    .method_count = 1,
+    .methods = &[_]wl_message{
+        .{ .name = "release", .signature = "3", .types = &null_types },
+    },
+    .event_count = 6,
+    .events = &[_]wl_message{
+        .{ .name = "keymap", .signature = "uhu", .types = &null_types },
+        .{
+            .name = "enter",
+            .signature = "uoa",
+            .types = &[_]?*const wl_interface{ null, &wl_surface_interface, null },
+        },
+        .{
+            .name = "leave",
+            .signature = "uo",
+            .types = &[_]?*const wl_interface{ null, &wl_surface_interface },
+        },
+        .{ .name = "key", .signature = "uuuu", .types = &null_types },
+        .{ .name = "modifiers", .signature = "uuuuu", .types = &null_types },
+        .{ .name = "repeat_info", .signature = "4ii", .types = &null_types },
+    },
+};
+
 pub const xdg_wm_base_interface: wl_interface = .{
     .name = "xdg_wm_base",
     .version = 6,
@@ -390,6 +492,7 @@ pub const Connection = struct {
     compositor: ?*wl_proxy = null,
     shm: ?*wl_proxy = null,
     wm_base: ?*wl_proxy = null,
+    seat: ?*wl_proxy = null,
 };
 
 pub var conn: Connection = .{};
@@ -418,13 +521,22 @@ const XDG_SURFACE_ACK_CONFIGURE: u32 = 4;
 const XDG_TOPLEVEL_DESTROY: u32 = 0;
 const XDG_TOPLEVEL_SET_TITLE: u32 = 2;
 const XDG_TOPLEVEL_SET_APP_ID: u32 = 3;
+const WL_SEAT_GET_POINTER: u32 = 0;
+const WL_SEAT_GET_KEYBOARD: u32 = 1;
+const WL_POINTER_SET_CURSOR: u32 = 0;
+const XDG_TOPLEVEL_MOVE: u32 = 5;
+const XDG_TOPLEVEL_RESIZE: u32 = 6;
 const XDG_TOPLEVEL_SET_MIN_SIZE: u32 = 8;
+const XDG_TOPLEVEL_SET_MAXIMIZED: u32 = 9;
+const XDG_TOPLEVEL_UNSET_MAXIMIZED: u32 = 10;
+const XDG_TOPLEVEL_SET_MINIMIZED: u32 = 13;
 const XDG_TOPLEVEL_SET_FULLSCREEN: u32 = 11;
 const XDG_TOPLEVEL_UNSET_FULLSCREEN: u32 = 12;
 
 const COMPOSITOR_BIND_VERSION: u32 = 4;
 const SHM_BIND_VERSION: u32 = 1;
 const WM_BASE_BIND_VERSION: u32 = 1;
+const SEAT_BIND_VERSION: u32 = 5;
 
 pub fn connect() Error!void {
     if (conn.display != null) return;
@@ -543,6 +655,9 @@ fn on_registry_global(
         conn.compositor = registry_bind(registry.?, name, &wl_compositor_interface, bind_version);
     } else if (std.mem.eql(u8, interface_name, "wl_shm")) {
         conn.shm = registry_bind(registry.?, name, &wl_shm_interface, SHM_BIND_VERSION);
+    } else if (std.mem.eql(u8, interface_name, "wl_seat")) {
+        const bind_version = @min(version, SEAT_BIND_VERSION);
+        conn.seat = registry_bind(registry.?, name, &wl_seat_input_interface, bind_version);
     } else if (std.mem.eql(u8, interface_name, "xdg_wm_base")) {
         const bind_version = @min(version, WM_BASE_BIND_VERSION);
         const wm_base = registry_bind(registry.?, name, &xdg_wm_base_interface, bind_version);
@@ -716,4 +831,93 @@ pub fn toplevel_set_fullscreen(toplevel: *wl_proxy, on: bool) void {
 
 pub fn toplevel_destroy(toplevel: *wl_proxy) void {
     marshal_destructor(toplevel, XDG_TOPLEVEL_DESTROY);
+}
+
+pub fn toplevel_move(toplevel: *wl_proxy, seat: *wl_proxy, serial: u32) void {
+    std.debug.assert(serial != 0);
+    var args = [_]wl_argument{ .{ .o = seat }, .{ .u = serial } };
+    marshal(toplevel, XDG_TOPLEVEL_MOVE, &args);
+}
+
+pub fn toplevel_resize(toplevel: *wl_proxy, seat: *wl_proxy, serial: u32, edges: u32) void {
+    std.debug.assert(serial != 0);
+    std.debug.assert(edges >= 1);
+    std.debug.assert(edges <= 10);
+    var args = [_]wl_argument{ .{ .o = seat }, .{ .u = serial }, .{ .u = edges } };
+    marshal(toplevel, XDG_TOPLEVEL_RESIZE, &args);
+}
+
+pub fn toplevel_set_maximized(toplevel: *wl_proxy, on: bool) void {
+    std.debug.assert(g_loaded);
+    if (on) {
+        marshal(toplevel, XDG_TOPLEVEL_SET_MAXIMIZED, null);
+    } else {
+        marshal(toplevel, XDG_TOPLEVEL_UNSET_MAXIMIZED, null);
+    }
+}
+
+pub fn toplevel_set_minimized(toplevel: *wl_proxy) void {
+    std.debug.assert(g_loaded);
+    marshal(toplevel, XDG_TOPLEVEL_SET_MINIMIZED, null);
+}
+
+pub fn seat_get_pointer(seat: *wl_proxy) ?*wl_proxy {
+    std.debug.assert(g_loaded);
+    var args = [_]wl_argument{.{ .n = 0 }};
+    return marshal_constructor(seat, WL_SEAT_GET_POINTER, &wl_pointer_interface, &args);
+}
+
+pub fn seat_get_keyboard(seat: *wl_proxy) ?*wl_proxy {
+    std.debug.assert(g_loaded);
+    var args = [_]wl_argument{.{ .n = 0 }};
+    return marshal_constructor(seat, WL_SEAT_GET_KEYBOARD, &wl_keyboard_interface, &args);
+}
+
+pub fn pointer_set_cursor(
+    pointer: *wl_proxy,
+    serial: u32,
+    surface: ?*wl_proxy,
+    hotspot_x: i32,
+    hotspot_y: i32,
+) void {
+    std.debug.assert(serial != 0);
+    std.debug.assert(hotspot_x >= 0);
+    std.debug.assert(hotspot_y >= 0);
+    var args = [_]wl_argument{
+        .{ .u = serial },
+        .{ .o = surface },
+        .{ .i = hotspot_x },
+        .{ .i = hotspot_y },
+    };
+    marshal(pointer, WL_POINTER_SET_CURSOR, &args);
+}
+
+pub fn display_fd() i32 {
+    std.debug.assert(g_loaded);
+    std.debug.assert(conn.display != null);
+    return @intCast(fns.wl_display_get_fd(conn.display.?));
+}
+
+// The poll-loop read protocol: prepare_read fails while events are queued, so
+// drain first; the caller then polls the fd and finishes with read or cancel.
+pub fn prepare_read() bool {
+    std.debug.assert(g_loaded);
+    const display = conn.display.?;
+    var guard: u32 = 0;
+    while (fns.wl_display_prepare_read(display) != 0) : (guard += 1) {
+        std.debug.assert(guard < 1024);
+        if (fns.wl_display_dispatch_pending(display) < 0) return false;
+    }
+    return true;
+}
+
+pub fn read_events() void {
+    std.debug.assert(g_loaded);
+    _ = fns.wl_display_read_events(conn.display.?);
+    _ = fns.wl_display_dispatch_pending(conn.display.?);
+}
+
+pub fn cancel_read() void {
+    std.debug.assert(g_loaded);
+    fns.wl_display_cancel_read(conn.display.?);
 }
