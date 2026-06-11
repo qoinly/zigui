@@ -177,7 +177,14 @@ pub const PaintContext = struct {
         self.backdrop_color = 0;
         self.block_hover = false;
         self.text_field_active = false;
-        self.scale_factor = 2.0;
+        // Rasterize glyphs at the real device scale: a 1x surface fed 2x
+        // rasters is a permanent linear downsample (soft text). macOS pins the
+        // 2x default - its shell exposes no scale query on the handle and
+        // Retina is the configuration the Metal backend is verified on.
+        self.scale_factor = if (builtin.os.tag == .macos)
+            2.0
+        else
+            handle.backing_scale_factor();
         self.last_pane_w = 0;
         self.last_pane_h = 0;
         self.prev_hover_ctx = null;
@@ -410,12 +417,12 @@ pub const PaintContext = struct {
         const band_on = tbar.enabled and !self.handle.is_fullscreen();
         const top: f32 = if (band_on) @floatCast(tbar.height) else 0;
         // macOS reserves a left gutter for the repositioned traffic lights;
-        // Windows window controls live in the native caption, not the band, so
-        // the band's content starts at content_left with no gutter.
-        const tb_content_x: f32 = if (builtin.os.tag == .windows)
-            @floatCast(tbar.content_left)
+        // Windows and Linux draw their window controls in the band's right
+        // cluster, so their content starts at content_left with no gutter.
+        const tb_content_x: f32 = if (builtin.os.tag == .macos)
+            @floatCast(tbar.content_left + TRAFFIC_CLUSTER_W)
         else
-            @floatCast(tbar.content_left + TRAFFIC_CLUSTER_W);
+            @floatCast(tbar.content_left);
         // Band chrome first (bg + separator) so the consumer's titlebar content
         // draws on top. The library owns only the band and the traffic lights.
         if (band_on) {
@@ -428,9 +435,9 @@ pub const PaintContext = struct {
                 _ = sep.set_background(th.border);
                 self.prims.append(self.allocator, .{ .quad = sep }) catch {};
             }
-            // Windows draws its window controls into the band; macOS uses native
-            // traffic lights repositioned by the platform layer.
-            if (builtin.os.tag == .windows) self.draw_caption_buttons(pane_w, top);
+            // Windows and Linux draw their window controls into the band; macOS
+            // uses native traffic lights repositioned by the platform layer.
+            if (builtin.os.tag != .macos) self.draw_caption_buttons(pane_w, top);
         }
         return .{
             .builder = .{
@@ -463,12 +470,14 @@ pub const PaintContext = struct {
 
     pub fn draw_frame(self: *PaintContext, frame: Frame) void {
         _ = frame;
-        // macOS clears transparent so the glass chrome shows through; Windows has
-        // no glass here, so clear to the opaque theme background instead.
-        const clear = if (builtin.os.tag == .windows) blk: {
+        // macOS clears transparent so the glass chrome shows through; the other
+        // backends have no glass, so they clear to the opaque theme background.
+        const clear = if (builtin.os.tag == .macos)
+            renderer.ClearColor.init(0, 0, 0, 0)
+        else blk: {
             const bg = self.handle.theme.background;
             break :blk renderer.ClearColor.init(bg.r, bg.g, bg.b, 1);
-        } else renderer.ClearColor.init(0, 0, 0, 0);
+        };
         const color_atlas_tex: ?*anyopaque = self.color_atlas.get_texture();
         if (self.blur_modal) {
             const tbar = self.handle.titlebar;
@@ -498,12 +507,17 @@ pub const PaintContext = struct {
     }
 
     // Draws the minimize / maximize / close controls right-aligned in the band
-    // (Windows custom chrome). WM_NCHITTEST routes clicks on these to native
-    // window behavior; here we only draw the glyphs + hover highlight.
+    // (Windows + Linux custom chrome). Clicks route through the platform shell
+    // (WM_NCHITTEST / the wl_pointer handler); here we only draw the glyphs +
+    // hover highlight.
     fn draw_caption_buttons(self: *PaintContext, pane_w: f32, top: f32) void {
         const fg = self.handle.theme.foreground;
         const hovered = custom_shell.hovered_caption_button();
         const bw = custom_shell.CAPTION_BTN_W;
+        // Windows packs the slots flush to the edge (margin 0); Linux keeps the
+        // Adwaita-style gap. One formula serves both, and the shell's hit slots
+        // mirror it.
+        const right_margin = custom_shell.CAPTION_CLUSTER_W - bw * 3;
         const cy = top / 2;
         // Segoe Fluent Icons caption glyphs (same codepoints as Segoe MDL2):
         // minimize E921, maximize E922, restore E923, close E8BB.
@@ -511,13 +525,37 @@ pub const PaintContext = struct {
         const max_glyph: u21 = if (self.handle.is_maximized()) 0xE923 else 0xE922;
         const Btn = struct { kind: custom_shell.CaptionButton, cx: f32, glyph: u21 };
         const buttons = [_]Btn{
-            .{ .kind = .close, .cx = pane_w - bw * 0.5, .glyph = 0xE8BB },
-            .{ .kind = .maximize, .cx = pane_w - bw * 1.5, .glyph = max_glyph },
-            .{ .kind = .minimize, .cx = pane_w - bw * 2.5, .glyph = 0xE921 },
+            .{ .kind = .close, .cx = pane_w - right_margin - bw * 0.5, .glyph = 0xE8BB },
+            .{ .kind = .maximize, .cx = pane_w - right_margin - bw * 1.5, .glyph = max_glyph },
+            .{ .kind = .minimize, .cx = pane_w - right_margin - bw * 2.5, .glyph = 0xE921 },
         };
         for (buttons) |btn| {
             const is_hover = hovered == btn.kind;
-            if (is_hover) {
+            if (builtin.os.tag == .linux) {
+                // The Yaru/GNOME idiom: close keeps a permanent circle in the
+                // DESKTOP accent (the user's setting; app theme primary only
+                // when no desktop accent resolves), the other buttons get a
+                // circle only while hovered.
+                const accent = custom_shell.desktop_accent_color() orelse
+                    self.handle.theme.primary;
+                const maybe_bg: ?color.Rgba = if (btn.kind == .close)
+                    (if (is_hover) lerp_rgba(accent, fg, 0.25) else accent)
+                else if (is_hover)
+                    color.Rgba.init(1, 1, 1, 0.14)
+                else
+                    null;
+                if (maybe_bg) |bg| {
+                    var q = Quad.init(
+                        self.snap_pt(btn.cx - CAPTION_CIRCLE_D / 2),
+                        self.snap_pt(cy - CAPTION_CIRCLE_D / 2),
+                        CAPTION_CIRCLE_D,
+                        CAPTION_CIRCLE_D,
+                    );
+                    _ = q.set_background(bg);
+                    _ = q.set_corner_radius(CAPTION_CIRCLE_D / 2);
+                    self.prims.append(self.allocator, .{ .quad = q }) catch {};
+                }
+            } else if (is_hover) {
                 // Win11 feel: subtle light wash for min/max, red for close.
                 const bg = if (btn.kind == .close)
                     color.Rgba.init(0.79, 0.16, 0.12, 1.0)
@@ -527,7 +565,21 @@ pub const PaintContext = struct {
                 _ = q.set_background(bg);
                 self.prims.append(self.allocator, .{ .quad = q }) catch {};
             }
-            const col = if (is_hover and btn.kind == .close) color.Rgba.init(1, 1, 1, 1) else fg;
+            // Mint-Y draws the close icon near-white on any accent (its
+            // C_icon_close_bg constant); the app fallback keeps its own pair.
+            const col = if (builtin.os.tag == .linux and btn.kind == .close)
+                (if (custom_shell.desktop_accent_color() != null)
+                    color.Rgba.init(0.97, 0.97, 0.97, 1)
+                else
+                    self.handle.theme.primary_foreground)
+            else if (is_hover and btn.kind == .close)
+                color.Rgba.init(1, 1, 1, 1)
+            else
+                fg;
+            if (builtin.os.tag == .linux) {
+                self.draw_caption_glyph_quads(btn.kind, btn.cx, cy, col);
+                continue;
+            }
             var ubuf: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(btn.glyph, &ubuf) catch continue;
             const line = self.text_system.shape_text(ubuf[0..n], CAPTION_GLYPH_PT, fid);
@@ -557,6 +609,82 @@ pub const PaintContext = struct {
                 &self.sprites,
                 self.allocator,
             ) catch {};
+        }
+    }
+
+    fn lerp_rgba(a: color.Rgba, b: color.Rgba, t: f32) color.Rgba {
+        std.debug.assert(t >= 0);
+        std.debug.assert(t <= 1);
+        return .{
+            .r = a.r + (b.r - a.r) * t,
+            .g = a.g + (b.g - a.g) * t,
+            .b = a.b + (b.b - a.b) * t,
+            .a = a.a + (b.a - a.a) * t,
+        };
+    }
+
+    // A glyph rect off the device-pixel grid feathers its 1px edges across two
+    // rows at half intensity (the band centre sits at .5 for odd band heights),
+    // so every caption rect snaps before drawing.
+    fn snap_pt(self: *const PaintContext, v: f32) f32 {
+        std.debug.assert(self.scale_factor > 0);
+        return @round(v * self.scale_factor) / self.scale_factor;
+    }
+
+    // Pinned to the Mint-Y/Adwaita button-bg asset (16px); do not size by feel.
+    const CAPTION_CIRCLE_D: f32 = 16;
+
+    // Linux caption glyphs as plain quads (no symbol font exists there): a bar,
+    // a bordered square (doubled for restore), and two thin rotated bars.
+    fn draw_caption_glyph_quads(
+        self: *PaintContext,
+        kind: custom_shell.CaptionButton,
+        cx: f32,
+        cy: f32,
+        col: color.Rgba,
+    ) void {
+        std.debug.assert(kind != .none);
+        std.debug.assert(cy > 0);
+        switch (kind) {
+            .minimize => {
+                var q = Quad.init(self.snap_pt(cx - 3.5), self.snap_pt(cy - 0.5), 7, 1);
+                _ = q.set_background(col);
+                self.prims.append(self.allocator, .{ .quad = q }) catch {};
+            },
+            .maximize => {
+                if (self.handle.is_maximized()) {
+                    var back = Quad.init(self.snap_pt(cx - 1.5), self.snap_pt(cy - 3.5), 5, 5);
+                    _ = back.set_border_color(col);
+                    _ = back.set_border_widths(1, 1, 1, 1);
+                    _ = back.set_corner_radius(1);
+                    self.prims.append(self.allocator, .{ .quad = back }) catch {};
+                    var front = Quad.init(self.snap_pt(cx - 3.5), self.snap_pt(cy - 1.5), 5, 5);
+                    _ = front.set_background(self.handle.theme.background);
+                    _ = front.set_border_color(col);
+                    _ = front.set_border_widths(1, 1, 1, 1);
+                    _ = front.set_corner_radius(1);
+                    self.prims.append(self.allocator, .{ .quad = front }) catch {};
+                } else {
+                    var q = Quad.init(self.snap_pt(cx - 3.5), self.snap_pt(cy - 3.5), 7, 7);
+                    _ = q.set_border_color(col);
+                    _ = q.set_border_widths(1, 1, 1, 1);
+                    _ = q.set_corner_radius(1);
+                    self.prims.append(self.allocator, .{ .quad = q }) catch {};
+                }
+            },
+            .close => {
+                // The quad transform rotates in unit space BEFORE the bounds
+                // scale, so a true diagonal needs square bounds with the bar
+                // thinned via scale_y, not an elongated quad rotated.
+                const angles = [_]f32{ std.math.pi / 4.0, -std.math.pi / 4.0 };
+                for (angles) |angle| {
+                    var q = Quad.init(self.snap_pt(cx - 4), self.snap_pt(cy - 4), 8, 8);
+                    _ = q.set_background(col);
+                    q.transform = .{ angle, 1, 1.2 / 8.0, 0 };
+                    self.prims.append(self.allocator, .{ .quad = q }) catch {};
+                }
+            },
+            .none => {},
         }
     }
 
@@ -688,7 +816,7 @@ pub fn start_paint_loop(
     paint.run_state = run_state;
     if (builtin.os.tag == .windows) g_resize_state = run_state;
     custom_shell.register_hit_test(hit_test_thunk, redraw_thunk, @ptrCast(paint));
-    if (builtin.os.tag == .windows) custom_shell.register_paint_now(paint_now_thunk);
+    if (builtin.os.tag != .macos) custom_shell.register_paint_now(paint_now_thunk);
     custom_shell.register_mouse_dispatch(.{
         .on_move = mouse_move_thunk,
         .on_exit = mouse_exit_thunk,
