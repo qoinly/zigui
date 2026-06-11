@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const impl = switch (builtin.os.tag) {
     .macos => @import("platform/macos/metal.zig"),
     .windows => @import("platform/windows/d3d11_renderer.zig"),
-    .linux => @import("platform/linux/renderer.zig"),
+    .linux => @import("platform/linux/vulkan_renderer.zig"),
     else => @compileError("zigui: unsupported OS for renderer"),
 };
 

@@ -104,7 +104,7 @@ const PROT_READ: c_int = 1;
 const PROT_WRITE: c_int = 2;
 const MAP_SHARED: c_int = 1;
 
-const ShellWindow = struct {
+pub const ShellWindow = struct {
     in_use: bool = false,
     surface: ?*wl.wl_proxy = null,
     xdg_surface: ?*wl.wl_proxy = null,
@@ -127,6 +127,7 @@ const ShellWindow = struct {
     fullscreen: bool = false,
     bg_pixel: u32 = 0,
     surface_ctx: ?*anyopaque = null,
+    renderer_owned: bool = false,
 };
 
 // Process-wide shell state, the windows custom_shell pattern: C event callbacks
@@ -389,6 +390,24 @@ fn pack_xrgb(c: types.Rgba) u32 {
     return (r << 16) | (g << 8) | b;
 }
 
+// Called by the renderer once a swapchain owns the surface: the shm
+// scaffolding is freed and configure stops attaching buffers.
+pub fn renderer_takeover(win: *ShellWindow) void {
+    std.debug.assert(win.in_use);
+    std.debug.assert(!win.renderer_owned);
+    if (win.retiring) |buffer| wl.buffer_destroy(buffer);
+    if (win.buffer) |buffer| wl.buffer_destroy(buffer);
+    if (win.pool) |pool| wl.shm_pool_destroy(pool);
+    if (win.pool_data) |data| _ = munmap(data, POOL_BYTES);
+    if (win.shm_fd >= 0) _ = close(win.shm_fd);
+    win.retiring = null;
+    win.buffer = null;
+    win.pool = null;
+    win.pool_data = null;
+    win.shm_fd = -1;
+    win.renderer_owned = true;
+}
+
 fn destroy_window(win: *ShellWindow) void {
     std.debug.assert(win.in_use);
     if (win.retiring) |buffer| wl.buffer_destroy(buffer);
@@ -424,6 +443,15 @@ fn on_xdg_surface_configure(
     wl.xdg_surface_ack_configure(xdg_surface.?, serial);
     if (win.pending_w > 0) win.width_pt = win.pending_w;
     if (win.pending_h > 0) win.height_pt = win.pending_h;
+    if (win.renderer_owned) {
+        // The swapchain owns the surface: present commits the ack. Repaint so
+        // a resize is acked promptly instead of waiting for the next frame.
+        win.configured = true;
+        if (g_paint_now) |paint| {
+            if (win.surface_ctx orelse g_ctx) |ctx| paint(ctx);
+        }
+        return;
+    }
     ensure_buffer(win);
     wl.surface_commit(win.surface.?);
     win.configured = true;
