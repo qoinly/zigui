@@ -496,8 +496,15 @@ pub const TextSystem = struct {
                 const raster_x_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.x)) / scale_factor;
                 const raster_y_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.y)) / scale_factor;
 
-                const sx = origin_x + g.position.x + raster_x_pt;
-                const sy = origin_y + raster_y_pt;
+                var sx = origin_x + g.position.x + raster_x_pt;
+                var sy = origin_y + raster_y_pt;
+                // At 1x a fractional position drags the glyph through the
+                // linear sampler half a pixel out of phase - visible blur. At
+                // 2x+ subpixel placement is finer than the eye; leave it.
+                if (scale_factor == 1.0) {
+                    sx = @round(sx);
+                    sy = @round(sy);
+                }
 
                 try sprites.append(out_allocator, .{
                     .position = .{ sx, sy },
