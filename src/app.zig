@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const impl = switch (builtin.os.tag) {
     .macos => @import("platform/macos/app.zig"),
     .windows => @import("platform/windows/app.zig"),
+    .linux => @import("platform/linux/app.zig"),
     else => @compileError("zigui: unsupported OS for app"),
 };
 

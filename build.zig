@@ -28,8 +28,15 @@ fn link_platform(zigui: *std.Build.Module, target: std.Build.ResolvedTarget) voi
     switch (target.result.os.tag) {
         .macos => link_macos(zigui),
         .windows => link_windows(zigui),
+        .linux => link_linux(zigui),
         else => @panic("zigui: unsupported target OS"),
     }
+}
+
+fn link_linux(zigui: *std.Build.Module) void {
+    // libwayland-client.so.0 is dlopen'd at runtime (the d3dcompiler_47
+    // precedent), so only libc - which carries dlopen - is linked here.
+    zigui.link_libc = true;
 }
 
 fn link_macos(zigui: *std.Build.Module) void {
@@ -63,6 +70,16 @@ fn add_examples(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
+    if (target.result.os.tag == .linux) {
+        // On Linux only the window demo links - it is the lone example that
+        // does not pull in the renderer.
+        add_example(b, zigui, target, optimize, .{
+            .name = "linux-window",
+            .source = "examples/linux_window.zig",
+            .description = "Build + run the Linux window demo",
+        });
+        return;
+    }
     add_example(b, zigui, target, optimize, .{
         .name = "hello",
         .source = "examples/hello.zig",
