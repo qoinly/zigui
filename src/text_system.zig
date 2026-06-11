@@ -244,12 +244,14 @@ pub const TextStyle = struct {
 const NativeText = switch (builtin.os.tag) {
     .macos => @import("platform/macos/text_system.zig").MacTextSystem,
     .windows => @import("platform/windows/text_system.zig").WinTextSystem,
+    .linux => @import("platform/linux/text_system.zig").LinuxTextSystem,
     else => @compileError("zigui: unsupported OS for TextSystem"),
 };
 
 const NativeAtlas = switch (builtin.os.tag) {
     .macos => @import("platform/macos/mono_atlas.zig").MetalMonoAtlas,
     .windows => @import("platform/windows/atlas.zig").WinMonoAtlas,
+    .linux => @import("platform/linux/atlas.zig").LinuxMonoAtlas,
     else => @compileError("zigui: unsupported OS for mono atlas"),
 };
 
