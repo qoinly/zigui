@@ -22,6 +22,24 @@ pub fn build(b: *std.Build) void {
 
     add_examples(b, zigui, target, optimize);
     add_icongen(b);
+    add_shadergen(b);
+}
+
+// Recompiles the Linux GLSL to the committed SPIR-V (the icongen pattern: a
+// manual step needing glslang on PATH; consumer builds embed the .spv files).
+fn add_shadergen(b: *std.Build) void {
+    const step = b.step("shadergen", "Recompile src/platform/linux/shaders/*.spv from GLSL");
+    const dir = "src/platform/linux/shaders/";
+    const stages = [_][]const u8{ "quad.vert", "quad.frag" };
+    for (stages) |stage| {
+        const run = b.addSystemCommand(&.{ "glslang", "-V" });
+        run.addFileArg(b.path(b.fmt("{s}{s}", .{ dir, stage })));
+        run.addArg("-o");
+        run.addArg(b.fmt("{s}{s}.spv", .{ dir, stage }));
+        run.setCwd(b.path("."));
+        run.has_side_effects = true; // rewrites committed source artifacts
+        step.dependOn(&run.step);
+    }
 }
 
 fn link_platform(zigui: *std.Build.Module, target: std.Build.ResolvedTarget) void {
