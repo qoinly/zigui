@@ -151,6 +151,7 @@ pub const PlatformIconSystem = struct {
 const NativeIcons = switch (builtin.os.tag) {
     .macos => @import("platform/macos/icon.zig").MacIconSystem,
     .windows => @import("platform/windows/icon.zig").WinIconSystem,
+    .linux => @import("platform/linux/icon.zig").LinuxIconSystem,
     else => @compileError("zigui: unsupported OS for IconSystem"),
 };
 
