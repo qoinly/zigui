@@ -58,7 +58,7 @@ pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyo
 }
 
 pub fn register_paint_now(cb: RedrawFn) void {
-    if (builtin.os.tag == .windows) impl.register_paint_now(cb);
+    if (builtin.os.tag != .macos) impl.register_paint_now(cb);
 }
 
 pub fn hovered_caption_button() CaptionButton {
