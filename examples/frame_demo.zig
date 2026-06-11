@@ -60,14 +60,17 @@ const CH = H / 2;
 // holds: the live-reference window is the source's slots (3) plus frames in flight
 // (max_frames_in_flight + 1 = 4) = 7, so 8 always leaves the refilled one free.
 const pool_size = 8;
-const WinSurface = if (builtin.os.tag == .windows) zigui.FrameSurface else struct {};
-const WinPool = if (builtin.os.tag == .windows) [pool_size]WinSurface else void;
-const WinLuma = if (builtin.os.tag == .windows) [pool_size][W * H]u8 else void;
-const WinChroma = if (builtin.os.tag == .windows) [pool_size][W * H / 2]u8 else void;
+// Windows and Linux share the renderer-created surface pool; macOS feeds
+// CVPixelBuffers from a producer thread instead.
+const has_shared_pool = builtin.os.tag == .windows or builtin.os.tag == .linux;
+const PoolSurface = if (has_shared_pool) zigui.FrameSurface else struct {};
+const Pool = if (has_shared_pool) [pool_size]PoolSurface else void;
+const PoolLuma = if (has_shared_pool) [pool_size][W * H]u8 else void;
+const PoolChroma = if (has_shared_pool) [pool_size][W * H / 2]u8 else void;
 
 // Keep demo pixels off the main stack; the producer rewrites this fixed pool.
-var win_luma: WinLuma = if (builtin.os.tag == .windows) undefined else {};
-var win_chroma: WinChroma = if (builtin.os.tag == .windows) undefined else {};
+var pool_luma: PoolLuma = if (has_shared_pool) undefined else {};
+var pool_chroma: PoolChroma = if (has_shared_pool) undefined else {};
 
 const App = struct {
     source: zigui.FrameSource = undefined,
@@ -75,10 +78,10 @@ const App = struct {
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
     pool: [pool_size]?*anyopaque = .{null} ** pool_size,
-    win_pool: WinPool = if (builtin.os.tag == .windows) undefined else {},
-    win_pool_count: usize = 0,
-    win_pool_ready: bool = false,
-    win_next: u32 = 0,
+    shared_pool: Pool = if (has_shared_pool) undefined else {},
+    shared_count: usize = 0,
+    shared_ready: bool = false,
+    shared_next: u32 = 0,
 
     // Called after the window closes (run returns): stop the producer, free the
     // source's refs, then release the pool buffers.
@@ -89,7 +92,7 @@ const App = struct {
             self.thread = null;
         }
         if (self.started) self.source.deinit();
-        deinit_windows_pool(self);
+        deinit_shared_pool(self);
         if (builtin.os.tag == .macos) {
             for (&self.pool) |*pb| {
                 if (pb.*) |p| cv.CVBufferRelease(p);
@@ -115,8 +118,8 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     if (!app.started) {
         const renderer = zigui.renderer_handle();
         app.source = zigui.FrameSource.init(renderer);
-        if (builtin.os.tag == .windows) {
-            init_windows_pool(app, renderer);
+        if (has_shared_pool) {
+            init_shared_pool(app, renderer);
             app.started = true;
         } else {
             app.running.store(true, .release);
@@ -128,11 +131,12 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
             }
         }
     }
-    if (builtin.os.tag == .windows) produce_windows(app, zigui.renderer_handle());
-    const label = if (builtin.os.tag == .windows)
-        "External frame: shared NV12, YUV->RGB on D3D11"
-    else
-        "External frame: zero-copy NV12, YUV->RGB on the gpu";
+    if (has_shared_pool) produce_shared(app, zigui.renderer_handle());
+    const label = switch (builtin.os.tag) {
+        .windows => "External frame: shared NV12, YUV->RGB on D3D11",
+        .linux => "External frame: shared NV12, YUV->RGB on Vulkan",
+        else => "External frame: zero-copy NV12, YUV->RGB on the gpu",
+    };
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text(label, .{ .size = 16 }),
         zigui.frame(&app.source, .{ .fit = .contain }),
@@ -143,7 +147,6 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
 // buffer, hands it off newest-wins, and rotates; the source drops anything the
 // render side does not pick up.
 fn produce(app: *App) void {
-    if (builtin.os.tag == .windows) return;
     if (builtin.os.tag != .macos) return; // the CVPixelBuffer source is macOS-only
     for (&app.pool) |*pb| pb.* = create_nv12();
     var t: u32 = 0;
@@ -159,53 +162,54 @@ fn produce(app: *App) void {
     }
 }
 
-fn init_windows_pool(app: *App, renderer: *zigui.Renderer) void {
-    if (app.win_pool_ready) return;
+fn init_shared_pool(app: *App, renderer: *zigui.Renderer) void {
+    if (app.shared_ready) return;
     switch (builtin.os.tag) {
-        .windows => for (&app.win_pool, 0..) |*surface, i| {
+        .windows, .linux => for (&app.shared_pool, 0..) |*surface, i| {
             surface.* = renderer.create_shared_nv12_surface(W, H) orelse break;
-            app.win_pool_count = i + 1;
+            app.shared_count = i + 1;
         },
         else => {},
     }
-    if (builtin.os.tag == .windows) app.win_pool_ready = app.win_pool_count == pool_size;
+    if (has_shared_pool) app.shared_ready = app.shared_count == pool_size;
 }
 
-fn deinit_windows_pool(app: *App) void {
+fn deinit_shared_pool(app: *App) void {
     switch (builtin.os.tag) {
-        .windows => for (app.win_pool[0..app.win_pool_count]) |*surface| surface.deinit(),
+        .windows, .linux => for (app.shared_pool[0..app.shared_count]) |*surface|
+            surface.deinit(),
         else => {},
     }
-    app.win_pool_count = 0;
-    app.win_pool_ready = false;
+    app.shared_count = 0;
+    app.shared_ready = false;
 }
 
-fn produce_windows(app: *App, renderer: *zigui.Renderer) void {
+fn produce_shared(app: *App, renderer: *zigui.Renderer) void {
     switch (builtin.os.tag) {
-        .windows => {
-            if (!app.win_pool_ready) return;
+        .windows, .linux => {
+            if (!app.shared_ready) return;
             var attempts: usize = 0;
             while (attempts < pool_size) : (attempts += 1) {
-                const idx = app.win_next % pool_size;
-                const surface = &app.win_pool[idx];
+                const idx = app.shared_next % pool_size;
+                const surface = &app.shared_pool[idx];
                 if (!surface.available()) {
-                    app.win_next +%= 1;
+                    app.shared_next +%= 1;
                     continue;
                 }
-                fill_nv12_windows(
-                    win_luma[idx][0..],
-                    win_chroma[idx][0..],
-                    app.win_next,
+                fill_nv12_planes(
+                    pool_luma[idx][0..],
+                    pool_chroma[idx][0..],
+                    app.shared_next,
                 );
                 if (!renderer.update_shared_nv12_surface(
                     surface,
-                    win_luma[idx][0..].ptr,
+                    pool_luma[idx][0..].ptr,
                     W,
-                    win_chroma[idx][0..].ptr,
+                    pool_chroma[idx][0..].ptr,
                     W,
                 )) return;
                 app.source.submit_surface(surface, .{});
-                app.win_next +%= 1;
+                app.shared_next +%= 1;
                 return;
             }
         },
@@ -213,9 +217,9 @@ fn produce_windows(app: *App, renderer: *zigui.Renderer) void {
     }
 }
 
-fn fill_nv12_windows(y: []u8, chroma: []u8, t: u32) void {
+fn fill_nv12_planes(y: []u8, chroma: []u8, t: u32) void {
     switch (builtin.os.tag) {
-        .windows => {
+        .windows, .linux => {
             std.debug.assert(y.len >= W * H);
             std.debug.assert(chroma.len >= W * H / 2);
             const off: usize = t % 32;
