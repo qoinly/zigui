@@ -39,17 +39,17 @@ pub const clipboard_changed_external = impl.clipboard_changed_external;
 pub const display_count = impl.display_count;
 pub const display_bounds = impl.display_bounds;
 
-// Windows draws its window controls into the title-bar band itself (the macOS
-// backend uses native traffic lights). These hooks are no-ops elsewhere; the
-// caption metrics are defined here so the paint layer can reserve/draw them.
-pub const CaptionButton = if (builtin.os.tag == .windows) impl.CaptionButton else enum {
+// Windows and Linux draw their window controls into the title-bar band itself
+// (the macOS backend uses native traffic lights). These hooks are no-ops on
+// macOS; the caption metrics live here so the paint layer can reserve/draw them.
+pub const CaptionButton = if (builtin.os.tag == .macos) enum {
     none,
     minimize,
     maximize,
     close,
-};
-pub const CAPTION_BTN_W: f32 = if (builtin.os.tag == .windows) impl.CAPTION_BTN_W else 46;
-pub const CAPTION_CLUSTER_W: f32 = if (builtin.os.tag == .windows) impl.CAPTION_CLUSTER_W else 0;
+} else impl.CaptionButton;
+pub const CAPTION_BTN_W: f32 = if (builtin.os.tag == .macos) 46 else impl.CAPTION_BTN_W;
+pub const CAPTION_CLUSTER_W: f32 = if (builtin.os.tag == .macos) 0 else impl.CAPTION_CLUSTER_W;
 pub const HitTestFn = *const fn (ctx: *anyopaque, x: f32, y: f32, band_h: f32) bool;
 pub const RedrawFn = *const fn (ctx: *anyopaque) void;
 
@@ -61,7 +61,14 @@ pub fn register_paint_now(cb: RedrawFn) void {
     if (builtin.os.tag != .macos) impl.register_paint_now(cb);
 }
 
+// Only Linux desktops keep the user's accent outside the app theme; the close
+// control there follows it.
+pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
+    if (builtin.os.tag == .linux) return impl.desktop_accent_color();
+    return null;
+}
+
 pub fn hovered_caption_button() CaptionButton {
-    if (builtin.os.tag == .windows) return impl.hovered_caption_button();
-    return .none;
+    if (builtin.os.tag == .macos) return .none;
+    return impl.hovered_caption_button();
 }
