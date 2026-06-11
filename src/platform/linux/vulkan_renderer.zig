@@ -1,9 +1,10 @@
 // Vulkan renderer over the Wayland custom shell (the d3d11_renderer.zig
 // analogue). Same architecture: instance data streamed into per-class storage
 // buffers, the unit square expanded by gl_VertexIndex, one instanced draw per
-// batch. Quads and monochrome sprites (text + icons) have pipelines; the
-// other primitive classes and color sprites draw nowhere on this backend.
-// The modal blur pass does not exist here either - modal frames draw crisp.
+// batch. Quads, monochrome sprites (text + icons), and external frames have
+// pipelines; polylines, line segments, ring charts, and color sprites draw
+// nowhere on this backend. The modal blur pass does not exist here either -
+// modal frames draw crisp.
 
 const std = @import("std");
 const vk = @import("vulkan.zig");
@@ -20,6 +21,8 @@ pub const max_frames_in_flight: u32 = 3;
 
 const MAX_QUADS: u32 = 1024;
 const MAX_SPRITES: u32 = 4096;
+const MAX_FRAMES: u32 = 8;
+const MAX_FRAME_DIM: u32 = 8192;
 const MAX_SWAPCHAIN_IMAGES: u32 = 8;
 const MAX_PHYSICAL_DEVICES: u32 = 16;
 const MAX_QUEUE_FAMILIES: u32 = 32;
@@ -40,6 +43,9 @@ const quad_vert_spv align(@alignOf(u32)) = @embedFile("shaders/quad.vert.spv").*
 const quad_frag_spv align(@alignOf(u32)) = @embedFile("shaders/quad.frag.spv").*;
 const text_vert_spv align(@alignOf(u32)) = @embedFile("shaders/text.vert.spv").*;
 const text_frag_spv align(@alignOf(u32)) = @embedFile("shaders/text.frag.spv").*;
+const frame_vert_spv align(@alignOf(u32)) = @embedFile("shaders/frame.vert.spv").*;
+const frame_rgba_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_rgba.frag.spv").*;
+const frame_nv12_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_nv12.frag.spv").*;
 
 // What get_device() hands the atlas/text layers on this backend: enough of the
 // renderer to allocate and upload GPU resources, never a bare VkDevice.
@@ -63,6 +69,140 @@ pub const DeviceContext = struct {
         return null;
     }
 };
+
+// Push-constant mirror of the HLSL FrameParams cbuffer plus the viewport the
+// other vertex stages take: 112 bytes, inside the 128-byte push-constant floor
+// every Vulkan device guarantees, so frames need no per-draw buffer traffic.
+const FramePush = extern struct {
+    viewport: [2]f32,
+    _pad0: [2]f32 = .{ 0, 0 },
+    bounds: [4]f32,
+    clip_bounds: [4]f32,
+    opacity_pad: [4]f32,
+    csc: [3][4]f32,
+
+    comptime {
+        std.debug.assert(@sizeOf(FramePush) == 112);
+        std.debug.assert(@offsetOf(FramePush, "csc") == 64);
+    }
+};
+
+const SurfaceFormat = enum { bgra, nv12, shared_nv12 };
+
+// "Shared" surfaces own no CPU pixels; the legacy field stays non-null so old
+// pointer-shape checks cannot trip over this format (the d3d11 convention).
+const shared_frame_pixel: u8 = 0;
+
+const FramePlane = struct {
+    image: vk.Image = vk.NULL_HANDLE,
+    memory: vk.DeviceMemory = vk.NULL_HANDLE,
+    view: vk.ImageView = vk.NULL_HANDLE,
+};
+
+const FrameSurfaceState = struct {
+    luma: FramePlane = .{},
+    chroma: FramePlane = .{},
+    staging: vk.Buffer = vk.NULL_HANDLE,
+    staging_memory: vk.DeviceMemory = vk.NULL_HANDLE,
+    staging_mapped: ?[*]u8 = null,
+    // The renderer that allocated the planes; deinit needs its device. A
+    // surface must therefore be deinit'd before the renderer that fed it.
+    renderer: ?*Renderer = null,
+    uploaded: bool = false,
+    // Owner + mailbox + GPU ring share this; producer writes only at owner ref.
+    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+};
+
+// External frame surface (the d3d11 FrameSurface analogue). CPU-backed formats
+// wrap caller pixels uploaded on import; shared_nv12 owns renderer-created
+// planes filled through update_shared_nv12_surface. There is no cross-device
+// handle on this backend, so "shared" keeps only the API name and semantics.
+// Must not move after import: consumers hold pointers into state (the plane
+// views and the refcount), so keep it at a stable address for its lifetime.
+pub const FrameSurface = struct {
+    format: SurfaceFormat,
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixels: [*]const u8,
+    chroma_stride: u32 = 0,
+    chroma_pixels: ?[*]const u8 = null,
+    state: FrameSurfaceState = .{},
+
+    pub fn init_bgra(width: u32, height: u32, stride: u32, pixels: [*]const u8) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width <= MAX_FRAME_DIM);
+        std.debug.assert(height <= MAX_FRAME_DIM);
+        std.debug.assert(stride >= width * 4);
+        return .{
+            .format = .bgra,
+            .width = width,
+            .height = height,
+            .stride = stride,
+            .pixels = pixels,
+        };
+    }
+
+    pub fn init_nv12(
+        width: u32,
+        height: u32,
+        y_stride: u32,
+        y_pixels: [*]const u8,
+        uv_stride: u32,
+        uv_pixels: [*]const u8,
+    ) FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width <= MAX_FRAME_DIM);
+        std.debug.assert(height <= MAX_FRAME_DIM);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        std.debug.assert(y_stride >= width);
+        std.debug.assert(uv_stride >= width);
+        return .{
+            .format = .nv12,
+            .width = width,
+            .height = height,
+            .stride = y_stride,
+            .pixels = y_pixels,
+            .chroma_stride = uv_stride,
+            .chroma_pixels = uv_pixels,
+        };
+    }
+
+    pub fn available(self: *const FrameSurface) bool {
+        std.debug.assert(self.state.refs.load(.acquire) >= 1);
+        return self.state.refs.load(.acquire) == 1;
+    }
+
+    pub fn deinit(self: *FrameSurface) void {
+        std.debug.assert(self.state.refs.load(.acquire) == 1);
+        const r = self.state.renderer orelse return;
+        const device = r.device orelse return;
+        // Teardown-only path: drain the queue so no in-flight draw still
+        // samples the planes being destroyed (the atlas deinit contract).
+        _ = r.dfns.vkDeviceWaitIdle(device);
+        destroy_frame_plane(r, &self.state.luma);
+        destroy_frame_plane(r, &self.state.chroma);
+        if (self.state.staging != vk.NULL_HANDLE)
+            r.dfns.vkDestroyBuffer(device, self.state.staging, null);
+        if (self.state.staging_memory != vk.NULL_HANDLE)
+            r.dfns.vkFreeMemory(device, self.state.staging_memory, null);
+        self.state.staging = vk.NULL_HANDLE;
+        self.state.staging_memory = vk.NULL_HANDLE;
+        self.state.staging_mapped = null;
+        self.state.renderer = null;
+    }
+};
+
+fn destroy_frame_plane(r: *Renderer, plane: *FramePlane) void {
+    const device = r.device orelse return;
+    if (plane.view != vk.NULL_HANDLE) r.dfns.vkDestroyImageView(device, plane.view, null);
+    if (plane.image != vk.NULL_HANDLE) r.dfns.vkDestroyImage(device, plane.image, null);
+    if (plane.memory != vk.NULL_HANDLE) r.dfns.vkFreeMemory(device, plane.memory, null);
+    plane.* = .{};
+}
 
 pub const Renderer = struct {
     win: *shell.ShellWindow,
@@ -113,6 +253,14 @@ pub const Renderer = struct {
     sampler: vk.Sampler = vk.NULL_HANDLE,
     bound_atlas_view: vk.ImageView = vk.NULL_HANDLE,
 
+    frame_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
+    frame_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    frame_nv12_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    frame_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
+    // One set per frame slot: each set is written then bound at most once per
+    // recording, so updates never touch a set the command buffer already holds.
+    frame_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
+
     upload_cmd: ?*vk.CommandBuffer = null,
     mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
     device_ctx: DeviceContext = undefined,
@@ -149,6 +297,7 @@ pub const Renderer = struct {
         try self.build_quad_buffer();
         try self.build_quad_pipeline();
         try self.build_text_pipeline();
+        try self.build_frame_pipelines();
 
         shell.renderer_takeover(win);
         return self;
@@ -181,6 +330,14 @@ pub const Renderer = struct {
             self.dfns.vkDestroyPipelineLayout(device, self.text_pipeline_layout, null);
         if (self.text_dsl != vk.NULL_HANDLE)
             self.dfns.vkDestroyDescriptorSetLayout(device, self.text_dsl, null);
+        if (self.frame_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.frame_pipeline, null);
+        if (self.frame_nv12_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.frame_nv12_pipeline, null);
+        if (self.frame_pipeline_layout != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipelineLayout(device, self.frame_pipeline_layout, null);
+        if (self.frame_dsl != vk.NULL_HANDLE)
+            self.dfns.vkDestroyDescriptorSetLayout(device, self.frame_dsl, null);
         if (self.sprite_buffer != vk.NULL_HANDLE)
             self.dfns.vkDestroyBuffer(device, self.sprite_buffer, null);
         if (self.sprite_memory != vk.NULL_HANDLE)
@@ -542,15 +699,17 @@ pub const Renderer = struct {
         };
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
+        // Quad + text storage buffers, the text atlas sampler, then two
+        // samplers (luma + chroma) for each of the MAX_FRAMES frame sets.
         const pool_sizes = [_]vk.DescriptorPoolSize{
             .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 2 },
             .{
                 .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptor_count = 1,
+                .descriptor_count = 1 + 2 * MAX_FRAMES,
             },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 2,
+            .max_sets = 2 + MAX_FRAMES,
             .pool_size_count = pool_sizes.len,
             .pool_sizes = &pool_sizes,
         };
@@ -724,6 +883,85 @@ pub const Renderer = struct {
         );
         if (layout_rc != vk.SUCCESS) return error.PipelineCreateFailed;
         self.text_pipeline = try self.make_pipeline(vert, frag, self.text_pipeline_layout);
+    }
+
+    fn build_frame_descriptors(self: *Renderer) Error!void {
+        std.debug.assert(self.descriptor_pool != vk.NULL_HANDLE);
+        std.debug.assert(self.frame_dsl == vk.NULL_HANDLE);
+        const bindings = [_]vk.DescriptorSetLayoutBinding{
+            .{
+                .binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            },
+            .{
+                .binding = 1,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            },
+        };
+        const dsl_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = bindings.len,
+            .bindings = &bindings,
+        };
+        const dsl_rc = self.dfns.vkCreateDescriptorSetLayout(
+            self.device.?,
+            &dsl_info,
+            null,
+            &self.frame_dsl,
+        );
+        if (dsl_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        const layouts = [_]vk.DescriptorSetLayout{self.frame_dsl} ** MAX_FRAMES;
+        const set_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = MAX_FRAMES,
+            .set_layouts = &layouts,
+        };
+        const set_rc = self.dfns.vkAllocateDescriptorSets(
+            self.device.?,
+            &set_info,
+            &self.frame_dsets,
+        );
+        if (set_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+    }
+
+    fn build_frame_pipelines(self: *Renderer) Error!void {
+        std.debug.assert(self.render_pass != vk.NULL_HANDLE);
+        std.debug.assert(self.frame_pipeline == vk.NULL_HANDLE);
+        try self.build_frame_descriptors();
+
+        const vert = try self.make_shader_module(&frame_vert_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, vert, null);
+        const frag_rgba = try self.make_shader_module(&frame_rgba_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag_rgba, null);
+        const frag_nv12 = try self.make_shader_module(&frame_nv12_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag_nv12, null);
+
+        // One range over the whole 112-byte block: the vertex stage reads the
+        // geometry half, the fragment stage the opacity + CSC half.
+        const push_range = vk.PushConstantRange{
+            .stage_flags = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+            .size = @sizeOf(FramePush),
+        };
+        const layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .set_layouts = @ptrCast(&self.frame_dsl),
+            .push_constant_range_count = 1,
+            .push_constant_ranges = @ptrCast(&push_range),
+        };
+        const layout_rc = self.dfns.vkCreatePipelineLayout(
+            self.device.?,
+            &layout_info,
+            null,
+            &self.frame_pipeline_layout,
+        );
+        if (layout_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        self.frame_pipeline = try self.make_pipeline(vert, frag_rgba, self.frame_pipeline_layout);
+        self.frame_nv12_pipeline = try self.make_pipeline(
+            vert,
+            frag_nv12,
+            self.frame_pipeline_layout,
+        );
     }
 
     // The shared fixed-function recipe: every stage pair differs only by layout.
@@ -941,6 +1179,7 @@ pub const Renderer = struct {
     fn encode_scene(self: *Renderer, cmd: *vk.CommandBuffer, prims: []const Primitive) void {
         std.debug.assert(prims.len <= MAX_QUADS * 8); // sane per-frame ceiling
         var quad_offset: u32 = 0;
+        var frame_offset: u32 = 0;
         var i: usize = 0;
         while (i < prims.len) {
             const start = i;
@@ -950,11 +1189,107 @@ pub const Renderer = struct {
             const batch = prims[start..i];
             switch (tag) {
                 .quad => self.encode_quad_batch(cmd, batch, &quad_offset),
+                .frame => self.encode_frame_batch(cmd, batch, &frame_offset),
                 // No pipeline exists for these classes on this backend; they
                 // draw nowhere, the metal.zig empty-arm precedent.
-                .polyline, .line_segment, .ring_chart, .frame => {},
+                .polyline, .line_segment, .ring_chart => {},
             }
         }
+    }
+
+    fn encode_frame_batch(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        batch: []const Primitive,
+        frame_offset: *u32,
+    ) void {
+        std.debug.assert(batch.len > 0);
+        // Same soft budget as the other encoders: an over-cap batch is skipped
+        // whole for the frame.
+        if (frame_offset.* + batch.len > MAX_FRAMES) return;
+        const viewport_pt = [2]f32{
+            @floatFromInt(self.extent.width),
+            @floatFromInt(self.extent.height),
+        };
+        for (batch) |prim| {
+            const f = prim.frame;
+            const raw = f.tex orelse continue;
+            const luma_view = @as(*const vk.ImageView, @ptrCast(@alignCast(raw))).*;
+            if (luma_view == vk.NULL_HANDLE) continue;
+            const nv12 = f.tex_cbcr != null;
+            const pipeline = if (nv12) self.frame_nv12_pipeline else self.frame_pipeline;
+            if (pipeline == vk.NULL_HANDLE) continue;
+            // RGBA never samples binding 1; aliasing it to luma keeps the set
+            // fully written so both pipelines share one layout.
+            const chroma_view = if (f.tex_cbcr) |c|
+                @as(*const vk.ImageView, @ptrCast(@alignCast(c))).*
+            else
+                luma_view;
+            std.debug.assert(frame_offset.* < MAX_FRAMES);
+            const dset = self.frame_dsets[frame_offset.*];
+            frame_offset.* += 1;
+            self.write_frame_dset(dset, luma_view, chroma_view);
+
+            self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            self.dfns.vkCmdBindDescriptorSets(
+                cmd,
+                vk.PIPELINE_BIND_POINT_GRAPHICS,
+                self.frame_pipeline_layout,
+                0,
+                1,
+                @ptrCast(&dset),
+                0,
+                null,
+            );
+            const push = FramePush{
+                .viewport = viewport_pt,
+                .bounds = f.bounds,
+                .clip_bounds = f.clip_bounds,
+                .opacity_pad = .{ f.opacity, 0, 0, 0 },
+                .csc = f.csc,
+            };
+            self.dfns.vkCmdPushConstants(
+                cmd,
+                self.frame_pipeline_layout,
+                vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                @sizeOf(FramePush),
+                @ptrCast(&push),
+            );
+            self.dfns.vkCmdDraw(cmd, 6, 1, 0, 0);
+        }
+    }
+
+    // Writing right before the set's only bind in this freshly begun recording
+    // is legal: the in_flight fence wait in draw_frame_impl guarantees the
+    // previous use of the set has retired before record_scene starts.
+    fn write_frame_dset(
+        self: *Renderer,
+        dset: vk.DescriptorSet,
+        luma_view: vk.ImageView,
+        chroma_view: vk.ImageView,
+    ) void {
+        std.debug.assert(luma_view != vk.NULL_HANDLE);
+        std.debug.assert(chroma_view != vk.NULL_HANDLE);
+        const image_infos = [_]vk.DescriptorImageInfo{
+            .{ .sampler = self.sampler, .image_view = luma_view },
+            .{ .sampler = self.sampler, .image_view = chroma_view },
+        };
+        const writes = [_]vk.WriteDescriptorSet{
+            .{
+                .dst_set = dset,
+                .dst_binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .image_info = image_infos[0..1].ptr,
+            },
+            .{
+                .dst_set = dset,
+                .dst_binding = 1,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .image_info = image_infos[1..2].ptr,
+            },
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, writes.len, &writes, 0, null);
     }
 
     fn encode_quad_batch(
@@ -1066,6 +1401,53 @@ pub const Renderer = struct {
         }
     }
 
+    pub fn create_shared_nv12_surface(self: *Renderer, width: u32, height: u32) ?FrameSurface {
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width <= MAX_FRAME_DIM);
+        std.debug.assert(height <= MAX_FRAME_DIM);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+
+        var out = FrameSurface{
+            .format = .shared_nv12,
+            .width = width,
+            .height = height,
+            .stride = width,
+            .pixels = @ptrCast(&shared_frame_pixel),
+            .chroma_stride = width,
+        };
+        out.state.renderer = self;
+        if (!self.ensure_frame_planes(&out)) {
+            out.deinit();
+            return null;
+        }
+        return out;
+    }
+
+    // Copies the caller's NV12 planes through the surface's staging buffer into
+    // its images. Call only while the surface is available(): with no ref held
+    // by the mailbox or the GPU ring, nothing in flight samples the planes.
+    pub fn update_shared_nv12_surface(
+        self: *Renderer,
+        surface: *FrameSurface,
+        y: [*]const u8,
+        y_stride: u32,
+        uv: [*]const u8,
+        uv_stride: u32,
+    ) bool {
+        std.debug.assert(surface.format == .shared_nv12);
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        std.debug.assert(y_stride >= surface.width);
+        std.debug.assert(uv_stride >= surface.width);
+        const mapped = surface.state.staging_mapped orelse return false;
+        const luma_bytes = @as(usize, surface.width) * surface.height;
+        copy_frame_rows(mapped, y, y_stride, surface.width, surface.height);
+        copy_frame_rows(mapped + luma_bytes, uv, uv_stride, surface.width, surface.height / 2);
+        return self.submit_frame_upload(surface);
+    }
+
     pub const Nv12Textures = struct {
         luma: *anyopaque,
         chroma: ?*anyopaque,
@@ -1075,13 +1457,19 @@ pub const Renderer = struct {
         height: u32,
     };
 
-    // The frame-import surface FrameSource drives. dmabuf import is not wired
-    // on this backend, so import returns null and the ref-counting entry points
-    // are inert.
+    // The shared facade keeps the macOS import name; this backend accepts the
+    // FrameSurface formats and returns stable pointers to their plane views
+    // (the atlas get_texture convention). cv_luma carries the surface for the
+    // ring's release accounting.
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
-        _ = self;
-        std.debug.assert(@intFromPtr(pixel_buffer) != 0);
-        return null;
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        std.debug.assert(surface.width > 0);
+        std.debug.assert(surface.height > 0);
+        return switch (surface.format) {
+            .bgra => self.import_bgra(surface),
+            .nv12 => self.import_nv12_surface(surface),
+            .shared_nv12 => import_shared_nv12_surface(surface),
+        };
     }
 
     pub fn flush_texture_cache(self: *Renderer) void {
@@ -1089,14 +1477,309 @@ pub const Renderer = struct {
     }
 
     pub fn release_cv_texture(ref: *anyopaque) void {
-        std.debug.assert(@intFromPtr(ref) != 0);
+        const surface: *FrameSurface = @ptrCast(@alignCast(ref));
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
     }
 
     pub fn retain_surface(pixel_buffer: *anyopaque) void {
-        std.debug.assert(@intFromPtr(pixel_buffer) != 0);
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
     }
 
     pub fn release_surface(pixel_buffer: *anyopaque) void {
-        std.debug.assert(@intFromPtr(pixel_buffer) != 0);
+        const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
+        const old = surface.state.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 1);
+    }
+
+    fn import_bgra(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.stride >= surface.width * 4);
+        if (!self.ensure_frame_planes(surface)) return null;
+        const mapped = surface.state.staging_mapped orelse return null;
+        copy_frame_rows(
+            mapped,
+            surface.pixels,
+            surface.stride,
+            surface.width * 4,
+            surface.height,
+        );
+        if (!self.submit_frame_upload(surface)) return null;
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = @ptrCast(&surface.state.luma.view),
+            .chroma = null,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn import_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.width % 2 == 0);
+        std.debug.assert(surface.height % 2 == 0);
+        std.debug.assert(surface.stride >= surface.width);
+        std.debug.assert(surface.chroma_stride >= surface.width);
+        const uv = surface.chroma_pixels orelse return null;
+        if (!self.ensure_frame_planes(surface)) return null;
+        const mapped = surface.state.staging_mapped orelse return null;
+        const luma_bytes = @as(usize, surface.width) * surface.height;
+        copy_frame_rows(mapped, surface.pixels, surface.stride, surface.width, surface.height);
+        copy_frame_rows(
+            mapped + luma_bytes,
+            uv,
+            surface.chroma_stride,
+            surface.width,
+            surface.height / 2,
+        );
+        if (!self.submit_frame_upload(surface)) return null;
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = @ptrCast(&surface.state.luma.view),
+            .chroma = @ptrCast(&surface.state.chroma.view),
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    fn import_shared_nv12_surface(surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.format == .shared_nv12);
+        std.debug.assert(surface.width % 2 == 0);
+        // Never updated means the planes still sit in UNDEFINED layout; a draw
+        // sampling them would be invalid, so the import reports no frame.
+        if (!surface.state.uploaded) return null;
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = @ptrCast(&surface.state.luma.view),
+            .chroma = @ptrCast(&surface.state.chroma.view),
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
+    // Lazily creates the surface's plane images and staging buffer (the d3d11
+    // ensure_* convention): bgra gets one full-size plane, nv12 an R8 luma plus
+    // a half-size RG8 chroma. Commits nothing on failure so a retry can run.
+    fn ensure_frame_planes(self: *Renderer, surface: *FrameSurface) bool {
+        if (surface.state.staging_mapped != null) return true;
+        surface.state.renderer = self;
+        const w = surface.width;
+        const h = surface.height;
+        const ok = switch (surface.format) {
+            .bgra => self.create_frame_plane(
+                &surface.state.luma,
+                w,
+                h,
+                vk.FORMAT_B8G8R8A8_UNORM,
+            ),
+            .nv12, .shared_nv12 => self.create_frame_plane(
+                &surface.state.luma,
+                w,
+                h,
+                vk.FORMAT_R8_UNORM,
+            ) and self.create_frame_plane(
+                &surface.state.chroma,
+                w / 2,
+                h / 2,
+                vk.FORMAT_R8G8_UNORM,
+            ),
+        };
+        const staging_bytes: usize = switch (surface.format) {
+            .bgra => @as(usize, w) * h * 4,
+            .nv12, .shared_nv12 => @as(usize, w) * h * 3 / 2,
+        };
+        if (!ok or !self.create_frame_staging(&surface.state, staging_bytes)) {
+            destroy_frame_plane(self, &surface.state.luma);
+            destroy_frame_plane(self, &surface.state.chroma);
+            return false;
+        }
+        return true;
+    }
+
+    fn create_frame_plane(self: *Renderer, plane: *FramePlane, w: u32, h: u32, format: u32) bool {
+        std.debug.assert(plane.image == vk.NULL_HANDLE);
+        std.debug.assert(w > 0);
+        std.debug.assert(h > 0);
+        const device = self.device orelse return false;
+        const info = vk.ImageCreateInfo{
+            .format = format,
+            .extent = .{ .width = w, .height = h, .depth = 1 },
+        };
+        if (self.dfns.vkCreateImage(device, &info, null, &plane.image) != vk.SUCCESS)
+            return false;
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetImageMemoryRequirements(device, plane.image, &requirements);
+        const type_index = self.find_memory_type(
+            requirements.memory_type_bits,
+            vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        ) orelse return false;
+        const alloc = vk.MemoryAllocateInfo{
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        if (self.dfns.vkAllocateMemory(device, &alloc, null, &plane.memory) != vk.SUCCESS)
+            return false;
+        if (self.dfns.vkBindImageMemory(device, plane.image, plane.memory, 0) != vk.SUCCESS)
+            return false;
+        const view_info = vk.ImageViewCreateInfo{ .image = plane.image, .format = format };
+        return self.dfns.vkCreateImageView(device, &view_info, null, &plane.view) == vk.SUCCESS;
+    }
+
+    fn create_frame_staging(self: *Renderer, state: *FrameSurfaceState, size: usize) bool {
+        std.debug.assert(state.staging == vk.NULL_HANDLE);
+        std.debug.assert(size > 0);
+        const device = self.device orelse return false;
+        const info = vk.BufferCreateInfo{
+            .size = size,
+            .usage = vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        };
+        if (self.dfns.vkCreateBuffer(device, &info, null, &state.staging) != vk.SUCCESS)
+            return false;
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetBufferMemoryRequirements(device, state.staging, &requirements);
+        const wanted = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        const type_index = self.find_memory_type(requirements.memory_type_bits, wanted) orelse
+            return false;
+        const alloc = vk.MemoryAllocateInfo{
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        if (self.dfns.vkAllocateMemory(device, &alloc, null, &state.staging_memory) != vk.SUCCESS)
+            return false;
+        if (self.dfns.vkBindBufferMemory(device, state.staging, state.staging_memory, 0) !=
+            vk.SUCCESS) return false;
+        var mapped: *anyopaque = undefined;
+        if (self.dfns.vkMapMemory(device, state.staging_memory, 0, size, 0, &mapped) !=
+            vk.SUCCESS) return false;
+        state.staging_mapped = @ptrCast(@alignCast(mapped));
+        return true;
+    }
+
+    // Records the staged planes into the surface's images and waits the queue.
+    // Synchronous is correct here: callers run at producer pace (one video
+    // frame, not one paint), and the wait is what lets the next write reuse
+    // the staging buffer without a fence per surface.
+    fn submit_frame_upload(self: *Renderer, surface: *FrameSurface) bool {
+        const cmd = self.upload_cmd orelse return false;
+        std.debug.assert(surface.state.staging != vk.NULL_HANDLE);
+        std.debug.assert(surface.state.luma.image != vk.NULL_HANDLE);
+        _ = self.dfns.vkResetCommandBuffer(cmd, 0);
+        const begin = vk.CommandBufferBeginInfo{};
+        _ = self.dfns.vkBeginCommandBuffer(cmd, &begin);
+
+        const uploaded = surface.state.uploaded;
+        self.frame_plane_barrier(cmd, &surface.state.luma, uploaded, true);
+        const luma_copy = vk.BufferImageCopy{
+            .image_offset = .{},
+            .image_extent = .{ .width = surface.width, .height = surface.height, .depth = 1 },
+        };
+        self.dfns.vkCmdCopyBufferToImage(
+            cmd,
+            surface.state.staging,
+            surface.state.luma.image,
+            vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            @ptrCast(&luma_copy),
+        );
+        self.frame_plane_barrier(cmd, &surface.state.luma, uploaded, false);
+
+        if (surface.format != .bgra) {
+            std.debug.assert(surface.state.chroma.image != vk.NULL_HANDLE);
+            self.frame_plane_barrier(cmd, &surface.state.chroma, uploaded, true);
+            const chroma_copy = vk.BufferImageCopy{
+                .buffer_offset = @as(u64, surface.width) * surface.height,
+                .image_offset = .{},
+                .image_extent = .{
+                    .width = surface.width / 2,
+                    .height = surface.height / 2,
+                    .depth = 1,
+                },
+            };
+            self.dfns.vkCmdCopyBufferToImage(
+                cmd,
+                surface.state.staging,
+                surface.state.chroma.image,
+                vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                @ptrCast(&chroma_copy),
+            );
+            self.frame_plane_barrier(cmd, &surface.state.chroma, uploaded, false);
+        }
+        _ = self.dfns.vkEndCommandBuffer(cmd);
+
+        const submit = vk.SubmitInfo{ .command_buffers = @ptrCast(&cmd) };
+        if (self.dfns.vkQueueSubmit(self.queue.?, 1, @ptrCast(&submit), vk.NULL_HANDLE) !=
+            vk.SUCCESS) return false;
+        _ = self.dfns.vkQueueWaitIdle(self.queue.?);
+        surface.state.uploaded = true;
+        return true;
+    }
+
+    fn frame_plane_barrier(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        plane: *const FramePlane,
+        uploaded: bool,
+        to_transfer: bool,
+    ) void {
+        std.debug.assert(plane.image != vk.NULL_HANDLE);
+        const old_layout: u32 = if (!to_transfer)
+            vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        else if (uploaded)
+            vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        else
+            vk.IMAGE_LAYOUT_UNDEFINED;
+        const b = vk.ImageMemoryBarrier{
+            .src_access_mask = if (to_transfer) 0 else vk.ACCESS_TRANSFER_WRITE_BIT,
+            .dst_access_mask = if (to_transfer)
+                vk.ACCESS_TRANSFER_WRITE_BIT
+            else
+                vk.ACCESS_SHADER_READ_BIT,
+            .old_layout = old_layout,
+            .new_layout = if (to_transfer)
+                vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+            else
+                vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .image = plane.image,
+        };
+        const src_stage = if (to_transfer)
+            vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT | vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+        else
+            vk.PIPELINE_STAGE_TRANSFER_BIT;
+        const dst_stage = if (to_transfer)
+            vk.PIPELINE_STAGE_TRANSFER_BIT
+        else
+            vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        const one: [*]const vk.ImageMemoryBarrier = @ptrCast(&b);
+        self.dfns.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, null, 0, null, 1, one);
     }
 };
+
+// Packs `rows` rows of `row_bytes` from a strided source into a tight
+// destination (the staging layout vkCmdCopyBufferToImage expects with
+// buffer_row_length 0).
+fn copy_frame_rows(
+    dst: [*]u8,
+    src: [*]const u8,
+    src_stride: u32,
+    row_bytes: u32,
+    rows: u32,
+) void {
+    std.debug.assert(src_stride >= row_bytes);
+    std.debug.assert(rows <= MAX_FRAME_DIM);
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        const dst_at = @as(usize, row) * row_bytes;
+        const src_at = @as(usize, row) * src_stride;
+        @memcpy(dst[dst_at .. dst_at + row_bytes], src[src_at .. src_at + row_bytes]);
+    }
+}
