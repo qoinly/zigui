@@ -1,9 +1,9 @@
 // Vulkan renderer over the Wayland custom shell (the d3d11_renderer.zig
 // analogue). Same architecture: instance data streamed into per-class storage
 // buffers, the unit square expanded by gl_VertexIndex, one instanced draw per
-// batch. The quad class is the only one with a pipeline; the other primitive
-// classes draw nowhere on this backend. The modal blur pass does not exist
-// here either - modal frames draw crisp.
+// batch. Quads and monochrome sprites (text + icons) have pipelines; the
+// other primitive classes and color sprites draw nowhere on this backend.
+// The modal blur pass does not exist here either - modal frames draw crisp.
 
 const std = @import("std");
 const vk = @import("vulkan.zig");
@@ -19,6 +19,7 @@ const PolychromeSprite = primitives.PolychromeSprite;
 pub const max_frames_in_flight: u32 = 3;
 
 const MAX_QUADS: u32 = 1024;
+const MAX_SPRITES: u32 = 4096;
 const MAX_SWAPCHAIN_IMAGES: u32 = 8;
 const MAX_PHYSICAL_DEVICES: u32 = 16;
 const MAX_QUEUE_FAMILIES: u32 = 32;
@@ -37,6 +38,31 @@ pub const ClearColor = extern struct {
 // Embedded SPIR-V must reach Vulkan 4-byte aligned; @embedFile alone is not.
 const quad_vert_spv align(@alignOf(u32)) = @embedFile("shaders/quad.vert.spv").*;
 const quad_frag_spv align(@alignOf(u32)) = @embedFile("shaders/quad.frag.spv").*;
+const text_vert_spv align(@alignOf(u32)) = @embedFile("shaders/text.vert.spv").*;
+const text_frag_spv align(@alignOf(u32)) = @embedFile("shaders/text.frag.spv").*;
+
+// What get_device() hands the atlas/text layers on this backend: enough of the
+// renderer to allocate and upload GPU resources, never a bare VkDevice.
+pub const DeviceContext = struct {
+    device: *vk.Device,
+    dfns: *const vk.DeviceFns,
+    queue: *vk.Queue,
+    upload_cmd: *vk.CommandBuffer,
+    mem_props: vk.PhysicalDeviceMemoryProperties,
+
+    pub fn find_memory_type(self: *const DeviceContext, type_bits: u32, wanted: u32) ?u32 {
+        std.debug.assert(wanted != 0);
+        std.debug.assert(self.mem_props.memory_type_count <= 32);
+        var index: u32 = 0;
+        while (index < self.mem_props.memory_type_count) : (index += 1) {
+            const bit = @as(u32, 1) << @intCast(index);
+            if (type_bits & bit == 0) continue;
+            if (self.mem_props.memory_types[index].property_flags & wanted == wanted)
+                return index;
+        }
+        return null;
+    }
+};
 
 pub const Renderer = struct {
     win: *shell.ShellWindow,
@@ -77,6 +103,20 @@ pub const Renderer = struct {
     quad_memory: vk.DeviceMemory = vk.NULL_HANDLE,
     quad_mapped: ?[*]Quad = null,
 
+    text_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
+    text_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    text_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
+    text_dset: vk.DescriptorSet = vk.NULL_HANDLE,
+    sprite_buffer: vk.Buffer = vk.NULL_HANDLE,
+    sprite_memory: vk.DeviceMemory = vk.NULL_HANDLE,
+    sprite_mapped: ?[*]MonochromeSprite = null,
+    sampler: vk.Sampler = vk.NULL_HANDLE,
+    bound_atlas_view: vk.ImageView = vk.NULL_HANDLE,
+
+    upload_cmd: ?*vk.CommandBuffer = null,
+    mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
+    device_ctx: DeviceContext = undefined,
+
     dirty: bool = true,
 
     pub const Error = error{
@@ -108,6 +148,7 @@ pub const Renderer = struct {
         try self.create_commands_and_sync();
         try self.build_quad_buffer();
         try self.build_quad_pipeline();
+        try self.build_text_pipeline();
 
         shell.renderer_takeover(win);
         return self;
@@ -134,6 +175,18 @@ pub const Renderer = struct {
             self.dfns.vkDestroyBuffer(device, self.quad_buffer, null);
         if (self.quad_memory != vk.NULL_HANDLE)
             self.dfns.vkFreeMemory(device, self.quad_memory, null);
+        if (self.text_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.text_pipeline, null);
+        if (self.text_pipeline_layout != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipelineLayout(device, self.text_pipeline_layout, null);
+        if (self.text_dsl != vk.NULL_HANDLE)
+            self.dfns.vkDestroyDescriptorSetLayout(device, self.text_dsl, null);
+        if (self.sprite_buffer != vk.NULL_HANDLE)
+            self.dfns.vkDestroyBuffer(device, self.sprite_buffer, null);
+        if (self.sprite_memory != vk.NULL_HANDLE)
+            self.dfns.vkFreeMemory(device, self.sprite_memory, null);
+        if (self.sampler != vk.NULL_HANDLE)
+            self.dfns.vkDestroySampler(device, self.sampler, null);
         if (self.image_available != vk.NULL_HANDLE)
             self.dfns.vkDestroySemaphore(device, self.image_available, null);
         if (self.in_flight != vk.NULL_HANDLE)
@@ -271,6 +324,7 @@ pub const Renderer = struct {
         var queue: *vk.Queue = undefined;
         self.dfns.vkGetDeviceQueue(device, self.queue_family, 0, &queue);
         self.queue = queue;
+        self.ifns.vkGetPhysicalDeviceMemoryProperties(self.physical_device.?, &self.mem_props);
     }
 
     fn create_render_pass(self: *Renderer) Error!void {
@@ -402,11 +456,15 @@ pub const Renderer = struct {
         const pool_info = vk.CommandPoolCreateInfo{ .queue_family_index = self.queue_family };
         if (self.dfns.vkCreateCommandPool(self.device.?, &pool_info, null, &self.cmd_pool) !=
             vk.SUCCESS) return error.SyncCreateFailed;
-        const alloc_info = vk.CommandBufferAllocateInfo{ .command_pool = self.cmd_pool };
-        var cmd_buf: *vk.CommandBuffer = undefined;
-        if (self.dfns.vkAllocateCommandBuffers(self.device.?, &alloc_info, @ptrCast(&cmd_buf)) !=
+        const alloc_info = vk.CommandBufferAllocateInfo{
+            .command_pool = self.cmd_pool,
+            .command_buffer_count = 2,
+        };
+        var cmd_bufs: [2]*vk.CommandBuffer = undefined;
+        if (self.dfns.vkAllocateCommandBuffers(self.device.?, &alloc_info, &cmd_bufs) !=
             vk.SUCCESS) return error.SyncCreateFailed;
-        self.cmd_buf = cmd_buf;
+        self.cmd_buf = cmd_bufs[0];
+        self.upload_cmd = cmd_bufs[1];
         const sem_info = vk.SemaphoreCreateInfo{};
         if (self.dfns.vkCreateSemaphore(self.device.?, &sem_info, null, &self.image_available) !=
             vk.SUCCESS) return error.SyncCreateFailed;
@@ -416,14 +474,13 @@ pub const Renderer = struct {
     }
 
     fn find_memory_type(self: *Renderer, type_bits: u32, wanted: u32) ?u32 {
-        var props: vk.PhysicalDeviceMemoryProperties = undefined;
-        self.ifns.vkGetPhysicalDeviceMemoryProperties(self.physical_device.?, &props);
-        std.debug.assert(props.memory_type_count <= 32);
+        std.debug.assert(self.mem_props.memory_type_count <= 32);
         var index: u32 = 0;
-        while (index < props.memory_type_count) : (index += 1) {
+        while (index < self.mem_props.memory_type_count) : (index += 1) {
             const bit = @as(u32, 1) << @intCast(index);
             if (type_bits & bit == 0) continue;
-            if (props.memory_types[index].property_flags & wanted == wanted) return index;
+            if (self.mem_props.memory_types[index].property_flags & wanted == wanted)
+                return index;
         }
         return null;
     }
@@ -485,14 +542,17 @@ pub const Renderer = struct {
         };
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
-        const pool_size = vk.DescriptorPoolSize{
-            .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptor_count = 1,
+        const pool_sizes = [_]vk.DescriptorPoolSize{
+            .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 2 },
+            .{
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptor_count = 1,
+            },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 1,
-            .pool_size_count = 1,
-            .pool_sizes = @ptrCast(&pool_size),
+            .max_sets = 2,
+            .pool_size_count = pool_sizes.len,
+            .pool_sizes = &pool_sizes,
         };
         const pool_rc = self.dfns.vkCreateDescriptorPool(
             self.device.?,
@@ -551,7 +611,129 @@ pub const Renderer = struct {
             &self.quad_pipeline_layout,
         );
         if (layout_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        self.quad_pipeline = try self.make_pipeline(vert, frag, self.quad_pipeline_layout);
+    }
 
+    fn build_sprite_buffer(self: *Renderer) Error!void {
+        std.debug.assert(self.device != null);
+        std.debug.assert(self.sprite_buffer == vk.NULL_HANDLE);
+        const size: vk.DeviceSize = @sizeOf(MonochromeSprite) * MAX_SPRITES;
+        const info = vk.BufferCreateInfo{
+            .size = size,
+            .usage = vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        };
+        if (self.dfns.vkCreateBuffer(self.device.?, &info, null, &self.sprite_buffer) !=
+            vk.SUCCESS) return error.BufferCreateFailed;
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetBufferMemoryRequirements(self.device.?, self.sprite_buffer, &requirements);
+        const wanted = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        const type_index = self.find_memory_type(requirements.memory_type_bits, wanted) orelse
+            return error.BufferCreateFailed;
+        const alloc = vk.MemoryAllocateInfo{
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        if (self.dfns.vkAllocateMemory(self.device.?, &alloc, null, &self.sprite_memory) !=
+            vk.SUCCESS) return error.BufferCreateFailed;
+        if (self.dfns.vkBindBufferMemory(
+            self.device.?,
+            self.sprite_buffer,
+            self.sprite_memory,
+            0,
+        ) != vk.SUCCESS) return error.BufferCreateFailed;
+        var mapped: *anyopaque = undefined;
+        if (self.dfns.vkMapMemory(self.device.?, self.sprite_memory, 0, size, 0, &mapped) !=
+            vk.SUCCESS) return error.BufferCreateFailed;
+        self.sprite_mapped = @ptrCast(@alignCast(mapped));
+    }
+
+    fn build_text_descriptors(self: *Renderer) Error!void {
+        std.debug.assert(self.sprite_buffer != vk.NULL_HANDLE);
+        std.debug.assert(self.descriptor_pool != vk.NULL_HANDLE);
+        const bindings = [_]vk.DescriptorSetLayoutBinding{
+            .{
+                .binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
+            },
+            .{
+                .binding = 1,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            },
+        };
+        const dsl_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = bindings.len,
+            .bindings = &bindings,
+        };
+        if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.text_dsl) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        const set_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .set_layouts = @ptrCast(&self.text_dsl),
+        };
+        const set_rc = self.dfns.vkAllocateDescriptorSets(
+            self.device.?,
+            &set_info,
+            @ptrCast(&self.text_dset),
+        );
+        if (set_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        const buffer_info = vk.DescriptorBufferInfo{
+            .buffer = self.sprite_buffer,
+            .range = @sizeOf(MonochromeSprite) * MAX_SPRITES,
+        };
+        const write = vk.WriteDescriptorSet{
+            .dst_set = self.text_dset,
+            .dst_binding = 0,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .buffer_info = @ptrCast(&buffer_info),
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, 1, @ptrCast(&write), 0, null);
+    }
+
+    fn build_text_pipeline(self: *Renderer) Error!void {
+        std.debug.assert(self.render_pass != vk.NULL_HANDLE);
+        std.debug.assert(self.text_pipeline == vk.NULL_HANDLE);
+        try self.build_sprite_buffer();
+        try self.build_text_descriptors();
+
+        const sampler_info = vk.SamplerCreateInfo{};
+        if (self.dfns.vkCreateSampler(self.device.?, &sampler_info, null, &self.sampler) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+
+        const vert = try self.make_shader_module(&text_vert_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, vert, null);
+        const frag = try self.make_shader_module(&text_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag, null);
+
+        const push_range = vk.PushConstantRange{
+            .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
+            .size = 8,
+        };
+        const layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .set_layouts = @ptrCast(&self.text_dsl),
+            .push_constant_range_count = 1,
+            .push_constant_ranges = @ptrCast(&push_range),
+        };
+        const layout_rc = self.dfns.vkCreatePipelineLayout(
+            self.device.?,
+            &layout_info,
+            null,
+            &self.text_pipeline_layout,
+        );
+        if (layout_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        self.text_pipeline = try self.make_pipeline(vert, frag, self.text_pipeline_layout);
+    }
+
+    // The shared fixed-function recipe: every stage pair differs only by layout.
+    fn make_pipeline(
+        self: *Renderer,
+        vert: vk.ShaderModule,
+        frag: vk.ShaderModule,
+        layout: vk.PipelineLayout,
+    ) Error!vk.Pipeline {
+        std.debug.assert(layout != vk.NULL_HANDLE);
         const stages = [_]vk.PipelineShaderStageCreateInfo{
             .{ .stage = vk.SHADER_STAGE_VERTEX_BIT, .module = vert },
             .{ .stage = vk.SHADER_STAGE_FRAGMENT_BIT, .module = frag },
@@ -579,23 +761,35 @@ pub const Renderer = struct {
             .multisample_state = &multisample,
             .color_blend_state = &blend,
             .dynamic_state = &dynamic,
-            .layout = self.quad_pipeline_layout,
+            .layout = layout,
             .render_pass = self.render_pass,
         };
+        var pipeline: vk.Pipeline = vk.NULL_HANDLE;
         const rc = self.dfns.vkCreateGraphicsPipelines(
             self.device.?,
             vk.NULL_HANDLE,
             1,
             @ptrCast(&info),
             null,
-            @ptrCast(&self.quad_pipeline),
+            @ptrCast(&pipeline),
         );
         if (rc != vk.SUCCESS) return error.PipelineCreateFailed;
+        return pipeline;
     }
 
+    // On this backend the "device" is a DeviceContext (see its doc), built here
+    // because dfns must point at the renderer's final storage, not init's copy.
     pub fn get_device(self: *Renderer) *anyopaque {
         std.debug.assert(self.device != null);
-        return @ptrCast(self.device.?);
+        std.debug.assert(self.upload_cmd != null);
+        self.device_ctx = .{
+            .device = self.device.?,
+            .dfns = &self.dfns,
+            .queue = self.queue.?,
+            .upload_cmd = self.upload_cmd.?,
+            .mem_props = self.mem_props,
+        };
+        return @ptrCast(&self.device_ctx);
     }
 
     pub fn request_redraw(self: *Renderer) void {
@@ -611,11 +805,9 @@ pub const Renderer = struct {
         color_sprites: []const PolychromeSprite,
         color_atlas: ?*anyopaque,
     ) void {
-        _ = sprites;
-        _ = mono_atlas;
         _ = color_sprites;
         _ = color_atlas;
-        self.draw_frame_impl(clear, prims);
+        self.draw_frame_impl(clear, prims, sprites, mono_atlas);
     }
 
     pub fn draw_frame_modal(
@@ -631,18 +823,22 @@ pub const Renderer = struct {
         split_color: usize,
         crisp_top: f32,
     ) void {
-        _ = sprites;
-        _ = mono_atlas;
         _ = color_sprites;
         _ = color_atlas;
         _ = split_prims;
         _ = split_sprites;
         _ = split_color;
         _ = crisp_top;
-        self.draw_frame_impl(clear, prims);
+        self.draw_frame_impl(clear, prims, sprites, mono_atlas);
     }
 
-    fn draw_frame_impl(self: *Renderer, clear: ClearColor, prims: []const Primitive) void {
+    fn draw_frame_impl(
+        self: *Renderer,
+        clear: ClearColor,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        mono_atlas: ?*anyopaque,
+    ) void {
         const device = self.device orelse return;
         const win_w: u32 = @intCast(@max(self.win.width_pt, 1));
         const win_h: u32 = @intCast(@max(self.win.height_pt, 1));
@@ -657,7 +853,8 @@ pub const Renderer = struct {
         std.debug.assert(image_index < self.image_count);
         _ = self.dfns.vkResetFences(device, 1, @ptrCast(&self.in_flight));
 
-        self.record_scene(image_index, clear, prims);
+        self.bind_atlas(mono_atlas);
+        self.record_scene(image_index, clear, prims, sprites);
         self.submit_and_present(image_index);
         self.dirty = false;
     }
@@ -682,11 +879,31 @@ pub const Renderer = struct {
         return null;
     }
 
+    // Points the text descriptor at the atlas view; deferred to right after the
+    // fence wait so the update never races a command buffer in flight.
+    fn bind_atlas(self: *Renderer, mono_atlas: ?*anyopaque) void {
+        const raw = mono_atlas orelse return;
+        const view_ptr: *const vk.ImageView = @ptrCast(@alignCast(raw));
+        const view = view_ptr.*;
+        std.debug.assert(view != vk.NULL_HANDLE);
+        if (view == self.bound_atlas_view) return;
+        const image_info = vk.DescriptorImageInfo{ .sampler = self.sampler, .image_view = view };
+        const write = vk.WriteDescriptorSet{
+            .dst_set = self.text_dset,
+            .dst_binding = 1,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .image_info = @ptrCast(&image_info),
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, 1, @ptrCast(&write), 0, null);
+        self.bound_atlas_view = view;
+    }
+
     fn record_scene(
         self: *Renderer,
         image_index: u32,
         clear: ClearColor,
         prims: []const Primitive,
+        sprites: []const MonochromeSprite,
     ) void {
         const cmd = self.cmd_buf.?;
         const begin = vk.CommandBufferBeginInfo{};
@@ -714,6 +931,8 @@ pub const Renderer = struct {
         self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&scissor));
 
         self.encode_scene(cmd, prims);
+        if (sprites.len > 0 and self.bound_atlas_view != vk.NULL_HANDLE)
+            self.encode_sprites(cmd, sprites);
 
         self.dfns.vkCmdEndRenderPass(cmd);
         _ = self.dfns.vkEndCommandBuffer(cmd);
@@ -778,6 +997,44 @@ pub const Renderer = struct {
             @ptrCast(&viewport_pt),
         );
         self.dfns.vkCmdDraw(cmd, 6, @intCast(batch.len), 0, first);
+    }
+
+    fn encode_sprites(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        sprites: []const MonochromeSprite,
+    ) void {
+        std.debug.assert(sprites.len > 0);
+        const mapped = self.sprite_mapped orelse return;
+        // Same soft budget as the other encoders: an over-cap batch is skipped
+        // whole for the frame.
+        if (sprites.len > MAX_SPRITES) return;
+        @memcpy(mapped[0..sprites.len], sprites);
+
+        self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, self.text_pipeline);
+        self.dfns.vkCmdBindDescriptorSets(
+            cmd,
+            vk.PIPELINE_BIND_POINT_GRAPHICS,
+            self.text_pipeline_layout,
+            0,
+            1,
+            @ptrCast(&self.text_dset),
+            0,
+            null,
+        );
+        const viewport_pt = [2]f32{
+            @floatFromInt(self.extent.width),
+            @floatFromInt(self.extent.height),
+        };
+        self.dfns.vkCmdPushConstants(
+            cmd,
+            self.text_pipeline_layout,
+            vk.SHADER_STAGE_VERTEX_BIT,
+            0,
+            8,
+            @ptrCast(&viewport_pt),
+        );
+        self.dfns.vkCmdDraw(cmd, 6, @intCast(sprites.len), 0, 0);
     }
 
     fn submit_and_present(self: *Renderer, image_index: u32) void {
