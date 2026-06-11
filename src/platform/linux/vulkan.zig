@@ -80,6 +80,27 @@ pub const MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 4;
 pub const SHADER_STAGE_VERTEX_BIT: u32 = 1;
 pub const SHADER_STAGE_FRAGMENT_BIT: u32 = 0x10;
 pub const DESCRIPTOR_TYPE_STORAGE_BUFFER: u32 = 7;
+pub const DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
+
+pub const FORMAT_R8_UNORM: u32 = 9;
+pub const FORMAT_R8G8B8A8_UNORM: u32 = 37;
+pub const IMAGE_TYPE_2D: u32 = 1;
+pub const IMAGE_TILING_OPTIMAL: u32 = 0;
+pub const IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 2;
+pub const IMAGE_USAGE_SAMPLED_BIT: u32 = 4;
+pub const BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 1;
+pub const MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 1;
+pub const IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: u32 = 5;
+pub const IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: u32 = 7;
+pub const PIPELINE_STAGE_TOP_OF_PIPE_BIT: u32 = 1;
+pub const PIPELINE_STAGE_TRANSFER_BIT: u32 = 0x1000;
+pub const PIPELINE_STAGE_FRAGMENT_SHADER_BIT: u32 = 0x80;
+pub const ACCESS_TRANSFER_WRITE_BIT: u32 = 0x1000;
+pub const ACCESS_SHADER_READ_BIT: u32 = 0x20;
+pub const QUEUE_FAMILY_IGNORED: u32 = 0xFFFFFFFF;
+pub const FILTER_LINEAR: u32 = 1;
+pub const SAMPLER_MIPMAP_MODE_NEAREST: u32 = 0;
+pub const SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: u32 = 2;
 
 pub const PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3;
 pub const POLYGON_MODE_FILL: u32 = 0;
@@ -127,6 +148,9 @@ const ST_FRAMEBUFFER_CREATE_INFO: u32 = 37;
 const ST_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
 const ST_PRESENT_INFO_KHR: u32 = 1000001001;
 const ST_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
+const ST_IMAGE_CREATE_INFO: u32 = 14;
+const ST_SAMPLER_CREATE_INFO: u32 = 31;
+const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
 
 pub const API_VERSION_1_0: u32 = 1 << 22;
 
@@ -509,6 +533,84 @@ pub const MemoryAllocateInfo = extern struct {
     memory_type_index: u32,
 };
 
+pub const ImageCreateInfo = extern struct {
+    s_type: u32 = ST_IMAGE_CREATE_INFO,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    image_type: u32 = IMAGE_TYPE_2D,
+    format: u32,
+    extent: Extent3D,
+    mip_levels: u32 = 1,
+    array_layers: u32 = 1,
+    samples: u32 = SAMPLE_COUNT_1_BIT,
+    tiling: u32 = IMAGE_TILING_OPTIMAL,
+    usage: u32 = IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_SAMPLED_BIT,
+    sharing_mode: u32 = SHARING_MODE_EXCLUSIVE,
+    queue_family_index_count: u32 = 0,
+    queue_family_indices: ?[*]const u32 = null,
+    initial_layout: u32 = IMAGE_LAYOUT_UNDEFINED,
+};
+
+pub const ImageMemoryBarrier = extern struct {
+    s_type: u32 = ST_IMAGE_MEMORY_BARRIER,
+    p_next: ?*const anyopaque = null,
+    src_access_mask: u32,
+    dst_access_mask: u32,
+    old_layout: u32,
+    new_layout: u32,
+    src_queue_family_index: u32 = QUEUE_FAMILY_IGNORED,
+    dst_queue_family_index: u32 = QUEUE_FAMILY_IGNORED,
+    image: Image,
+    subresource_range: ImageSubresourceRange = .{},
+};
+
+pub const Offset3D = extern struct { x: i32 = 0, y: i32 = 0, z: i32 = 0 };
+
+pub const ImageSubresourceLayers = extern struct {
+    aspect_mask: u32 = IMAGE_ASPECT_COLOR_BIT,
+    mip_level: u32 = 0,
+    base_array_layer: u32 = 0,
+    layer_count: u32 = 1,
+};
+
+pub const BufferImageCopy = extern struct {
+    buffer_offset: DeviceSize = 0,
+    buffer_row_length: u32 = 0,
+    buffer_image_height: u32 = 0,
+    image_subresource: ImageSubresourceLayers = .{},
+    image_offset: Offset3D,
+    image_extent: Extent3D,
+};
+
+pub const SamplerCreateInfo = extern struct {
+    s_type: u32 = ST_SAMPLER_CREATE_INFO,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    mag_filter: u32 = FILTER_LINEAR,
+    min_filter: u32 = FILTER_LINEAR,
+    mipmap_mode: u32 = SAMPLER_MIPMAP_MODE_NEAREST,
+    address_mode_u: u32 = SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    address_mode_v: u32 = SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    address_mode_w: u32 = SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    mip_lod_bias: f32 = 0,
+    anisotropy_enable: Bool32 = 0,
+    max_anisotropy: f32 = 1,
+    compare_enable: Bool32 = 0,
+    compare_op: u32 = 0,
+    min_lod: f32 = 0,
+    max_lod: f32 = 0,
+    border_color: u32 = 0,
+    unnormalized_coordinates: Bool32 = 0,
+};
+
+pub const Sampler = u64;
+
+pub const DescriptorImageInfo = extern struct {
+    sampler: Sampler,
+    image_view: ImageView,
+    image_layout: u32 = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+};
+
 pub const ShaderModuleCreateInfo = extern struct {
     s_type: u32 = ST_SHADER_MODULE_CREATE_INFO,
     p_next: ?*const anyopaque = null,
@@ -703,8 +805,8 @@ pub const WriteDescriptorSet = extern struct {
     dst_array_element: u32 = 0,
     descriptor_count: u32 = 1,
     descriptor_type: u32,
-    image_info: ?*const anyopaque = null,
-    buffer_info: [*]const DescriptorBufferInfo,
+    image_info: ?[*]const DescriptorImageInfo = null,
+    buffer_info: ?[*]const DescriptorBufferInfo = null,
     texel_buffer_view: ?*const anyopaque = null,
 };
 
@@ -976,6 +1078,44 @@ pub const DeviceFns = struct {
         u32,
         ?*const anyopaque,
     ) callconv(.c) void,
+    vkCreateImage: *const fn (
+        *Device,
+        *const ImageCreateInfo,
+        ?*const anyopaque,
+        *Image,
+    ) callconv(.c) Result,
+    vkDestroyImage: *const fn (*Device, Image, ?*const anyopaque) callconv(.c) void,
+    vkGetImageMemoryRequirements: *const fn (*Device, Image, *MemoryRequirements) callconv(.c) void,
+    vkBindImageMemory: *const fn (*Device, Image, DeviceMemory, DeviceSize) callconv(.c) Result,
+    vkCmdPipelineBarrier: *const fn (
+        *CommandBuffer,
+        u32,
+        u32,
+        u32,
+        u32,
+        ?*const anyopaque,
+        u32,
+        ?*const anyopaque,
+        u32,
+        ?[*]const ImageMemoryBarrier,
+    ) callconv(.c) void,
+    vkCmdCopyBufferToImage: *const fn (
+        *CommandBuffer,
+        Buffer,
+        Image,
+        u32,
+        u32,
+        [*]const BufferImageCopy,
+    ) callconv(.c) void,
+    vkCreateSampler: *const fn (
+        *Device,
+        *const SamplerCreateInfo,
+        ?*const anyopaque,
+        *Sampler,
+    ) callconv(.c) Result,
+    vkDestroySampler: *const fn (*Device, Sampler, ?*const anyopaque) callconv(.c) void,
+    vkQueueWaitIdle: *const fn (*Queue) callconv(.c) Result,
+    vkResetCommandBuffer: *const fn (*CommandBuffer, u32) callconv(.c) Result,
 };
 
 pub var global: GlobalFns = undefined;

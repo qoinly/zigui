@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
 fn add_shadergen(b: *std.Build) void {
     const step = b.step("shadergen", "Recompile src/platform/linux/shaders/*.spv from GLSL");
     const dir = "src/platform/linux/shaders/";
-    const stages = [_][]const u8{ "quad.vert", "quad.frag" };
+    const stages = [_][]const u8{ "quad.vert", "quad.frag", "text.vert", "text.frag" };
     for (stages) |stage| {
         const run = b.addSystemCommand(&.{ "glslang", "-V" });
         run.addFileArg(b.path(b.fmt("{s}{s}", .{ dir, stage })));
