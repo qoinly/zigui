@@ -5,9 +5,11 @@
 // empty-band drags and edge resizes to the compositor (xdg_toplevel move/
 // resize), and answers caption clicks. Before a renderer takes over, the
 // surface shows a wl_shm buffer filled with the theme background - a window
-// must attach SOME buffer or the compositor never maps it. Text-field,
-// clipboard, grab, and display enumeration are unimplemented no-ops that keep
-// the facade surface complete, the windows/window.zig precedent.
+// must attach SOME buffer or the compositor never maps it. The system glue
+// lives here too: clipboard over wl_data_device, pointer grab over
+// pointer-constraints + relative-pointer, display enumeration over wl_output.
+// Only the native text-field overlay remains an unimplemented no-op that
+// keeps the facade surface complete, the windows/window.zig precedent.
 
 const std = @import("std");
 const wl = @import("wayland.zig");
@@ -113,6 +115,17 @@ const MFD_CLOEXEC: c_uint = 1;
 const MAP_PRIVATE: c_int = 2;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
+// Evdev keycodes (linux/input-event-codes.h) the raw-capture path reads.
+const KEY_ESC: u32 = 1;
+const KEY_LEFTCTRL: u32 = 29;
+const KEY_LEFTSHIFT: u32 = 42;
+const KEY_RIGHTSHIFT: u32 = 54;
+const KEY_LEFTALT: u32 = 56;
+const KEY_RIGHTCTRL: u32 = 97;
+const KEY_RIGHTALT: u32 = 100;
+const KEY_LEFTMETA: u32 = 125;
+const KEY_RIGHTMETA: u32 = 126;
 const RESIZE_BORDER: f32 = 6;
 const WHEEL_NOTCH_PT: f32 = 40;
 const SEAT_CAP_POINTER: u32 = 1;
@@ -139,6 +152,10 @@ pub const ShellWindow = struct {
     buffer_h: i32 = 0,
     pending_w: i32 = 0,
     pending_h: i32 = 0,
+    // Floating size remembered across maximize/fullscreen, the windows
+    // g_saved_rect restore (position is the compositor's on Wayland).
+    saved_w: i32 = 0,
+    saved_h: i32 = 0,
     configured: bool = false,
     activated: bool = false,
     maximized: bool = false,
@@ -187,6 +204,14 @@ var g_shift_down: bool = false;
 var g_cursor_theme: ?*wl_cursor.CursorTheme = null;
 var g_cursor_surface: ?*wl.wl_proxy = null;
 var g_applied_cursor: CursorKind = .default;
+// Pointer grab (remote-control capture): the lock + relative-motion proxies
+// plus the live modifier state raw events carry (the windows raw-input set).
+var g_grabbed: bool = false;
+var g_locked_pointer: ?*wl.wl_proxy = null;
+var g_relative_pointer: ?*wl.wl_proxy = null;
+var g_grab_win: ?*ShellWindow = null;
+var g_raw_mods: input.Mods = .{};
+var g_mod_caps: u32 = xkb.MOD_INVALID;
 
 pub const CustomShellHandle = struct {
     window: *ShellWindow,
@@ -456,8 +481,30 @@ pub fn renderer_takeover(win: *ShellWindow) void {
     win.renderer_owned = true;
 }
 
+// The dying window's paint context may be the registered global fallback;
+// repoint it at the root window so a late event (a queued leave) never
+// dispatches into freed memory - the windows retire_surface_ctx.
+fn retire_surface_ctx(win: *ShellWindow) void {
+    const closing = win.surface_ctx orelse return;
+    const root = &g_windows[0];
+    const fallback = if (root != win and root.in_use) root.surface_ctx else null;
+    if (g_ctx == closing) g_ctx = fallback;
+    if (g_dispatch) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    if (g_raw) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    win.surface_ctx = null;
+}
+
 fn destroy_window(win: *ShellWindow) void {
     std.debug.assert(win.in_use);
+    retire_surface_ctx(win);
     // The slab slot is reused by the next open(); a stale focus pointer would
     // route input into it. No leave event is guaranteed on programmatic close.
     if (g_pointer_focus == win) {
@@ -467,6 +514,7 @@ fn destroy_window(win: *ShellWindow) void {
         set_hover_caption(.none);
     }
     if (g_keyboard_focus == win) g_keyboard_focus = null;
+    if (g_grab_win == win) set_grab(false);
     if (win.retiring) |buffer| wl.buffer_destroy(buffer);
     if (win.buffer) |buffer| wl.buffer_destroy(buffer);
     if (win.toplevel) |toplevel| wl.toplevel_destroy(toplevel);
@@ -539,22 +587,38 @@ fn on_toplevel_configure(
     std.debug.assert(toplevel != null);
     const win: *ShellWindow = @ptrCast(@alignCast(data.?));
     std.debug.assert(win.in_use);
+    const was_zoomed = win.maximized or win.fullscreen;
     win.pending_w = width; // 0 = the client picks; resolved at the ack
     win.pending_h = height;
     win.activated = false;
     win.maximized = false;
     win.fullscreen = false;
-    const array = states orelse return;
-    const entries: u32 = @intCast(@min(array.size / 4, TOPLEVEL_STATES_MAX));
-    const items: [*]const u32 = @ptrCast(@alignCast(array.data orelse return));
-    var index: u32 = 0;
-    while (index < entries) : (index += 1) {
-        switch (items[index]) {
-            XDG_TOPLEVEL_STATE_MAXIMIZED => win.maximized = true,
-            XDG_TOPLEVEL_STATE_FULLSCREEN => win.fullscreen = true,
-            XDG_TOPLEVEL_STATE_ACTIVATED => win.activated = true,
-            else => {},
+    if (states) |array| {
+        const entries: u32 = @intCast(@min(array.size / 4, TOPLEVEL_STATES_MAX));
+        if (array.data) |raw| {
+            const items: [*]const u32 = @ptrCast(@alignCast(raw));
+            var index: u32 = 0;
+            while (index < entries) : (index += 1) {
+                switch (items[index]) {
+                    XDG_TOPLEVEL_STATE_MAXIMIZED => win.maximized = true,
+                    XDG_TOPLEVEL_STATE_FULLSCREEN => win.fullscreen = true,
+                    XDG_TOPLEVEL_STATE_ACTIVATED => win.activated = true,
+                    else => {},
+                }
+            }
         }
+    }
+    const zoomed = win.maximized or win.fullscreen;
+    if (zoomed and !was_zoomed) {
+        win.saved_w = win.width_pt;
+        win.saved_h = win.height_pt;
+    }
+    // Leaving a zoomed state with a size-free configure: the compositor lets
+    // the client pick, so restore the remembered floating size - otherwise
+    // the window keeps its zoomed dimensions.
+    if (!zoomed and was_zoomed and win.pending_w == 0 and win.saved_w > 0) {
+        win.pending_w = win.saved_w;
+        win.pending_h = win.saved_h;
     }
 }
 
@@ -566,12 +630,17 @@ fn on_toplevel_close(data: ?*anyopaque, toplevel: ?*wl.wl_proxy) callconv(.c) vo
     request_close(win);
 }
 
-// Closing the first window quits the app; extra windows just close (their
-// teardown is the registered close callback's job, the windows model).
+// Closing the first window quits the app; an extra window notifies the
+// registered callback (which tears down its renderer) and then drops its
+// surfaces - the DestroyWindow half of the windows handle_close.
 fn request_close(win: *ShellWindow) void {
     std.debug.assert(win.in_use);
     if (g_window_close) |cb| cb(g_window_close_ctx.?, @ptrCast(win));
-    if (window_index(win) == 0) wl.quit_requested = true;
+    if (window_index(win) == 0) {
+        wl.quit_requested = true;
+        return;
+    }
+    destroy_window(win);
 }
 
 fn on_toplevel_configure_bounds(
@@ -621,6 +690,7 @@ fn ensure_input() void {
     xkb.load() catch {};
     wl.add_listener(seat, &seat_listener, null);
     g_seat_bound = true;
+    ensure_data_device();
     wl.roundtrip(); // deliver capabilities so pointer/keyboard exist before input
 }
 
@@ -746,6 +816,7 @@ fn on_pointer_motion(
     _ = data;
     _ = time;
     std.debug.assert(pointer != null);
+    if (g_grabbed) return; // a locked pointer reports motion only via relative_motion
     g_pointer_x = fixed_to_f32(sx);
     g_pointer_y = fixed_to_f32(sy);
     const win = g_pointer_focus orelse return;
@@ -828,6 +899,10 @@ fn on_pointer_button(
     _ = data;
     _ = time;
     std.debug.assert(pointer != null);
+    if (g_grabbed) {
+        raw_button_event(button, state == 1);
+        return;
+    }
     const win = g_pointer_focus orelse return;
     const pressed = state == 1;
     if (button == BTN_LEFT) {
@@ -909,7 +984,7 @@ fn on_pointer_axis(
     _ = data;
     _ = time;
     std.debug.assert(pointer != null);
-    if (g_pointer_focus == null) return;
+    if (!g_grabbed and g_pointer_focus == null) return;
     const vertical = axis == 0;
     // A wheel detent reports axis_discrete first: one notch scrolls the
     // windows-parity 40pt. Continuous sources (touchpads) scroll 1:1.
@@ -919,6 +994,15 @@ fn on_pointer_axis(
     else
         fixed_to_f32(value);
     disc.* = 0;
+    if (g_grabbed) {
+        const d = g_raw orelse return;
+        const ev: input.InputEvent = if (vertical)
+            .{ .wheel = .{ .dx = 0, .dy = -delta } }
+        else
+            .{ .wheel = .{ .dx = -delta, .dy = 0 } };
+        d.on_event(ctx_for(g_grab_win, d.ctx), ev);
+        return;
+    }
     if (g_dispatch) |d| {
         const ctx = ctx_for(g_pointer_focus, d.ctx);
         if (vertical) {
@@ -975,6 +1059,7 @@ fn on_pointer_axis_discrete(
 
 fn set_cursor_image(kind: CursorKind) void {
     const pointer = g_pointer orelse return;
+    if (g_grabbed) return; // the cursor stays hidden for the whole grab
     if (g_pointer_focus == null) return;
     if (kind == g_applied_cursor and g_cursor_surface != null) return;
     ensure_cursor_theme();
@@ -1069,6 +1154,7 @@ fn rebuild_keymap(keymap_text: [*:0]const u8) void {
     g_mod_shift = xkb.mod_index(keymap, "Shift");
     g_mod_ctrl = xkb.mod_index(keymap, "Control");
     g_mod_alt = xkb.mod_index(keymap, "Mod1");
+    g_mod_caps = xkb.mod_index(keymap, "Lock");
 }
 
 fn on_keyboard_enter(
@@ -1110,6 +1196,11 @@ fn on_keyboard_key(
     _ = serial;
     _ = time;
     std.debug.assert(keyboard != null);
+    if (g_grabbed) {
+        // Raw capture needs releases too; the dispatch filter below drops them.
+        raw_key_event(key, state == 1);
+        return;
+    }
     if (state != 1) return; // wl_keyboard repeats nothing; releases carry no input
     if (g_keyboard_focus == null) return;
     const xkb_state = g_xkb_state orelse return;
@@ -1180,17 +1271,496 @@ fn on_keyboard_repeat_info(
     std.debug.assert(keyboard != null);
 }
 
-// ---- unimplemented API-parity surface ----
+// ---- pointer grab (remote-control capture) ----
 
+// Lock the pointer to the focused surface and stream raw input through the
+// registered RawDispatch (the windows RegisterRawInputDevices model). Both
+// protocols or nothing: without pointer-constraints + relative-pointer the
+// grab silently stays off and is_grabbed() reports it.
 pub fn set_grab(on: bool) void {
-    _ = on;
+    if (on == g_grabbed) return;
+    if (on) {
+        const pointer = g_pointer orelse return;
+        const win = g_keyboard_focus orelse g_pointer_focus orelse return;
+        const surface = win.surface orelse return;
+        const locked = wl.lock_pointer(surface, pointer) orelse return;
+        const relative = wl.get_relative_pointer(pointer) orelse {
+            wl.locked_pointer_destroy(locked);
+            return;
+        };
+        wl.add_listener(locked, &locked_pointer_listener, null);
+        wl.add_listener(relative, &relative_pointer_listener, null);
+        g_locked_pointer = locked;
+        g_relative_pointer = relative;
+        g_grab_win = win;
+        g_grabbed = true;
+        hide_cursor();
+    } else {
+        g_grabbed = false;
+        if (g_relative_pointer) |relative| wl.relative_pointer_destroy(relative);
+        if (g_locked_pointer) |locked| wl.locked_pointer_destroy(locked);
+        g_relative_pointer = null;
+        g_locked_pointer = null;
+        g_grab_win = null;
+        g_raw_mods = .{};
+        show_cursor();
+    }
+    wl.flush();
 }
 
 pub fn is_grabbed() bool {
-    return false;
+    return g_grabbed;
 }
 
-pub fn release_grab_if_blurred() void {}
+// The windows foreground-window check, in Wayland terms: keyboard focus gone
+// means another surface took over, so the capture must not linger.
+pub fn release_grab_if_blurred() void {
+    if (!g_grabbed) return;
+    if (g_keyboard_focus == null) set_grab(false);
+}
+
+const LockedPointerListener = extern struct {
+    locked: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    unlocked: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+};
+
+const locked_pointer_listener = LockedPointerListener{
+    .locked = on_pointer_locked,
+    .unlocked = on_pointer_unlocked,
+};
+
+fn on_pointer_locked(data: ?*anyopaque, locked: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(locked != null);
+}
+
+// A persistent-lifetime lock re-engages when focus returns, so an unlock is
+// not a release; dropping the grab on blur is release_grab_if_blurred's call.
+fn on_pointer_unlocked(data: ?*anyopaque, locked: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(locked != null);
+}
+
+const RelativePointerListener = extern struct {
+    relative_motion: *const fn (
+        ?*anyopaque,
+        ?*wl.wl_proxy,
+        u32,
+        u32,
+        i32,
+        i32,
+        i32,
+        i32,
+    ) callconv(.c) void,
+};
+
+const relative_pointer_listener = RelativePointerListener{
+    .relative_motion = on_relative_motion,
+};
+
+fn on_relative_motion(
+    data: ?*anyopaque,
+    relative: ?*wl.wl_proxy,
+    utime_hi: u32,
+    utime_lo: u32,
+    dx: i32,
+    dy: i32,
+    dx_unaccel: i32,
+    dy_unaccel: i32,
+) callconv(.c) void {
+    _ = data;
+    _ = utime_hi;
+    _ = utime_lo;
+    _ = dx;
+    _ = dy;
+    std.debug.assert(relative != null);
+    if (!g_grabbed) return;
+    const d = g_raw orelse return;
+    // Unaccelerated deltas: the remote end applies its own pointer ballistics,
+    // the same channel windows raw input reports.
+    d.on_event(ctx_for(g_grab_win, d.ctx), .{ .motion = .{
+        .dx = fixed_to_f32(dx_unaccel),
+        .dy = fixed_to_f32(dy_unaccel),
+    } });
+}
+
+fn raw_button_event(button: u32, down: bool) void {
+    std.debug.assert(g_grabbed);
+    const d = g_raw orelse return;
+    const mapped: input.Button = switch (button) {
+        BTN_LEFT => .left,
+        BTN_RIGHT => .right,
+        BTN_MIDDLE => .middle,
+        else => .other,
+    };
+    d.on_event(ctx_for(g_grab_win, d.ctx), .{ .button = .{
+        .button = mapped,
+        .down = down,
+        .mods = g_raw_mods,
+    } });
+}
+
+fn raw_key_event(key: u32, down: bool) void {
+    std.debug.assert(g_grabbed);
+    update_raw_mods(key, down);
+    if (down and key == KEY_ESC) {
+        set_grab(false);
+        return;
+    }
+    const d = g_raw orelse return;
+    std.debug.assert(key <= std.math.maxInt(u16));
+    d.on_event(ctx_for(g_grab_win, d.ctx), .{ .key = .{
+        .scancode = @intCast(key),
+        .down = down,
+        .mods = g_raw_mods,
+    } });
+}
+
+// Left/right modifiers tracked from the raw evdev stream itself; xkb only
+// folds them, and the remote needs the sides apart (the input.Mods contract).
+fn update_raw_mods(key: u32, down: bool) void {
+    switch (key) {
+        KEY_LEFTSHIFT => g_raw_mods.left_shift = down,
+        KEY_RIGHTSHIFT => g_raw_mods.right_shift = down,
+        KEY_LEFTCTRL => g_raw_mods.left_control = down,
+        KEY_RIGHTCTRL => g_raw_mods.right_control = down,
+        KEY_LEFTALT => g_raw_mods.left_option = down,
+        KEY_RIGHTALT => g_raw_mods.right_option = down,
+        KEY_LEFTMETA => g_raw_mods.left_command = down,
+        KEY_RIGHTMETA => g_raw_mods.right_command = down,
+        else => {},
+    }
+    if (g_xkb_state) |state| g_raw_mods.caps_lock = xkb.mod_active(state, g_mod_caps);
+}
+
+fn hide_cursor() void {
+    const pointer = g_pointer orelse return;
+    if (g_enter_serial == 0) return; // never entered: nothing is showing
+    wl.pointer_set_cursor(pointer, g_enter_serial, null, 0, 0);
+}
+
+fn show_cursor() void {
+    // Force a re-attach: set_cursor_image dedupes on the last applied kind,
+    // which the hide bypassed.
+    g_applied_cursor = if (g_cursor == .default) .col_resize else .default;
+    set_cursor_image(g_cursor);
+}
+
+// ---- clipboard (wl_data_device) ----
+
+const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+const CLIPBOARD_POLL_MS: c_int = 10;
+const CLIPBOARD_POLL_MAX: u32 = 50;
+const O_CLOEXEC: c_int = 0x80000;
+const POLLIN: i16 = 1;
+
+const MIME_UTF8_PLAIN = "text/plain;charset=utf-8";
+const MIME_UTF8_STRING = "UTF8_STRING";
+const MIME_PLAIN = "text/plain";
+
+// Ranked: a reader picks the best text flavor an offer advertised.
+const TextMime = enum(u8) { none, plain, utf8_string, utf8_plain };
+
+extern "c" fn pipe2(fds: *[2]i32, flags: c_int) c_int;
+extern "c" fn read(fd: i32, buf: [*]u8, count: usize) isize;
+extern "c" fn write(fd: i32, buf: [*]const u8, count: usize) isize;
+const clip_pollfd = extern struct { fd: i32, events: i16, revents: i16 };
+extern "c" fn poll(fds: [*]clip_pollfd, count: c_ulong, timeout_ms: c_int) c_int;
+
+var g_data_device: ?*wl.wl_proxy = null;
+// The offer being announced (mimes still arriving) vs the one holding the
+// current selection; a selection event promotes pending to selection.
+var g_pending_offer: ?*wl.wl_proxy = null;
+var g_pending_mime: TextMime = .none;
+var g_selection_offer: ?*wl.wl_proxy = null;
+var g_selection_mime: TextMime = .none;
+// Our outstanding claim: the source plus a local copy of the text it serves.
+var g_own_source: ?*wl.wl_proxy = null;
+var g_own_text: [MAX_CLIPBOARD_BYTES]u8 = undefined;
+var g_own_len: usize = 0;
+// Selection generation counter, the windows GetClipboardSequenceNumber shape.
+var g_clipboard_seq: u32 = 0;
+var g_clipboard_seen: u32 = 0;
+var g_clipboard_own_seq: u32 = 0;
+var g_clipboard_primed: bool = false;
+var g_own_echo_pending: bool = false;
+
+fn ensure_data_device() void {
+    if (g_data_device != null) return;
+    const seat = wl.conn.seat orelse return;
+    const device = wl.get_data_device(seat) orelse return;
+    wl.add_listener(device, &data_device_listener, null);
+    g_data_device = device;
+}
+
+fn mime_string(mime: TextMime) ?[*:0]const u8 {
+    return switch (mime) {
+        .none => null,
+        .plain => MIME_PLAIN,
+        .utf8_string => MIME_UTF8_STRING,
+        .utf8_plain => MIME_UTF8_PLAIN,
+    };
+}
+
+// The source app writes the pipe on its own schedule; the bounded poll keeps
+// a dead source from wedging the paint loop (500ms worst case, only on the
+// read that follows a changed() edge).
+fn read_pipe_bounded(fd: i32, buf: []u8) usize {
+    std.debug.assert(fd >= 0);
+    std.debug.assert(buf.len > 0);
+    var total: usize = 0;
+    var spins: u32 = 0;
+    while (total < buf.len and spins < CLIPBOARD_POLL_MAX) : (spins += 1) {
+        var pfd = [_]clip_pollfd{.{ .fd = fd, .events = POLLIN, .revents = 0 }};
+        const rc = poll(&pfd, 1, CLIPBOARD_POLL_MS);
+        if (rc < 0) break;
+        if (rc == 0) continue;
+        const got = read(fd, buf.ptr + total, buf.len - total);
+        if (got <= 0) break; // EOF or error: the transfer is over either way
+        total += @intCast(got);
+    }
+    return total;
+}
+
+fn write_all(fd: i32, bytes: []const u8) void {
+    std.debug.assert(fd >= 0);
+    var at: usize = 0;
+    var spins: u32 = 0;
+    while (at < bytes.len and spins < CLIPBOARD_POLL_MAX) : (spins += 1) {
+        const put = write(fd, bytes.ptr + at, bytes.len - at);
+        if (put <= 0) return; // reader hung up: nothing left to deliver
+        at += @intCast(put);
+    }
+}
+
+const DataDeviceListener = extern struct {
+    data_offer: *const fn (?*anyopaque, ?*wl.wl_proxy, ?*wl.wl_proxy) callconv(.c) void,
+    enter: *const fn (
+        ?*anyopaque,
+        ?*wl.wl_proxy,
+        u32,
+        ?*wl.wl_proxy,
+        i32,
+        i32,
+        ?*wl.wl_proxy,
+    ) callconv(.c) void,
+    leave: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    motion: *const fn (?*anyopaque, ?*wl.wl_proxy, u32, i32, i32) callconv(.c) void,
+    drop: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    selection: *const fn (?*anyopaque, ?*wl.wl_proxy, ?*wl.wl_proxy) callconv(.c) void,
+};
+
+const data_device_listener = DataDeviceListener{
+    .data_offer = on_data_offer,
+    .enter = on_data_enter,
+    .leave = on_data_leave,
+    .motion = on_data_motion,
+    .drop = on_data_drop,
+    .selection = on_data_selection,
+};
+
+fn on_data_offer(
+    data: ?*anyopaque,
+    device: ?*wl.wl_proxy,
+    offer: ?*wl.wl_proxy,
+) callconv(.c) void {
+    _ = data;
+    std.debug.assert(device != null);
+    // An announced offer that never became the selection (a DND offer this
+    // shell does not accept) is dead once the next announcement arrives; one
+    // such proxy may linger until then, deliberately not reaped earlier.
+    if (g_pending_offer) |old| {
+        if (old != g_selection_offer) wl.data_offer_destroy(old);
+    }
+    g_pending_offer = offer;
+    g_pending_mime = .none;
+    if (offer) |o| wl.add_listener(o, &data_offer_listener, null);
+}
+
+fn on_data_enter(
+    data: ?*anyopaque,
+    device: ?*wl.wl_proxy,
+    serial: u32,
+    surface: ?*wl.wl_proxy,
+    x: i32,
+    y: i32,
+    offer: ?*wl.wl_proxy,
+) callconv(.c) void {
+    _ = data;
+    _ = serial;
+    _ = surface;
+    _ = x;
+    _ = y;
+    _ = offer;
+    std.debug.assert(device != null);
+}
+
+fn on_data_leave(data: ?*anyopaque, device: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(device != null);
+}
+
+fn on_data_motion(
+    data: ?*anyopaque,
+    device: ?*wl.wl_proxy,
+    time: u32,
+    x: i32,
+    y: i32,
+) callconv(.c) void {
+    _ = data;
+    _ = time;
+    _ = x;
+    _ = y;
+    std.debug.assert(device != null);
+}
+
+fn on_data_drop(data: ?*anyopaque, device: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(device != null);
+}
+
+fn on_data_selection(
+    data: ?*anyopaque,
+    device: ?*wl.wl_proxy,
+    offer: ?*wl.wl_proxy,
+) callconv(.c) void {
+    _ = data;
+    std.debug.assert(device != null);
+    if (g_selection_offer) |old| {
+        if (old != offer) wl.data_offer_destroy(old);
+    }
+    g_selection_offer = offer;
+    if (offer != null and offer == g_pending_offer) {
+        g_selection_mime = g_pending_mime;
+        g_pending_offer = null;
+        g_pending_mime = .none;
+    } else if (offer == null) {
+        g_selection_mime = .none;
+    }
+    g_clipboard_seq +%= 1;
+    // The first selection after our own write is its echo. A foreign claim
+    // racing in between mislabels one edge; the next change reports normally.
+    if (g_own_echo_pending) {
+        g_clipboard_own_seq = g_clipboard_seq;
+        g_own_echo_pending = false;
+    }
+}
+
+const DataOfferListener = extern struct {
+    offer: *const fn (?*anyopaque, ?*wl.wl_proxy, ?[*:0]const u8) callconv(.c) void,
+    source_actions: *const fn (?*anyopaque, ?*wl.wl_proxy, u32) callconv(.c) void,
+    action: *const fn (?*anyopaque, ?*wl.wl_proxy, u32) callconv(.c) void,
+};
+
+const data_offer_listener = DataOfferListener{
+    .offer = on_offer_mime,
+    .source_actions = on_offer_source_actions,
+    .action = on_offer_action,
+};
+
+fn on_offer_mime(
+    data: ?*anyopaque,
+    offer: ?*wl.wl_proxy,
+    mime_z: ?[*:0]const u8,
+) callconv(.c) void {
+    _ = data;
+    if (offer == null or offer != g_pending_offer) return;
+    const mime = std.mem.span(mime_z orelse return);
+    const rank: TextMime = if (std.mem.eql(u8, mime, MIME_UTF8_PLAIN))
+        .utf8_plain
+    else if (std.mem.eql(u8, mime, MIME_UTF8_STRING))
+        .utf8_string
+    else if (std.mem.eql(u8, mime, MIME_PLAIN))
+        .plain
+    else
+        return;
+    if (@intFromEnum(rank) > @intFromEnum(g_pending_mime)) g_pending_mime = rank;
+}
+
+fn on_offer_source_actions(
+    data: ?*anyopaque,
+    offer: ?*wl.wl_proxy,
+    actions: u32,
+) callconv(.c) void {
+    _ = data;
+    _ = actions;
+    std.debug.assert(offer != null);
+}
+
+fn on_offer_action(data: ?*anyopaque, offer: ?*wl.wl_proxy, action: u32) callconv(.c) void {
+    _ = data;
+    _ = action;
+    std.debug.assert(offer != null);
+}
+
+const DataSourceListener = extern struct {
+    target: *const fn (?*anyopaque, ?*wl.wl_proxy, ?[*:0]const u8) callconv(.c) void,
+    send: *const fn (?*anyopaque, ?*wl.wl_proxy, ?[*:0]const u8, i32) callconv(.c) void,
+    cancelled: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    dnd_drop_performed: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    dnd_finished: *const fn (?*anyopaque, ?*wl.wl_proxy) callconv(.c) void,
+    action: *const fn (?*anyopaque, ?*wl.wl_proxy, u32) callconv(.c) void,
+};
+
+const data_source_listener = DataSourceListener{
+    .target = on_source_target,
+    .send = on_source_send,
+    .cancelled = on_source_cancelled,
+    .dnd_drop_performed = on_source_dnd_drop,
+    .dnd_finished = on_source_dnd_finished,
+    .action = on_source_action,
+};
+
+fn on_source_target(
+    data: ?*anyopaque,
+    source: ?*wl.wl_proxy,
+    mime_z: ?[*:0]const u8,
+) callconv(.c) void {
+    _ = data;
+    _ = mime_z;
+    std.debug.assert(source != null);
+}
+
+fn on_source_send(
+    data: ?*anyopaque,
+    source: ?*wl.wl_proxy,
+    mime_z: ?[*:0]const u8,
+    fd: i32,
+) callconv(.c) void {
+    _ = data;
+    _ = mime_z;
+    std.debug.assert(fd >= 0);
+    defer _ = close(fd);
+    if (source != g_own_source) return;
+    write_all(fd, g_own_text[0..g_own_len]);
+}
+
+fn on_source_cancelled(data: ?*anyopaque, source: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(source != null);
+    if (source != g_own_source) return;
+    wl.data_source_destroy(source.?);
+    g_own_source = null;
+    g_own_len = 0;
+}
+
+fn on_source_dnd_drop(data: ?*anyopaque, source: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(source != null);
+}
+
+fn on_source_dnd_finished(data: ?*anyopaque, source: ?*wl.wl_proxy) callconv(.c) void {
+    _ = data;
+    std.debug.assert(source != null);
+}
+
+fn on_source_action(data: ?*anyopaque, source: ?*wl.wl_proxy, action: u32) callconv(.c) void {
+    _ = data;
+    _ = action;
+    std.debug.assert(source != null);
+}
+
+// ---- unimplemented API-parity surface ----
 
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
     std.debug.assert(@intFromPtr(ctx) != 0);
@@ -1253,16 +1823,59 @@ pub fn text_field_value(buf: []u8) []const u8 {
 }
 
 pub fn pasteboard_read_into(buf: []u8) []const u8 {
-    _ = buf;
-    return "";
+    if (buf.len == 0) return "";
+    // Our own selection reads back from the local copy: receive() would route
+    // to OUR send handler, which cannot run while this thread blocks on the
+    // pipe (one thread owns both ends of that dance).
+    if (g_own_source != null) {
+        const n = @min(g_own_len, buf.len);
+        @memcpy(buf[0..n], g_own_text[0..n]);
+        return buf[0..n];
+    }
+    const offer = g_selection_offer orelse return "";
+    const mime = mime_string(g_selection_mime) orelse return "";
+    var fds: [2]i32 = .{ -1, -1 };
+    if (pipe2(&fds, O_CLOEXEC) != 0) return "";
+    wl.data_offer_receive(offer, mime, fds[1]);
+    _ = close(fds[1]);
+    wl.flush();
+    const len = read_pipe_bounded(fds[0], buf);
+    _ = close(fds[0]);
+    return buf[0..len];
 }
 
 pub fn pasteboard_write_string(text: []const u8) void {
-    _ = text;
+    const device = g_data_device orelse return;
+    // A selection claim needs the serial of a real input event; without any
+    // interaction yet there is nothing to anchor it to and compositors drop it.
+    const serial = if (g_button_serial != 0) g_button_serial else g_enter_serial;
+    if (serial == 0) return;
+    const source = wl.create_data_source() orelse return;
+    wl.add_listener(source, &data_source_listener, null);
+    wl.data_source_offer(source, MIME_UTF8_PLAIN);
+    wl.data_source_offer(source, MIME_UTF8_STRING);
+    wl.data_source_offer(source, MIME_PLAIN);
+    wl.data_device_set_selection(device, source, serial);
+    if (g_own_source) |old| wl.data_source_destroy(old);
+    g_own_source = source;
+    g_own_len = @min(text.len, MAX_CLIPBOARD_BYTES);
+    @memcpy(g_own_text[0..g_own_len], text[0..g_own_len]);
+    g_own_echo_pending = true;
+    wl.flush();
 }
 
+// Edge-triggered external-change poll, the windows clipboard-sequence shape:
+// prime on first call, then report each new selection once unless it was the
+// echo of our own write.
 pub fn clipboard_changed_external() bool {
-    return false;
+    if (!g_clipboard_primed) {
+        g_clipboard_primed = true;
+        g_clipboard_seen = g_clipboard_seq;
+        return false;
+    }
+    if (g_clipboard_seq == g_clipboard_seen) return false;
+    g_clipboard_seen = g_clipboard_seq;
+    return g_clipboard_seq != g_clipboard_own_seq;
 }
 
 pub fn desktop_accent_color() ?types.Rgba {
@@ -1270,10 +1883,40 @@ pub fn desktop_accent_color() ?types.Rgba {
 }
 
 pub fn display_count() u32 {
-    return 0;
+    var count: u32 = 0;
+    for (&wl.outputs) |*info| {
+        if (output_usable(info)) count += 1;
+    }
+    return count;
 }
 
+// Bounds in the compositor's global logical space (the cross-platform
+// "points"): origin straight from wl_output geometry, size = current mode
+// divided by the integer scale, axes swapped for 90/270 transforms.
 pub fn display_bounds(index: u32) geometry.BoundsF {
-    _ = index;
+    var at: u32 = 0;
+    for (&wl.outputs) |*info| {
+        if (!output_usable(info)) continue;
+        if (at != index) {
+            at += 1;
+            continue;
+        }
+        std.debug.assert(info.scale >= 1);
+        std.debug.assert(info.mode_h > 0);
+        const rotated = @rem(info.transform, 2) == 1;
+        const logical_w = if (rotated) info.mode_h else info.mode_w;
+        const logical_h = if (rotated) info.mode_w else info.mode_h;
+        return .{
+            .origin = .{ .x = @floatFromInt(info.x), .y = @floatFromInt(info.y) },
+            .size = .{
+                .width = @floatFromInt(@divTrunc(logical_w, info.scale)),
+                .height = @floatFromInt(@divTrunc(logical_h, info.scale)),
+            },
+        };
+    }
     return .{};
+}
+
+fn output_usable(info: *const wl.OutputInfo) bool {
+    return info.proxy != null and info.mode_w > 0;
 }
