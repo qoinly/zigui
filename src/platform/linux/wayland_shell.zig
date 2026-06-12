@@ -21,6 +21,9 @@ const types = @import("../../window/types.zig");
 const input = @import("../../input.zig");
 const geometry = @import("../../geometry.zig");
 const shell_types = @import("shell_types.zig");
+const csd = @import("csd.zig");
+const key_translate = @import("key_translate.zig");
+const field = @import("field.zig");
 
 pub const KeyMods = shell_types.KeyMods;
 pub const KeyCode = shell_types.KeyCode;
@@ -77,8 +80,7 @@ const KEY_RIGHTCTRL: u32 = 97;
 const KEY_RIGHTALT: u32 = 100;
 const KEY_LEFTMETA: u32 = 125;
 const KEY_RIGHTMETA: u32 = 126;
-const RESIZE_BORDER: f32 = 6;
-const WHEEL_NOTCH_PT: f32 = 40;
+const WHEEL_NOTCH_PT = shell_types.WHEEL_NOTCH_PT;
 const SEAT_CAP_POINTER: u32 = 1;
 const SEAT_CAP_KEYBOARD: u32 = 2;
 const CURSOR_SIZE: i32 = 24;
@@ -474,11 +476,7 @@ fn destroy_window(win: *ShellWindow) void {
     }
     if (g_keyboard_focus == win) g_keyboard_focus = null;
     if (g_grab_win == win) set_grab(false);
-    if (g_field_win == win) {
-        g_field_visible = false;
-        g_field_win = null;
-        g_field_id = 0;
-    }
+    field.forget_window(win);
     if (win.retiring) |buffer| wl.buffer_destroy(buffer);
     if (win.buffer) |buffer| wl.buffer_destroy(buffer);
     if (win.toplevel) |toplevel| wl.toplevel_destroy(toplevel);
@@ -886,37 +884,15 @@ fn set_hover_caption(button: CaptionButton) void {
 
 fn caption_button_at(win: *const ShellWindow, x: f32, y: f32) CaptionButton {
     std.debug.assert(win.in_use);
-    if (y < 0 or y >= g_titlebar_height) return .none;
     const w: f32 = @floatFromInt(win.width_pt);
-    // Slots end right_margin short of the edge, mirroring the paint layer's
-    // centre formula; the margin itself stays draggable band.
-    const right = w - (CAPTION_CLUSTER_W - CAPTION_BTN_W * 3);
-    // Inclusive lower edge: the exact left-boundary pixel is representable
-    // in wl_fixed and must land in the outermost slot, not past it.
-    if (x >= right or x <= right - CAPTION_BTN_W * 3) return .none;
-    const slot: u8 = @intFromFloat((right - x) / CAPTION_BTN_W);
-    std.debug.assert(slot < 3);
-    const slots = caption_slots();
-    if (slot >= slots.count) return .none;
-    return slots.kinds[slot];
+    return csd.caption_button_at(w, g_titlebar_height, x, y);
 }
 
-// xdg resize-edge codes: top=1 bottom=2 left=4 right=8, corners are their OR.
 fn resize_edge_at(win: *const ShellWindow, x: f32, y: f32) u32 {
     std.debug.assert(win.in_use);
-    if (win.maximized or win.fullscreen) return 0;
     const w: f32 = @floatFromInt(win.width_pt);
     const h: f32 = @floatFromInt(win.height_pt);
-    var edge: u32 = 0;
-    if (y < RESIZE_BORDER) edge |= 1;
-    if (y >= h - RESIZE_BORDER) edge |= 2;
-    if (x < RESIZE_BORDER) edge |= 4;
-    if (x >= w - RESIZE_BORDER) edge |= 8;
-    // A window thinner than two borders satisfies opposite edges at once; the
-    // min-size floor prevents it, but a protocol value past 10 must never ship.
-    if (edge & 3 == 3 or edge & 12 == 12) return 0;
-    std.debug.assert(edge <= 10);
-    return edge;
+    return csd.resize_edge_at(w, h, win.maximized or win.fullscreen, x, y);
 }
 
 fn on_pointer_button(
@@ -1276,46 +1252,15 @@ fn dispatch_key(key: u32) bool {
         .alt = xkb.mod_active(xkb_state, g_mod_alt),
         .ctrl = false,
     };
-    const event = key_event_for(sym, keycode, xkb_state, mods) orelse return false;
+    const event = key_translate.key_event_for(sym, keycode, xkb_state, mods) orelse return false;
     // The visible editor is the windows EDIT child with focus: it consumes
     // every key; widget dispatch resumes when the field hides.
-    if (field_consumes_key()) {
-        field_apply_key(event);
+    if (field.consumes_key(g_keyboard_focus)) {
+        field.apply_key(event, field_clipboard);
         return true;
     }
     if (g_dispatch) |d| d.on_key(ctx_for(g_keyboard_focus, d.ctx), event);
     return true;
-}
-
-fn key_event_for(sym: u32, keycode: u32, state: *xkb.State, mods: KeyMods) ?KeyEvent {
-    std.debug.assert(keycode >= 8);
-    const code: ?KeyCode = switch (sym) {
-        0xff51 => .left,
-        0xff53 => .right,
-        0xff52 => .up,
-        0xff54 => .down,
-        0xff08 => .backspace,
-        0xffff => .delete_fwd,
-        0xff0d, 0xff8d => .enter,
-        0xff09 => .tab,
-        0xff1b => .escape,
-        0xff50 => .home,
-        0xff57 => .end,
-        0xff55 => .page_up,
-        0xff56 => .page_down,
-        else => null,
-    };
-    if (code) |c| return .{ .code = c, .mods = mods };
-    const ch = xkb.key_utf32(state, keycode);
-    if (ch < 0x20 or ch == 0x7f) {
-        // Ctrl folds letters into control codes (ctrl+a -> 0x01), but the
-        // shortcut consumers key on the letter; the keysym still carries it.
-        if (mods.cmd and sym >= 0x20 and sym < 0x7f)
-            return .{ .code = .char, .ch = @intCast(sym), .mods = mods };
-        return null;
-    }
-    std.debug.assert(ch <= 0x10FFFF);
-    return .{ .code = .char, .ch = @intCast(ch), .mods = mods };
 }
 
 fn on_keyboard_modifiers(
@@ -1910,21 +1855,13 @@ pub fn current_shift_down() bool {
 
 // ---- text field (the singleton editor) ----
 
-// Wayland has no native text widget to overlay, so the platform owns the
-// editing STATE (buffer, caret, selection, key handling - the windows EDIT
-// child's job) and the kit draws it (gated on text_field_native_paint).
+// The editing engine lives in field.zig (shared with the X11 arm); this arm
+// contributes the key-window gate and its clipboard entry points.
 
-const FIELD_BUF_MAX: usize = 256; // matches the kit TextField buffer
-
-var g_field_visible: bool = false;
-var g_field_win: ?*ShellWindow = null;
-var g_field_id: u32 = 0;
-var g_field_secure: bool = false;
-var g_field_numeric: bool = false;
-var g_field_buf: [FIELD_BUF_MAX]u8 = undefined;
-var g_field_len: usize = 0;
-var g_field_caret: usize = 0; // byte offset, always a codepoint boundary
-var g_field_anchor: usize = 0; // selection anchor; == caret means no selection
+const field_clipboard = field.Clipboard{
+    .read_into = pasteboard_read_into,
+    .write_string = pasteboard_write_string,
+};
 
 pub fn show_text_field(
     handle: CustomShellHandle,
@@ -1950,190 +1887,29 @@ pub fn show_text_field(
     _ = font_size;
     _ = color;
     if (g_keyboard_focus != handle.window) return false;
-    const reseed = !g_field_visible or g_field_id != id or
-        g_field_win != handle.window or g_field_secure != secure;
-    if (reseed) {
-        g_field_len = @min(initial.len, FIELD_BUF_MAX);
-        @memcpy(g_field_buf[0..g_field_len], initial[0..g_field_len]);
-        // Select-all on seed, the windows EM_SETSEL behavior: typing replaces.
-        g_field_anchor = 0;
-        g_field_caret = g_field_len;
-    }
-    g_field_visible = true;
-    g_field_win = handle.window;
-    g_field_id = id;
-    g_field_secure = secure;
-    g_field_numeric = numeric;
+    field.show(handle.window, initial, secure, numeric, id);
     return true;
 }
 
 pub fn hide_text_field(handle: CustomShellHandle) void {
     std.debug.assert(handle.window.in_use);
-    if (g_field_win != handle.window) return;
-    g_field_visible = false;
-    g_field_win = null;
-    g_field_id = 0;
+    field.hide(handle.window);
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {
-    const n = @min(g_field_len, buf.len);
-    @memcpy(buf[0..n], g_field_buf[0..n]);
-    return buf[0..n];
+    return field.value(buf);
 }
 
-// Caret and selection in byte offsets into the polled value, for the kit's
-// overlay drawing. Selection is half-open [a, b); a == b means none.
 pub fn text_field_caret() usize {
-    std.debug.assert(g_field_caret <= g_field_len);
-    return g_field_caret;
+    return field.caret();
 }
 
 pub fn text_field_selection() [2]usize {
-    const a = @min(g_field_anchor, g_field_caret);
-    const b = @max(g_field_anchor, g_field_caret);
-    std.debug.assert(b <= g_field_len);
-    return .{ a, b };
+    return field.selection();
 }
 
 pub fn text_field_secure() bool {
-    return g_field_secure;
-}
-
-fn field_consumes_key() bool {
-    return g_field_visible and g_field_win != null and g_field_win == g_keyboard_focus;
-}
-
-fn field_sel_range() ?[2]usize {
-    if (g_field_anchor == g_field_caret) return null;
-    return text_field_selection();
-}
-
-fn field_prev_boundary(at: usize) usize {
-    std.debug.assert(at <= g_field_len);
-    if (at == 0) return 0;
-    var i = at - 1;
-    // UTF-8 continuation bytes are 0b10xxxxxx; step back to the lead byte.
-    while (i > 0 and g_field_buf[i] & 0xC0 == 0x80) i -= 1;
-    return i;
-}
-
-fn field_next_boundary(at: usize) usize {
-    std.debug.assert(at <= g_field_len);
-    if (at >= g_field_len) return g_field_len;
-    var i = at + 1;
-    while (i < g_field_len and g_field_buf[i] & 0xC0 == 0x80) i += 1;
-    return i;
-}
-
-fn field_delete_range(a: usize, b: usize) void {
-    std.debug.assert(a <= b);
-    std.debug.assert(b <= g_field_len);
-    std.mem.copyForwards(u8, g_field_buf[a .. g_field_len - (b - a)], g_field_buf[b..g_field_len]);
-    g_field_len -= b - a;
-    g_field_caret = a;
-    g_field_anchor = a;
-}
-
-fn field_insert(bytes: []const u8) void {
-    std.debug.assert(g_field_caret <= g_field_len);
-    std.debug.assert(g_field_len <= FIELD_BUF_MAX);
-    if (field_sel_range()) |sel| field_delete_range(sel[0], sel[1]);
-    if (g_field_len + bytes.len > FIELD_BUF_MAX) return; // full: drop, the EDIT limit model
-    const at = g_field_caret;
-    std.mem.copyBackwards(
-        u8,
-        g_field_buf[at + bytes.len .. g_field_len + bytes.len],
-        g_field_buf[at..g_field_len],
-    );
-    @memcpy(g_field_buf[at .. at + bytes.len], bytes);
-    g_field_len += bytes.len;
-    g_field_caret = at + bytes.len;
-    g_field_anchor = g_field_caret;
-}
-
-fn field_apply_key(event: KeyEvent) void {
-    std.debug.assert(g_field_visible);
-    if (event.mods.cmd) {
-        field_apply_shortcut(event.ch);
-        return;
-    }
-    switch (event.code) {
-        .char => field_apply_char(event.ch),
-        .backspace => if (field_sel_range()) |sel|
-            field_delete_range(sel[0], sel[1])
-        else
-            field_delete_range(field_prev_boundary(g_field_caret), g_field_caret),
-        .delete_fwd => if (field_sel_range()) |sel|
-            field_delete_range(sel[0], sel[1])
-        else
-            field_delete_range(g_field_caret, field_next_boundary(g_field_caret)),
-        .left => {
-            g_field_caret = field_prev_boundary(g_field_caret);
-            if (!event.mods.shift) g_field_anchor = g_field_caret;
-        },
-        .right => {
-            g_field_caret = field_next_boundary(g_field_caret);
-            if (!event.mods.shift) g_field_anchor = g_field_caret;
-        },
-        .home => {
-            g_field_caret = 0;
-            if (!event.mods.shift) g_field_anchor = 0;
-        },
-        .end => {
-            g_field_caret = g_field_len;
-            if (!event.mods.shift) g_field_anchor = g_field_caret;
-        },
-        .escape => g_field_anchor = g_field_caret,
-        // Consumed but inert in a single-line field, the EDIT child model.
-        .enter, .tab, .up, .down, .page_up, .page_down => {},
-    }
-}
-
-fn field_apply_char(ch: u21) void {
-    if (ch == 0) return;
-    if (g_field_numeric and !(ch >= '0' and ch <= '9') and ch != '.' and ch != '-') return;
-    var utf8: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(ch, &utf8) catch return;
-    field_insert(utf8[0..n]);
-}
-
-fn field_apply_shortcut(ch: u21) void {
-    switch (ch) {
-        'a', 'A' => {
-            g_field_anchor = 0;
-            g_field_caret = g_field_len;
-        },
-        'c', 'C' => field_copy_selection(),
-        'x', 'X' => {
-            field_copy_selection();
-            if (field_sel_range()) |sel| field_delete_range(sel[0], sel[1]);
-        },
-        'v', 'V' => {
-            var tmp: [FIELD_BUF_MAX]u8 = undefined;
-            const pasted = pasteboard_read_into(&tmp);
-            if (field_paste_ok(pasted)) field_insert(pasted);
-        },
-        else => {},
-    }
-}
-
-// A clipboard blob is foreign input: a truncated transfer could park the
-// caret mid-codepoint, and a numeric field must filter paste like typing
-// (the windows ES_NUMBER behavior).
-fn field_paste_ok(pasted: []const u8) bool {
-    if (pasted.len == 0) return false;
-    if (!std.unicode.utf8ValidateSlice(pasted)) return false;
-    if (!g_field_numeric) return true;
-    for (pasted) |byte| {
-        if (!(byte >= '0' and byte <= '9') and byte != '.' and byte != '-') return false;
-    }
-    return true;
-}
-
-fn field_copy_selection() void {
-    if (g_field_secure) return; // never leak a password through the clipboard
-    const sel = field_sel_range() orelse return;
-    pasteboard_write_string(g_field_buf[sel[0]..sel[1]]);
+    return field.secure();
 }
 
 pub fn pasteboard_read_into(buf: []u8) []const u8 {
@@ -2200,22 +1976,6 @@ pub fn desktop_accent_color() ?types.Rgba {
 // paint layer's centre formula indexes from the right edge while the layout
 // string lists buttons left to right).
 pub const CaptionSlots = shell_types.CaptionSlots;
-
-pub fn caption_slots() CaptionSlots {
-    const layout = desktop_theme.caption_layout();
-    std.debug.assert(layout.count >= 1);
-    std.debug.assert(layout.count <= 3);
-    var out = CaptionSlots{ .kinds = .{ .none, .none, .none }, .count = layout.count };
-    var i: u8 = 0;
-    while (i < layout.count) : (i += 1) {
-        out.kinds[i] = switch (layout.kinds[layout.count - 1 - i]) {
-            .minimize => .minimize,
-            .maximize => .maximize,
-            .close => .close,
-        };
-    }
-    return out;
-}
 
 pub fn display_count() u32 {
     var count: u32 = 0;

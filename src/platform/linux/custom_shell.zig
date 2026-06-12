@@ -8,6 +8,7 @@ const backend = @import("backend.zig");
 const wayland_shell = @import("wayland_shell.zig");
 const x11_shell = @import("x11_shell.zig");
 const shell_types = @import("shell_types.zig");
+const csd = @import("csd.zig");
 const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 
@@ -335,11 +336,9 @@ pub fn desktop_accent_color() ?types.Rgba {
     };
 }
 
+// Both arms read the same desktop layout; no backend fork to make.
 pub fn caption_slots() CaptionSlots {
-    return switch (backend.active) {
-        .wayland => wayland_shell.caption_slots(),
-        .x11 => x11_shell.caption_slots(),
-    };
+    return csd.caption_slots();
 }
 
 pub fn display_count() u32 {

@@ -10,6 +10,16 @@ pub const State = opaque {};
 
 pub const Error = error{LibraryLoadFailed};
 
+// RMLVO names for keymap_from_names; null fields fall back to xkbcommon's
+// defaults (XKB_DEFAULT_* env, then rules=evdev layout=us).
+pub const RuleNames = extern struct {
+    rules: ?[*:0]const u8 = null,
+    model: ?[*:0]const u8 = null,
+    layout: ?[*:0]const u8 = null,
+    variant: ?[*:0]const u8 = null,
+    options: ?[*:0]const u8 = null,
+};
+
 const CONTEXT_NO_FLAGS: c_int = 0;
 const KEYMAP_FORMAT_TEXT_V1: c_int = 1;
 const KEYMAP_COMPILE_NO_FLAGS: c_int = 0;
@@ -27,6 +37,11 @@ const Fns = struct {
         *Context,
         [*:0]const u8,
         c_int,
+        c_int,
+    ) callconv(.c) ?*Keymap,
+    xkb_keymap_new_from_names: *const fn (
+        *Context,
+        ?*const RuleNames,
         c_int,
     ) callconv(.c) ?*Keymap,
     xkb_keymap_unref: *const fn (*Keymap) callconv(.c) void,
@@ -74,6 +89,13 @@ pub fn keymap_from_string(context: *Context, keymap_text: [*:0]const u8) ?*Keyma
         KEYMAP_FORMAT_TEXT_V1,
         KEYMAP_COMPILE_NO_FLAGS,
     );
+}
+
+// The X11 arm's keymap source: there is no compositor to hand us a keymap
+// fd, so the names come from the root window's _XKB_RULES_NAMES property.
+pub fn keymap_from_names(context: *Context, names: ?*const RuleNames) ?*Keymap {
+    std.debug.assert(g_loaded);
+    return fns.xkb_keymap_new_from_names(context, names, KEYMAP_COMPILE_NO_FLAGS);
 }
 
 pub fn keymap_unref(keymap: *Keymap) void {

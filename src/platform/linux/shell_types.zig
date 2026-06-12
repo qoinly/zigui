@@ -68,6 +68,10 @@ pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) vo
 pub const CAPTION_BTN_W: f32 = 32;
 pub const CAPTION_CLUSTER_W: f32 = CAPTION_BTN_W * 3 + 6;
 
+// One wheel detent scrolls the windows-parity 40pt on both arms (Wayland
+// discrete axis steps, X11 buttons 4-7).
+pub const WHEEL_NOTCH_PT: f32 = 40;
+
 pub const Error = error{
     ConnectFailed,
     WindowCreateFailed,

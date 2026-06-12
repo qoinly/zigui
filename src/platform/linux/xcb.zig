@@ -80,6 +80,75 @@ pub const ExposeEvent = extern struct {
     pad1: [2]u8,
 };
 
+// KeyPress/KeyRelease, ButtonPress/ButtonRelease, and MotionNotify share one
+// wire layout; detail is the keycode, button, or motion hint respectively.
+pub const InputDeviceEvent = extern struct {
+    response_type: u8,
+    detail: u8,
+    sequence: u16,
+    time: u32,
+    root: u32,
+    event: u32,
+    child: u32,
+    root_x: i16,
+    root_y: i16,
+    event_x: i16,
+    event_y: i16,
+    state: u16,
+    same_screen: u8,
+    pad0: u8,
+};
+
+pub const EnterLeaveEvent = extern struct {
+    response_type: u8,
+    detail: u8,
+    sequence: u16,
+    time: u32,
+    root: u32,
+    event: u32,
+    child: u32,
+    root_x: i16,
+    root_y: i16,
+    event_x: i16,
+    event_y: i16,
+    state: u16,
+    mode: u8,
+    same_screen_focus: u8,
+};
+
+pub const FocusEvent = extern struct {
+    response_type: u8,
+    detail: u8,
+    sequence: u16,
+    event: u32,
+    mode: u8,
+    pad0: [3]u8,
+};
+
+pub const PropertyNotifyEvent = extern struct {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    window: u32,
+    atom: u32,
+    time: u32,
+    state: u8,
+    pad1: [3]u8,
+};
+
+pub const GetPropertyReply = extern struct {
+    response_type: u8,
+    format: u8,
+    sequence: u16,
+    length: u32,
+    type: u32,
+    bytes_after: u32,
+    value_len: u32,
+    pad0: [12]u8,
+};
+
+const GetPropertyCookie = extern struct { sequence: c_uint };
+
 const InternAtomReply = extern struct {
     response_type: u8,
     pad0: u8,
@@ -92,10 +161,21 @@ const InternAtomCookie = extern struct { sequence: c_uint };
 const VoidCookie = extern struct { sequence: c_uint };
 
 // Event response_type values (top bit flags a sent event; mask it off).
+pub const KEY_PRESS: u8 = 2;
+pub const KEY_RELEASE: u8 = 3;
+pub const BUTTON_PRESS: u8 = 4;
+pub const BUTTON_RELEASE: u8 = 5;
+pub const MOTION_NOTIFY: u8 = 6;
+pub const ENTER_NOTIFY: u8 = 7;
+pub const LEAVE_NOTIFY: u8 = 8;
+pub const FOCUS_IN: u8 = 9;
+pub const FOCUS_OUT: u8 = 10;
 pub const EXPOSE: u8 = 12;
 pub const DESTROY_NOTIFY: u8 = 17;
 pub const CONFIGURE_NOTIFY: u8 = 22;
+pub const PROPERTY_NOTIFY: u8 = 28;
 pub const CLIENT_MESSAGE: u8 = 33;
+pub const MAPPING_NOTIFY: u8 = 34;
 
 pub const ATOM_ATOM: u32 = 4;
 pub const ATOM_STRING: u32 = 31;
@@ -105,9 +185,22 @@ const COPY_FROM_PARENT: u8 = 0;
 const WINDOW_CLASS_INPUT_OUTPUT: u16 = 1;
 const CW_BACK_PIXEL: u32 = 0x2;
 const CW_EVENT_MASK: u32 = 0x800;
+const CW_CURSOR: u32 = 0x4000;
+pub const EVENT_MASK_KEY_PRESS: u32 = 0x1;
+pub const EVENT_MASK_KEY_RELEASE: u32 = 0x2;
+pub const EVENT_MASK_BUTTON_PRESS: u32 = 0x4;
+pub const EVENT_MASK_BUTTON_RELEASE: u32 = 0x8;
+pub const EVENT_MASK_ENTER_WINDOW: u32 = 0x10;
+pub const EVENT_MASK_LEAVE_WINDOW: u32 = 0x20;
+pub const EVENT_MASK_POINTER_MOTION: u32 = 0x40;
 pub const EVENT_MASK_EXPOSURE: u32 = 0x8000;
 pub const EVENT_MASK_STRUCTURE_NOTIFY: u32 = 0x20000;
+pub const EVENT_MASK_FOCUS_CHANGE: u32 = 0x200000;
+pub const EVENT_MASK_PROPERTY_CHANGE: u32 = 0x400000;
+pub const EVENT_MASK_SUBSTRUCTURE_NOTIFY: u32 = 0x80000;
+pub const EVENT_MASK_SUBSTRUCTURE_REDIRECT: u32 = 0x100000;
 const PROP_MODE_REPLACE: u8 = 0;
+pub const TIME_CURRENT: u32 = 0;
 
 extern "c" fn dlopen(file: [*:0]const u8, mode: c_int) ?*anyopaque;
 extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
@@ -157,6 +250,46 @@ const Fns = struct {
         u32,
         ?*const anyopaque,
     ) callconv(.c) VoidCookie,
+    xcb_change_window_attributes: *const fn (
+        *Connection,
+        u32,
+        u32,
+        [*]const u32,
+    ) callconv(.c) VoidCookie,
+    xcb_send_event: *const fn (*Connection, u8, u32, u32, [*]const u8) callconv(.c) VoidCookie,
+    xcb_ungrab_pointer: *const fn (*Connection, u32) callconv(.c) VoidCookie,
+    xcb_open_font: *const fn (*Connection, u32, u16, [*]const u8) callconv(.c) VoidCookie,
+    xcb_close_font: *const fn (*Connection, u32) callconv(.c) VoidCookie,
+    xcb_create_glyph_cursor: *const fn (
+        *Connection,
+        u32,
+        u32,
+        u32,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+    ) callconv(.c) VoidCookie,
+    xcb_get_property: *const fn (
+        *Connection,
+        u8,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+    ) callconv(.c) GetPropertyCookie,
+    xcb_get_property_reply: *const fn (
+        *Connection,
+        GetPropertyCookie,
+        ?*?*anyopaque,
+    ) callconv(.c) ?*GetPropertyReply,
+    xcb_get_property_value: *const fn (*const GetPropertyReply) callconv(.c) ?*anyopaque,
+    xcb_get_property_value_length: *const fn (*const GetPropertyReply) callconv(.c) c_int,
 };
 
 var fns: Fns = undefined;
@@ -212,7 +345,12 @@ pub fn create_window(id: u32, width: u16, height: u16, back_pixel: u32) void {
     // Value order follows the mask's bit order: BACK_PIXEL then EVENT_MASK.
     const values = [_]u32{
         back_pixel,
-        EVENT_MASK_EXPOSURE | EVENT_MASK_STRUCTURE_NOTIFY,
+        EVENT_MASK_KEY_PRESS | EVENT_MASK_KEY_RELEASE |
+            EVENT_MASK_BUTTON_PRESS | EVENT_MASK_BUTTON_RELEASE |
+            EVENT_MASK_ENTER_WINDOW | EVENT_MASK_LEAVE_WINDOW |
+            EVENT_MASK_POINTER_MOTION | EVENT_MASK_EXPOSURE |
+            EVENT_MASK_STRUCTURE_NOTIFY | EVENT_MASK_FOCUS_CHANGE |
+            EVENT_MASK_PROPERTY_CHANGE,
     };
     _ = fns.xcb_create_window(
         conn.?,
@@ -273,6 +411,85 @@ pub fn intern_atom(name: []const u8) u32 {
     const atom = reply.atom;
     free(reply);
     return atom;
+}
+
+pub fn set_window_cursor(window: u32, cursor: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(window != 0);
+    const values = [_]u32{cursor};
+    _ = fns.xcb_change_window_attributes(conn.?, window, CW_CURSOR, &values);
+}
+
+// A 32-byte wire event sent on the caller's behalf; the WM listens on the
+// root window with the substructure masks (the EWMH client-message path).
+pub fn send_event_to_root(event: *const [32]u8) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(screen != null);
+    const mask = EVENT_MASK_SUBSTRUCTURE_REDIRECT | EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+    _ = fns.xcb_send_event(conn.?, 0, screen.?.root, mask, event);
+}
+
+pub fn ungrab_pointer(time: u32) void {
+    std.debug.assert(conn != null);
+    _ = fns.xcb_ungrab_pointer(conn.?, time);
+}
+
+pub fn open_font(id: u32, name: []const u8) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(name.len > 0);
+    _ = fns.xcb_open_font(conn.?, id, @intCast(name.len), name.ptr);
+}
+
+pub fn close_font(id: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(id != 0);
+    _ = fns.xcb_close_font(conn.?, id);
+}
+
+// Black-on-white cursor from the core cursor font; mask glyph is by
+// convention the source glyph + 1.
+pub fn create_glyph_cursor(id: u32, font: u32, glyph: u16) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(font != 0);
+    _ = fns.xcb_create_glyph_cursor(
+        conn.?,
+        id,
+        font,
+        font,
+        glyph,
+        glyph + 1,
+        0,
+        0,
+        0,
+        65535,
+        65535,
+        65535,
+    );
+}
+
+// Synchronous property fetch into the caller's buffer; properties feeding
+// the shell (window state, keymap names) are tiny and read off the hot path.
+// Returns the value bytes written, or null when the property is unset.
+pub fn get_property_into(
+    window: u32,
+    property: u32,
+    property_type: u32,
+    buf: []u8,
+) ?[]const u8 {
+    std.debug.assert(conn != null);
+    std.debug.assert(buf.len >= 4);
+    const long_length: u32 = @intCast(buf.len / 4);
+    const cookie = fns.xcb_get_property(conn.?, 0, window, property, property_type, 0, long_length);
+    const reply = fns.xcb_get_property_reply(conn.?, cookie, null) orelse return null;
+    defer free(reply);
+    if (reply.type == 0) return null;
+    const value = fns.xcb_get_property_value(reply) orelse return null;
+    const len: usize = @intCast(fns.xcb_get_property_value_length(reply));
+    if (len == 0) return buf[0..0];
+    const copy_len = @min(len, buf.len);
+    const bytes: [*]const u8 = @ptrCast(value);
+    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+    return buf[0..copy_len];
 }
 
 pub fn change_property(
