@@ -1,16 +1,21 @@
 // The X11 arm of the linux custom shell (custom_shell.zig dispatches here):
 // an undecorated xcb window (motif hints strip the WM frame) carrying the
 // same CSD chrome as the Wayland arm, so the two backends are visually
-// identical. Covers window lifecycle, the event tap, and input routing
-// (pointer, keyboard via xkbcommon, CSD drag/resize via _NET_WM_MOVERESIZE);
-// the system surface (clipboard, grab, displays) is no-op stubs that keep
-// the dispatcher surface complete.
+// identical. Covers window lifecycle, the event tap, input routing
+// (pointer, keyboard via xkbcommon, CSD drag/resize via _NET_WM_MOVERESIZE),
+// and the system surface: clipboard selections, the raw-capture pointer
+// grab (XInput2 raw motion), RandR displays, EWMH fullscreen, and the
+// Xft.dpi integer scale.
 
 const std = @import("std");
 const xcb = @import("xcb.zig");
+const xcb_randr = @import("xcb_randr.zig");
+const xcb_xfixes = @import("xcb_xfixes.zig");
+const xcb_input = @import("xcb_input.zig");
 const xkb = @import("xkbcommon.zig");
 const desktop_theme = @import("desktop_theme.zig");
 const types = @import("../../window/types.zig");
+const input = @import("../../input.zig");
 const geometry = @import("../../geometry.zig");
 const shell_types = @import("shell_types.zig");
 const csd = @import("csd.zig");
@@ -104,6 +109,44 @@ var g_atom_max_vert: u32 = 0;
 var g_atom_state_hidden: u32 = 0;
 var g_atom_state_fullscreen: u32 = 0;
 var g_atom_xkb_rules: u32 = 0;
+var g_atom_clipboard: u32 = 0;
+var g_atom_targets: u32 = 0;
+var g_atom_incr: u32 = 0;
+var g_atom_text: u32 = 0;
+var g_atom_clip_prop: u32 = 0;
+
+// ---- clipboard state (the X CLIPBOARD selection) ----
+const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+const CLIPBOARD_POLL_MS: c_int = 10;
+const CLIPBOARD_POLL_MAX: u32 = 50;
+const INCR_CHUNKS_MAX: u32 = 64;
+
+var g_own_active: bool = false;
+var g_own_text: [MAX_CLIPBOARD_BYTES]u8 = undefined;
+var g_own_len: usize = 0;
+var g_clipboard_seq: u32 = 0;
+var g_clipboard_seen: u32 = 0;
+var g_clipboard_own_seq: u32 = 0;
+var g_clipboard_primed: bool = false;
+var g_own_echo_pending: bool = false;
+var g_clip_reading: bool = false;
+var g_selection_notify: ?xcb.SelectionNotifyEvent = null;
+var g_incr_chunk_ready: bool = false;
+// One static scratch for property reads: the read path is single-threaded
+// (g_clip_reading guards reentry) and two stack copies would cost 128KiB.
+var g_clip_scratch: [MAX_CLIPBOARD_BYTES]u8 = undefined;
+
+// ---- grab state (raw capture, the windows RegisterRawInputDevices model) ----
+var g_grabbed: bool = false;
+var g_grab_win: ?*X11Window = null;
+var g_raw_mods: input.Mods = .{};
+var g_mod_caps: u32 = xkb.MOD_INVALID;
+var g_blank_cursor: u32 = 0;
+var g_xi_ready: bool = false;
+
+// The Xft.dpi integer scale resolved once at connect; X11 has no per-output
+// scale protocol, so every window shares it (the windows DPI model).
+var g_scale: i32 = 1;
 
 pub const CustomShellHandle = struct {
     window: *X11Window,
@@ -121,9 +164,18 @@ pub const CustomShellHandle = struct {
         return self.window.fullscreen;
     }
 
+    // The WM owns the transition; win.fullscreen flips when the resulting
+    // _NET_WM_STATE PropertyNotify lands.
     pub fn set_fullscreen(self: CustomShellHandle, on: bool) void {
         std.debug.assert(self.window.in_use);
-        _ = on;
+        if (g_atom_net_wm_state == 0 or g_atom_state_fullscreen == 0) return;
+        const action: u32 = @intFromBool(on); // _NET_WM_STATE_REMOVE / _ADD
+        send_net_message(
+            self.window.window,
+            g_atom_net_wm_state,
+            .{ action, g_atom_state_fullscreen, 0, 1, 0 },
+        );
+        xcb.flush();
     }
 
     pub fn backing_scale_factor(self: CustomShellHandle) f32 {
@@ -167,6 +219,8 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     xcb.connect() catch return error.ConnectFailed;
     intern_atoms();
     if (g_xkb_state == null) rebuild_keymap();
+    init_extensions();
+    resolve_scale();
     _ = desktop_theme.accent_color(); // warm the resolve outside the paint tick
     std.debug.assert(opts.width > 0);
     std.debug.assert(opts.height > 0);
@@ -177,16 +231,24 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     const theme = opts.theme orelse types.Theme.default_dark();
     win.width_pt = @intFromFloat(opts.width);
     win.height_pt = @intFromFloat(opts.height);
+    win.scale = g_scale;
     win.window = xcb.generate_id();
+    // The wire size is u16; the scale clamp (<=4) keeps any sane point
+    // size inside it, asserted rather than silently truncated.
+    std.debug.assert(win.width_pt * win.scale <= 0xFFFF);
+    std.debug.assert(win.height_pt * win.scale <= 0xFFFF);
     xcb.create_window(
         win.window,
-        @intCast(win.width_pt),
-        @intCast(win.height_pt),
+        @intCast(win.width_pt * win.scale),
+        @intCast(win.height_pt * win.scale),
         pack_xrgb(theme.background),
     );
     apply_motif_undecorated(win.window);
     apply_title(win.window, opts.title);
     apply_delete_protocol(win.window);
+    if (xcb_xfixes.first_event != 0 and g_atom_clipboard != 0) {
+        xcb_xfixes.watch_selection(win.window, g_atom_clipboard);
+    }
     xcb.map_window(win.window);
     xcb.flush();
 
@@ -197,6 +259,42 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
         .theme = theme,
         .titlebar = opts.titlebar,
     };
+}
+
+// Extensions are conveniences, never requirements: a server without any of
+// them still gets windows, input, and a working (poll-based) clipboard.
+fn init_extensions() void {
+    xcb_randr.load() catch {};
+    xcb_xfixes.load() catch {};
+    xcb_input.load() catch {};
+}
+
+// Xft.dpi from the root RESOURCE_MANAGER property, the place desktops
+// publish the user's scale on X11 (Cinnamon writes 192 for 2x). Integer
+// scale only; fractional values round to the nearest whole step.
+fn resolve_scale() void {
+    const RESOURCE_MANAGER: u32 = 23;
+    var buf: [16 * 1024]u8 = undefined;
+    const screen = xcb.screen orelse return;
+    const value = xcb.read_property(screen.root, RESOURCE_MANAGER, false, &buf) orelse return;
+    const parsed = parse_xft_dpi(value.bytes) orelse return;
+    // The property is writable by any client: bound the value BEFORE the
+    // rounding arithmetic so a hostile dpi cannot overflow it.
+    const dpi = std.math.clamp(parsed, 1, 960);
+    g_scale = std.math.clamp(@divTrunc(dpi + 48, 96), 1, 4);
+    std.debug.assert(g_scale >= 1);
+    std.debug.assert(g_scale <= 4);
+}
+
+fn parse_xft_dpi(text: []const u8) ?i32 {
+    const prefix = "Xft.dpi:";
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const trimmed = std.mem.trim(u8, line[prefix.len..], " \t");
+        return std.fmt.parseInt(i32, trimmed, 10) catch null;
+    }
+    return null;
 }
 
 fn intern_atoms() void {
@@ -214,6 +312,11 @@ fn intern_atoms() void {
     g_atom_state_hidden = xcb.intern_atom("_NET_WM_STATE_HIDDEN");
     g_atom_state_fullscreen = xcb.intern_atom("_NET_WM_STATE_FULLSCREEN");
     g_atom_xkb_rules = xcb.intern_atom("_XKB_RULES_NAMES");
+    g_atom_clipboard = xcb.intern_atom("CLIPBOARD");
+    g_atom_targets = xcb.intern_atom("TARGETS");
+    g_atom_incr = xcb.intern_atom("INCR");
+    g_atom_text = xcb.intern_atom("TEXT");
+    g_atom_clip_prop = xcb.intern_atom("ZIGUI_CLIP");
 }
 
 fn apply_motif_undecorated(window: u32) void {
@@ -253,8 +356,30 @@ fn alloc_window() ?*X11Window {
     return null;
 }
 
+// The global callback ctx pointers may still name the closing window's
+// (freed) paint; repoint them at the root window so the next hover or key
+// does not dispatch into torn-down state.
+fn retire_surface_ctx(win: *X11Window) void {
+    const closing = win.surface_ctx orelse return;
+    const root = &g_windows[0];
+    const fallback = if (root != win and root.in_use) root.surface_ctx else null;
+    if (g_ctx == closing) g_ctx = fallback;
+    if (g_dispatch) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    if (g_raw) |*d| {
+        if (d.ctx == closing) {
+            if (fallback) |f| d.ctx = f;
+        }
+    }
+    win.surface_ctx = null;
+}
+
 fn destroy_window(win: *X11Window) void {
     std.debug.assert(win.in_use);
+    retire_surface_ctx(win);
     // The slab slot is reused by the next open(); a stale focus pointer would
     // route input into it. No leave event is guaranteed on programmatic close.
     if (g_pointer_focus == win) {
@@ -264,6 +389,7 @@ fn destroy_window(win: *X11Window) void {
         set_hover_caption(.none);
     }
     if (g_keyboard_focus == win) g_keyboard_focus = null;
+    if (g_grab_win == win) set_grab(false);
     field.forget_window(win);
     if (win.window != 0) xcb.destroy_window(win.window);
     xcb.flush();
@@ -304,11 +430,12 @@ fn handle_event(event: *xcb.GenericEvent) void {
         xcb.CONFIGURE_NOTIFY => {
             const configure: *const xcb.ConfigureNotifyEvent = @ptrCast(event);
             const win = window_by_id(configure.window) orelse return;
-            const w: i32 = @intCast(configure.width);
-            const h: i32 = @intCast(configure.height);
+            std.debug.assert(win.scale >= 1);
+            const w = @max(@divTrunc(@as(i32, @intCast(configure.width)), win.scale), 1);
+            const h = @max(@divTrunc(@as(i32, @intCast(configure.height)), win.scale), 1);
             if (w == win.width_pt and h == win.height_pt) return;
-            win.width_pt = @max(w, 1);
-            win.height_pt = @max(h, 1);
+            win.width_pt = w;
+            win.height_pt = h;
             paint_now(win);
         },
         xcb.EXPOSE => {
@@ -331,15 +458,47 @@ fn handle_event(event: *xcb.GenericEvent) void {
         xcb.FOCUS_IN => on_focus(@ptrCast(event), true),
         xcb.FOCUS_OUT => on_focus(@ptrCast(event), false),
         xcb.KEY_PRESS => on_key_press(@ptrCast(event)),
-        // Server-side autorepeat re-sends KeyPress while held; releases
-        // carry no input of their own, so no client repeat timer exists.
-        xcb.KEY_RELEASE => {},
+        xcb.KEY_RELEASE => on_key_release(@ptrCast(event)),
         // A layout change invalidates the compiled keymap (core mapping or
         // xkb group switch both raise this).
         xcb.MAPPING_NOTIFY => rebuild_keymap(),
         xcb.PROPERTY_NOTIFY => on_property(@ptrCast(event)),
-        else => {},
+        xcb.SELECTION_REQUEST => on_selection_request(@ptrCast(event)),
+        xcb.SELECTION_CLEAR => on_selection_clear(@ptrCast(event)),
+        // Replies to our convert_selection; the read loop consumes the stash.
+        xcb.SELECTION_NOTIFY => {
+            const notify: *const xcb.SelectionNotifyEvent = @ptrCast(event);
+            g_selection_notify = notify.*;
+        },
+        xcb.GE_GENERIC => on_ge_event(@ptrCast(event)),
+        else => on_extension_event(kind),
     }
+}
+
+// XFixes selection events land at a runtime offset (first_event), so they
+// route from the switch's else arm.
+fn on_extension_event(kind: u8) void {
+    if (xcb_xfixes.first_event == 0 or kind != xcb_xfixes.first_event) return;
+    g_clipboard_seq +%= 1;
+    if (g_own_echo_pending) {
+        g_clipboard_own_seq = g_clipboard_seq;
+        g_own_echo_pending = false;
+    }
+}
+
+fn on_ge_event(event: *const xcb.GeGenericEvent) void {
+    if (xcb_input.opcode == 0 or event.extension != xcb_input.opcode) return;
+    if (event.event_type != xcb_input.RAW_MOTION) return;
+    if (!g_grabbed) return;
+    const d = g_raw orelse return;
+    const delta = xcb_input.raw_motion_delta(event);
+    if (delta.dx == 0 and delta.dy == 0) return;
+    // Unaccelerated deltas: the remote end applies its own pointer
+    // ballistics, the same channel windows raw input reports.
+    d.on_event(ctx_for(g_grab_win, d.ctx), .{ .motion = .{
+        .dx = delta.dx,
+        .dy = delta.dy,
+    } });
 }
 
 fn paint_now(win: *X11Window) void {
@@ -408,11 +567,17 @@ fn sync_mods(state: u16) void {
     xkb.update_mask(xkb_state, state & 0xff, 0, 0, (state >> 13) & 3);
 }
 
+fn px_to_pt(win: *const X11Window, value: i16) f32 {
+    std.debug.assert(win.scale >= 1);
+    return @as(f32, @floatFromInt(value)) / @as(f32, @floatFromInt(win.scale));
+}
+
 fn on_motion(ev: *const xcb.InputDeviceEvent) void {
+    if (g_grabbed) return; // a grabbed pointer reports motion only via XI raw
     const win = window_by_id(ev.event) orelse return;
     g_pointer_focus = win;
-    g_pointer_x = @floatFromInt(ev.event_x);
-    g_pointer_y = @floatFromInt(ev.event_y);
+    g_pointer_x = px_to_pt(win, ev.event_x);
+    g_pointer_y = px_to_pt(win, ev.event_y);
     sync_mods(ev.state);
     update_hover_and_cursor(win);
     if (g_dispatch) |d| {
@@ -451,8 +616,8 @@ fn set_hover_caption(button: CaptionButton) void {
 fn on_enter(ev: *const xcb.EnterLeaveEvent) void {
     const win = window_by_id(ev.event) orelse return;
     g_pointer_focus = win;
-    g_pointer_x = @floatFromInt(ev.event_x);
-    g_pointer_y = @floatFromInt(ev.event_y);
+    g_pointer_x = px_to_pt(win, ev.event_x);
+    g_pointer_y = px_to_pt(win, ev.event_y);
     sync_mods(ev.state);
     update_hover_and_cursor(win);
 }
@@ -468,10 +633,14 @@ fn on_leave(ev: *const xcb.EnterLeaveEvent) void {
 }
 
 fn on_button_press(ev: *const xcb.InputDeviceEvent) void {
+    if (g_grabbed) {
+        raw_button_event(ev.detail, true);
+        return;
+    }
     const win = window_by_id(ev.event) orelse return;
     g_pointer_focus = win;
-    g_pointer_x = @floatFromInt(ev.event_x);
-    g_pointer_y = @floatFromInt(ev.event_y);
+    g_pointer_x = px_to_pt(win, ev.event_x);
+    g_pointer_y = px_to_pt(win, ev.event_y);
     sync_mods(ev.state);
     switch (ev.detail) {
         1 => handle_left_press(win, ev),
@@ -525,10 +694,45 @@ fn handle_left_press(win: *X11Window, ev: *const xcb.InputDeviceEvent) void {
 }
 
 fn on_button_release(ev: *const xcb.InputDeviceEvent) void {
+    if (g_grabbed) {
+        raw_button_event(ev.detail, false);
+        return;
+    }
     const win = window_by_id(ev.event) orelse return;
     if (ev.detail != 1) return;
     sync_mods(ev.state);
     handle_left_release(win);
+}
+
+fn raw_button_event(button: u8, down: bool) void {
+    std.debug.assert(g_grabbed);
+    const d = g_raw orelse return;
+    const ctx = ctx_for(g_grab_win, d.ctx);
+    // Wheel detents stream as wheel events, not buttons, mirroring the
+    // Wayland arm's grabbed-axis path.
+    if (button >= 4 and button <= 7) {
+        if (!down) return;
+        const notch = shell_types.WHEEL_NOTCH_PT;
+        const ev: input.InputEvent = switch (button) {
+            4 => .{ .wheel = .{ .dx = 0, .dy = notch } },
+            5 => .{ .wheel = .{ .dx = 0, .dy = -notch } },
+            6 => .{ .wheel = .{ .dx = notch, .dy = 0 } },
+            else => .{ .wheel = .{ .dx = -notch, .dy = 0 } },
+        };
+        d.on_event(ctx, ev);
+        return;
+    }
+    const mapped: input.Button = switch (button) {
+        1 => .left,
+        2 => .middle,
+        3 => .right,
+        else => .other,
+    };
+    d.on_event(ctx, .{ .button = .{
+        .button = mapped,
+        .down = down,
+        .mods = g_raw_mods,
+    } });
 }
 
 fn handle_left_release(win: *X11Window) void {
@@ -687,6 +891,7 @@ fn rebuild_keymap() void {
     g_mod_shift = xkb.mod_index(keymap, "Shift");
     g_mod_ctrl = xkb.mod_index(keymap, "Control");
     g_mod_alt = xkb.mod_index(keymap, "Mod1");
+    g_mod_caps = xkb.mod_index(keymap, "Lock");
 }
 
 // The property is five NUL-terminated strings back to back: rules, model,
@@ -710,6 +915,10 @@ fn fill_rule_names(names: *xkb.RuleNames, raw: []const u8) void {
 }
 
 fn on_key_press(ev: *const xcb.InputDeviceEvent) void {
+    if (g_grabbed) {
+        raw_key_event(@as(u32, ev.detail) - 8, true);
+        return;
+    }
     const win = window_by_id(ev.event) orelse return;
     g_keyboard_focus = win;
     sync_mods(ev.state);
@@ -734,6 +943,29 @@ fn on_key_press(ev: *const xcb.InputDeviceEvent) void {
         return;
     }
     if (g_dispatch) |d| d.on_key(ctx_for(win, d.ctx), event);
+}
+
+// Server-side autorepeat re-sends KeyPress while held; outside a grab a
+// release carries no input of its own, so no client repeat timer exists.
+fn on_key_release(ev: *const xcb.InputDeviceEvent) void {
+    if (!g_grabbed) return;
+    raw_key_event(@as(u32, ev.detail) - 8, false);
+}
+
+fn raw_key_event(key: u32, down: bool) void {
+    std.debug.assert(g_grabbed);
+    key_translate.update_raw_mods(&g_raw_mods, key, down, g_xkb_state, g_mod_caps);
+    if (down and key == key_translate.KEY_ESC) {
+        set_grab(false);
+        return;
+    }
+    const d = g_raw orelse return;
+    std.debug.assert(key <= std.math.maxInt(u16));
+    d.on_event(ctx_for(g_grab_win, d.ctx), .{ .key = .{
+        .scancode = @intCast(key),
+        .down = down,
+        .mods = g_raw_mods,
+    } });
 }
 
 // ---- focus + window state ----
@@ -779,6 +1011,11 @@ fn refresh_desktop_prefs() void {
 }
 
 fn on_property(ev: *const xcb.PropertyNotifyEvent) void {
+    // state 0 is NewValue: an INCR sender wrote the next clipboard chunk.
+    if (ev.atom != 0 and ev.atom == g_atom_clip_prop and ev.state == 0) {
+        g_incr_chunk_ready = true;
+        return;
+    }
     if (ev.atom == 0 or ev.atom != g_atom_net_wm_state) return;
     const win = window_by_id(ev.window) orelse return;
     refresh_wm_state(win);
@@ -866,23 +1103,237 @@ pub fn current_shift_down() bool {
     return g_shift_down;
 }
 
-// ---- system surface (no-op stubs) ----
+// ---- pointer grab (remote-control capture) ----
 
+// Confine + hide the pointer with a core grab and stream raw input through
+// the registered RawDispatch; relative motion rides XInput2 raw events (the
+// channel that skips pointer acceleration). Without the XInput extension
+// the grab still confines but streams no motion, and is_grabbed() reports
+// the grab honestly either way.
 pub fn set_grab(on: bool) void {
-    _ = on;
+    if (on == g_grabbed) return;
+    if (on) {
+        const win = g_keyboard_focus orelse g_pointer_focus orelse return;
+        const mask: u16 = @intCast(xcb.EVENT_MASK_BUTTON_PRESS |
+            xcb.EVENT_MASK_BUTTON_RELEASE | xcb.EVENT_MASK_POINTER_MOTION);
+        std.debug.assert(win.in_use);
+        if (!xcb.grab_pointer(win.window, mask, win.window, ensure_blank_cursor())) return;
+        if (xcb_input.opcode != 0) xcb_input.select_raw_motion(xcb.screen.?.root);
+        g_grab_win = win;
+        g_grabbed = true;
+    } else {
+        g_grabbed = false;
+        g_grab_win = null;
+        g_raw_mods = .{};
+        xcb.ungrab_pointer(xcb.TIME_CURRENT);
+        if (xcb_input.opcode != 0) xcb_input.clear_raw_motion(xcb.screen.?.root);
+    }
+    xcb.flush();
 }
 
 pub fn is_grabbed() bool {
+    return g_grabbed;
+}
+
+// The windows foreground-window check, in X11 terms: keyboard focus gone
+// means another window took over, so the capture must not linger.
+pub fn release_grab_if_blurred() void {
+    if (!g_grabbed) return;
+    if (g_keyboard_focus == null) set_grab(false);
+}
+
+// A cursor whose source and mask pixmaps are both empty draws nothing: the
+// core protocol's way to hide the pointer for the duration of a grab.
+fn ensure_blank_cursor() u32 {
+    if (g_blank_cursor != 0) return g_blank_cursor;
+    const pixmap = xcb.generate_id();
+    xcb.create_pixmap(1, pixmap, xcb.screen.?.root, 1, 1);
+    g_blank_cursor = xcb.generate_id();
+    xcb.create_cursor_from_pixmap(g_blank_cursor, pixmap, pixmap);
+    xcb.free_pixmap(pixmap);
+    std.debug.assert(g_blank_cursor != 0);
+    return g_blank_cursor;
+}
+
+// ---- clipboard (the X CLIPBOARD selection) ----
+
+// Serves a selection request from the owned local copy: TARGETS, then the
+// text targets; anything else is refused with property None.
+fn on_selection_request(ev: *const xcb.SelectionRequestEvent) void {
+    var granted_property: u32 = 0;
+    if (g_own_active and ev.property != 0) {
+        if (ev.target == g_atom_targets) {
+            const targets = [_]u32{ g_atom_targets, g_atom_utf8_string, xcb.ATOM_STRING };
+            xcb.change_property(ev.requestor, ev.property, xcb.ATOM_ATOM, 32, 3, &targets);
+            granted_property = ev.property;
+        } else if (is_text_target(ev.target)) {
+            std.debug.assert(g_own_len <= MAX_CLIPBOARD_BYTES);
+            xcb.change_property(
+                ev.requestor,
+                ev.property,
+                ev.target,
+                8,
+                @intCast(g_own_len),
+                &g_own_text,
+            );
+            granted_property = ev.property;
+        }
+    }
+    var reply = [_]u32{0} ** 8;
+    const notify: *xcb.SelectionNotifyEvent = @ptrCast(&reply);
+    notify.response_type = xcb.SELECTION_NOTIFY;
+    notify.time = ev.time;
+    notify.requestor = ev.requestor;
+    notify.selection = ev.selection;
+    notify.target = ev.target;
+    notify.property = granted_property;
+    xcb.send_event_to(ev.requestor, @ptrCast(&reply));
+    xcb.flush();
+}
+
+fn is_text_target(target: u32) bool {
+    return target == g_atom_utf8_string or target == xcb.ATOM_STRING or target == g_atom_text;
+}
+
+fn on_selection_clear(ev: *const xcb.SelectionClearEvent) void {
+    if (ev.selection != g_atom_clipboard) return;
+    g_own_active = false;
+}
+
+pub fn pasteboard_write_string(text: []const u8) void {
+    if (g_atom_clipboard == 0) return;
+    const win = g_keyboard_focus orelse g_pointer_focus orelse first_window() orelse return;
+    std.debug.assert(win.in_use);
+    g_own_len = @min(text.len, MAX_CLIPBOARD_BYTES);
+    @memcpy(g_own_text[0..g_own_len], text[0..g_own_len]);
+    g_own_active = true;
+    g_own_echo_pending = true;
+    xcb.set_selection_owner(win.window, g_atom_clipboard);
+    xcb.flush();
+}
+
+fn first_window() ?*X11Window {
+    for (&g_windows) |*win| {
+        if (win.in_use) return win;
+    }
+    return null;
+}
+
+pub fn pasteboard_read_into(buf: []u8) []const u8 {
+    if (buf.len == 0) return "";
+    if (g_atom_clipboard == 0 or g_atom_clip_prop == 0) return "";
+    // Our own selection reads back from the local copy: a conversion would
+    // route to OUR request handler, which cannot answer while this thread
+    // waits on the reply (one thread owns both ends of that dance).
+    if (g_own_active) {
+        const n = @min(g_own_len, buf.len);
+        @memcpy(buf[0..n], g_own_text[0..n]);
+        return buf[0..n];
+    }
+    if (g_clip_reading) return ""; // a nested paste re-entered the wait loop
+    const win = first_window() orelse return "";
+    g_clip_reading = true;
+    defer g_clip_reading = false;
+    if (read_selection(win, g_atom_utf8_string, buf)) |text| return text;
+    // Older owners only speak STRING (Latin-1; ASCII reads fine either way).
+    if (read_selection(win, xcb.ATOM_STRING, buf)) |text| return text;
+    return "";
+}
+
+fn read_selection(win: *X11Window, target: u32, buf: []u8) ?[]const u8 {
+    std.debug.assert(win.in_use);
+    g_selection_notify = null;
+    xcb.convert_selection(win.window, g_atom_clipboard, target, g_atom_clip_prop);
+    xcb.flush();
+    const notify = wait_selection_notify() orelse return null;
+    if (notify.property == 0) return null; // the owner refused this target
+    const value = xcb.read_property(win.window, g_atom_clip_prop, true, &g_clip_scratch) orelse
+        return buf[0..0];
+    if (value.property_type == g_atom_incr) return read_incr(win, buf);
+    const n = @min(value.bytes.len, buf.len);
+    @memcpy(buf[0..n], value.bytes[0..n]);
+    return buf[0..n];
+}
+
+// Blocks bounded on the xcb fd while the owner answers; selection traffic is
+// consumed here, everything else flows through the normal handler. Key
+// events are dropped for the wait's duration - a keystroke racing a paste
+// reply has no sound ordering anyway.
+fn wait_selection_notify() ?xcb.SelectionNotifyEvent {
+    var spins: u32 = 0;
+    while (spins < CLIPBOARD_POLL_MAX) : (spins += 1) {
+        drain_for_selection();
+        if (g_selection_notify) |notify| return notify;
+        var pfd = clip_pollfd{ .fd = xcb.connection_fd(), .events = POLLIN, .revents = 0 };
+        _ = poll(&pfd, 1, CLIPBOARD_POLL_MS);
+    }
+    return null;
+}
+
+fn drain_for_selection() void {
+    var guard: u32 = 0;
+    while (xcb.poll_event()) |event| : (guard += 1) {
+        std.debug.assert(guard < 4096);
+        const kind = event.response_type & 0x7f;
+        if (kind != xcb.KEY_PRESS and kind != xcb.KEY_RELEASE) handle_event(event);
+        xcb.free_event(event);
+    }
+}
+
+// INCR transfer: the owner deletes-and-refills the property chunk by chunk;
+// a zero-length chunk ends the stream. Bounded by the clipboard cap.
+fn read_incr(win: *X11Window, buf: []u8) []const u8 {
+    std.debug.assert(win.in_use);
+    var len: usize = 0;
+    var chunks: u32 = 0;
+    g_incr_chunk_ready = false;
+    while (chunks < INCR_CHUNKS_MAX) : (chunks += 1) {
+        if (!wait_incr_chunk()) break;
+        g_incr_chunk_ready = false;
+        const value =
+            xcb.read_property(win.window, g_atom_clip_prop, true, &g_clip_scratch) orelse break;
+        if (value.bytes.len == 0) break; // end-of-stream marker
+        const n = @min(value.bytes.len, buf.len - len);
+        @memcpy(buf[len .. len + n], value.bytes[0..n]);
+        len += n;
+        if (len == buf.len) break;
+    }
+    return buf[0..len];
+}
+
+fn wait_incr_chunk() bool {
+    var spins: u32 = 0;
+    while (spins < CLIPBOARD_POLL_MAX) : (spins += 1) {
+        drain_for_selection();
+        if (g_incr_chunk_ready) return true;
+        var pfd = clip_pollfd{ .fd = xcb.connection_fd(), .events = POLLIN, .revents = 0 };
+        _ = poll(&pfd, 1, CLIPBOARD_POLL_MS);
+    }
     return false;
 }
 
-pub fn release_grab_if_blurred() void {}
+extern "c" fn poll(fds: *clip_pollfd, nfds: c_ulong, timeout: c_int) c_int;
+const clip_pollfd = extern struct { fd: i32, events: i16, revents: i16 };
+const POLLIN: i16 = 1;
+
+// Edge-triggered external-change poll, the windows clipboard-sequence shape:
+// prime on first call, then report each new selection once unless it was the
+// echo of our own write. The sequence ticks from XFixes selection events.
+pub fn clipboard_changed_external() bool {
+    if (!g_clipboard_primed) {
+        g_clipboard_primed = true;
+        g_clipboard_seen = g_clipboard_seq;
+        return false;
+    }
+    if (g_clipboard_seq == g_clipboard_seen) return false;
+    g_clipboard_seen = g_clipboard_seq;
+    return g_clipboard_seq != g_clipboard_own_seq;
+}
 
 // ---- text field (the singleton editor) ----
 
 // The editing engine lives in field.zig (shared with the Wayland arm); this
-// arm contributes the key-window gate. The clipboard is not wired on X11,
-// so paste/copy quietly no-op.
+// arm contributes the key-window gate and its selection-based clipboard.
 
 const field_clipboard = field.Clipboard{
     .read_into = pasteboard_read_into,
@@ -938,28 +1389,36 @@ pub fn text_field_secure() bool {
     return field.secure();
 }
 
-pub fn pasteboard_read_into(buf: []u8) []const u8 {
-    _ = buf;
-    return "";
-}
-
-pub fn pasteboard_write_string(text: []const u8) void {
-    _ = text;
-}
-
-pub fn clipboard_changed_external() bool {
-    return false;
-}
-
 pub fn desktop_accent_color() ?types.Rgba {
     return desktop_theme.accent_color();
 }
 
+// Live RandR queries: display lookups are user-driven (no per-frame
+// callers), so a fresh roundtrip beats caching plus change events.
 pub fn display_count() u32 {
-    return 0;
+    const screen = xcb.screen orelse return 0;
+    var monitors: [xcb_randr.MAX_MONITORS]xcb_randr.Monitor = undefined;
+    return xcb_randr.monitors(screen.root, &monitors);
 }
 
+// Bounds in points (pixels over the integer scale), origin in the X screen's
+// global space - the same logical space the Wayland arm reports.
 pub fn display_bounds(index: u32) geometry.BoundsF {
-    _ = index;
-    return .{};
+    const screen = xcb.screen orelse return .{};
+    var monitors: [xcb_randr.MAX_MONITORS]xcb_randr.Monitor = undefined;
+    const count = xcb_randr.monitors(screen.root, &monitors);
+    if (index >= count) return .{};
+    const monitor = monitors[index];
+    std.debug.assert(g_scale >= 1);
+    const scale: f32 = @floatFromInt(g_scale);
+    return .{
+        .origin = .{
+            .x = @as(f32, @floatFromInt(monitor.x)) / scale,
+            .y = @as(f32, @floatFromInt(monitor.y)) / scale,
+        },
+        .size = .{
+            .width = @as(f32, @floatFromInt(monitor.width)) / scale,
+            .height = @as(f32, @floatFromInt(monitor.height)) / scale,
+        },
+    };
 }
