@@ -4,8 +4,11 @@
 
 const std = @import("std");
 const wl = @import("wayland.zig");
+const xcb = @import("xcb.zig");
 const loop = @import("loop.zig");
+const backend = @import("backend.zig");
 const shell = @import("custom_shell.zig");
+const x11_shell = @import("x11_shell.zig");
 
 const pollfd = extern struct { fd: i32, events: i16, revents: i16 };
 extern "c" fn poll(fds: [*]pollfd, count: c_ulong, timeout_ms: c_int) c_int;
@@ -21,24 +24,31 @@ pub const Error = error{InitFailed};
 
 pub const App = struct {
     pub fn init() Error!App {
-        wl.connect() catch return error.InitFailed;
-        std.debug.assert(wl.conn.display != null);
-        std.debug.assert(wl.conn.compositor != null);
+        backend.resolve() catch return error.InitFailed;
+        if (backend.active == .wayland) {
+            std.debug.assert(wl.conn.display != null);
+            std.debug.assert(wl.conn.compositor != null);
+        } else {
+            std.debug.assert(xcb.conn != null);
+        }
         return .{};
     }
 
     pub fn deinit(self: App) void {
         _ = self;
-        wl.disconnect();
+        switch (backend.active) {
+            .wayland => wl.disconnect(),
+            .x11 => xcb.disconnect(),
+        }
     }
 
-    // No dock/activation concept on Wayland; kept for API parity.
+    // No dock/activation concept on Linux; kept for API parity.
     pub fn set_activation_policy(self: App, policy: ActivationPolicy) void {
         _ = self;
         _ = policy;
     }
 
-    // No app menu bar on Wayland; kept for API parity so shared examples compile.
+    // No app menu bar on Linux; kept for API parity so shared examples compile.
     pub fn install_edit_menu(self: App) void {
         _ = self;
     }
@@ -51,6 +61,13 @@ pub const App = struct {
 
     pub fn run_forever(self: App) void {
         _ = self;
+        switch (backend.active) {
+            .wayland => run_wayland(),
+            .x11 => run_x11(),
+        }
+    }
+
+    fn run_wayland() void {
         std.debug.assert(wl.conn.display != null);
         std.debug.assert(!wl.quit_requested);
         while (!wl.quit_requested) {
@@ -70,10 +87,30 @@ pub const App = struct {
         }
     }
 
+    fn run_x11() void {
+        std.debug.assert(xcb.conn != null);
+        std.debug.assert(!x11_shell.quit_requested);
+        while (!x11_shell.quit_requested) {
+            xcb.flush();
+            var fds = [_]pollfd{.{ .fd = xcb.connection_fd(), .events = POLLIN, .revents = 0 }};
+            _ = poll(&fds, 1, TICK_MS);
+            x11_shell.process_events();
+            shell.tick_key_repeat();
+            loop.tick_all();
+        }
+    }
+
     pub fn quit(self: App) void {
         _ = self;
-        std.debug.assert(wl.conn.display != null);
-        wl.quit_requested = true;
-        wl.flush();
+        switch (backend.active) {
+            .wayland => {
+                std.debug.assert(wl.conn.display != null);
+                wl.quit_requested = true;
+                wl.flush();
+            },
+            .x11 => {
+                x11_shell.quit_requested = true;
+            },
+        }
     }
 };

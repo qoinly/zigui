@@ -7,8 +7,7 @@
 
 const std = @import("std");
 const vk = @import("vulkan.zig");
-const wl = @import("wayland.zig");
-const shell = @import("custom_shell.zig");
+const backend = @import("backend.zig");
 const primitives = @import("../../primitives.zig");
 
 const Primitive = primitives.Primitive;
@@ -259,7 +258,7 @@ const Offscreen = struct {
 };
 
 pub const Renderer = struct {
-    win: *shell.ShellWindow,
+    win: *anyopaque,
     instance: ?*vk.Instance = null,
     ifns: vk.InstanceFns = undefined,
     physical_device: ?*vk.PhysicalDevice = null,
@@ -352,13 +351,12 @@ pub const Renderer = struct {
     };
 
     pub fn init(target: *anyopaque) Error!Renderer {
-        // target is the ShellWindow behind CustomShellHandle.metal_layer.
-        const win: *shell.ShellWindow = @ptrCast(@alignCast(target));
-        std.debug.assert(win.in_use);
-        std.debug.assert(win.surface != null);
+        // target is the backend window behind CustomShellHandle.metal_layer;
+        // backend.zig knows which arm opened it.
+        std.debug.assert(backend.window_in_use(target));
         vk.load() catch return error.LoaderMissing;
 
-        var self = Renderer{ .win = win };
+        var self = Renderer{ .win = target };
         errdefer self.deinit();
 
         try self.create_instance();
@@ -406,7 +404,7 @@ pub const Renderer = struct {
         );
         try self.build_blit_pipelines();
 
-        shell.renderer_takeover(win);
+        backend.renderer_takeover(target);
         return self;
     }
 
@@ -515,7 +513,7 @@ pub const Renderer = struct {
 
     fn create_instance(self: *Renderer) Error!void {
         std.debug.assert(self.instance == null);
-        const extensions = [_][*:0]const u8{ "VK_KHR_surface", "VK_KHR_wayland_surface" };
+        const extensions = [_][*:0]const u8{ "VK_KHR_surface", backend.vk_surface_extension() };
         const app_info = vk.ApplicationInfo{ .application_name = "zigui" };
         const info = vk.InstanceCreateInfo{
             .application_info = &app_info,
@@ -532,17 +530,39 @@ pub const Renderer = struct {
     fn create_surface(self: *Renderer) Error!void {
         std.debug.assert(self.instance != null);
         std.debug.assert(self.surface == vk.NULL_HANDLE);
-        const display = wl.conn.display orelse return error.SurfaceCreateFailed;
-        const info = vk.WaylandSurfaceCreateInfoKHR{
-            .display = @ptrCast(display),
-            .surface = @ptrCast(self.win.surface.?),
-        };
-        const rc = self.ifns.vkCreateWaylandSurfaceKHR(self.instance.?, &info, null, &self.surface);
-        if (rc != vk.SUCCESS) return error.SurfaceCreateFailed;
+        const instance = self.instance.?;
+        switch (backend.active) {
+            .wayland => {
+                const target = backend.wayland_target(self.win) orelse
+                    return error.SurfaceCreateFailed;
+                const create: vk.CreateWaylandSurfaceFn = @ptrCast(
+                    vk.get_instance_proc_addr(instance, "vkCreateWaylandSurfaceKHR") orelse
+                        return error.SurfaceCreateFailed,
+                );
+                const info = vk.WaylandSurfaceCreateInfoKHR{
+                    .display = target.display,
+                    .surface = target.surface,
+                };
+                if (create(instance, &info, null, &self.surface) != vk.SUCCESS)
+                    return error.SurfaceCreateFailed;
+            },
+            .x11 => {
+                const target = backend.xcb_target(self.win) orelse
+                    return error.SurfaceCreateFailed;
+                const create: vk.CreateXcbSurfaceFn = @ptrCast(
+                    vk.get_instance_proc_addr(instance, "vkCreateXcbSurfaceKHR") orelse
+                        return error.SurfaceCreateFailed,
+                );
+                const info = vk.XcbSurfaceCreateInfoKHR{
+                    .connection = target.connection,
+                    .window = target.window,
+                };
+                if (create(instance, &info, null, &self.surface) != vk.SUCCESS)
+                    return error.SurfaceCreateFailed;
+            },
+        }
     }
 
-    // First device with a graphics queue that can present to the surface; no
-    // discrete-vs-integrated ranking until a machine shows it matters.
     fn pick_device(self: *Renderer) Error!void {
         std.debug.assert(self.instance != null);
         var count: u32 = MAX_PHYSICAL_DEVICES;
@@ -637,11 +657,13 @@ pub const Renderer = struct {
     // The shell's configured points times the output's integer scale: the
     // unit relationship every encoder's point-space viewport relies on.
     fn pixel_extent(self: *const Renderer) vk.Extent2D {
-        std.debug.assert(self.win.scale >= 1);
-        const scale: u32 = @intCast(self.win.scale);
+        const size = backend.window_size_pt(self.win);
+        const win_scale = backend.window_scale(self.win);
+        std.debug.assert(win_scale >= 1);
+        const scale: u32 = @intCast(win_scale);
         return .{
-            .width = @as(u32, @intCast(@max(self.win.width_pt, 1))) * scale,
-            .height = @as(u32, @intCast(@max(self.win.height_pt, 1))) * scale,
+            .width = @as(u32, @intCast(@max(size[0], 1))) * scale,
+            .height = @as(u32, @intCast(@max(size[1], 1))) * scale,
         };
     }
 
@@ -1539,11 +1561,11 @@ pub const Renderer = struct {
             self.recreate_swapchain() catch return;
             self.dirty = true;
         }
-        const scale = @max(self.win.scale, 1);
+        const scale = @max(backend.window_scale(self.win), 1);
         if (scale != self.applied_scale) {
-            // Double-buffered surface state: the present's commit applies it
-            // together with the first buffer sized for the new scale.
-            wl.surface_set_buffer_scale(self.win.surface.?, scale);
+            // On Wayland this is double-buffered surface state, applied by
+            // the present's commit with the first buffer at the new scale.
+            backend.apply_buffer_scale(self.win, scale);
             self.applied_scale = scale;
             self.dirty = true;
         }
