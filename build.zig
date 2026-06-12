@@ -34,13 +34,13 @@ fn add_shadergen(b: *std.Build) void {
         "quad.vert",         "quad.frag",
         "text.vert",         "text.frag",
         "frame.vert",        "frame_rgba.frag",
-        "frame_nv12.frag",   "color_sprite.vert",
-        "color_sprite.frag", "polyline.vert",
-        "polyline.frag",     "line.vert",
-        "line.frag",         "ring.vert",
-        "ring.frag",         "blit.vert",
-        "blit.frag",         "blur_h.frag",
-        "blur_v.frag",
+        "frame_nv12.frag",   "frame_ycbcr.frag",
+        "color_sprite.vert", "color_sprite.frag",
+        "polyline.vert",     "polyline.frag",
+        "line.vert",         "line.frag",
+        "ring.vert",         "ring.frag",
+        "blit.vert",         "blit.frag",
+        "blur_h.frag",       "blur_v.frag",
     };
     for (stages) |stage| {
         const run = b.addSystemCommand(&.{ "glslang", "-V" });
