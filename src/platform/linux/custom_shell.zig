@@ -943,11 +943,14 @@ fn caption_button_at(win: *const ShellWindow, x: f32, y: f32) CaptionButton {
     // Slots end right_margin short of the edge, mirroring the paint layer's
     // centre formula; the margin itself stays draggable band.
     const right = w - (CAPTION_CLUSTER_W - CAPTION_BTN_W * 3);
-    if (x >= right) return .none;
-    if (x >= right - CAPTION_BTN_W) return .close;
-    if (x >= right - CAPTION_BTN_W * 2) return .maximize;
-    if (x >= right - CAPTION_BTN_W * 3) return .minimize;
-    return .none;
+    // Inclusive lower edge: the exact left-boundary pixel is representable
+    // in wl_fixed and must land in the outermost slot, not past it.
+    if (x >= right or x <= right - CAPTION_BTN_W * 3) return .none;
+    const slot: u8 = @intFromFloat((right - x) / CAPTION_BTN_W);
+    std.debug.assert(slot < 3);
+    const slots = caption_slots();
+    if (slot >= slots.count) return .none;
+    return slots.kinds[slot];
 }
 
 // xdg resize-edge codes: top=1 bottom=2 left=4 right=8, corners are their OR.
@@ -1249,6 +1252,23 @@ fn on_keyboard_enter(
     _ = keys;
     std.debug.assert(keyboard != null);
     g_keyboard_focus = window_by_surface(surface);
+    refresh_desktop_prefs();
+}
+
+// Focus gain is the moment a user returns from the settings panel, so the
+// accent and button-layout caches re-resolve here; the throttle keeps an
+// alt-tab storm from spawning a gsettings process per switch.
+const PREFS_REFRESH_MIN_MS: i64 = 1000;
+var g_prefs_refresh_ms: i64 = 0;
+
+fn refresh_desktop_prefs() void {
+    const now = now_ms();
+    if (now - g_prefs_refresh_ms < PREFS_REFRESH_MIN_MS) return;
+    g_prefs_refresh_ms = now;
+    desktop_theme.refresh();
+    if (g_redraw) |cb| {
+        if (g_ctx) |ctx| cb(ctx);
+    }
 }
 
 fn on_keyboard_leave(
@@ -2226,6 +2246,27 @@ pub fn clipboard_changed_external() bool {
 
 pub fn desktop_accent_color() ?types.Rgba {
     return desktop_theme.accent_color();
+}
+
+// Caption slots from the desktop's button-layout, slot 0 = rightmost (the
+// paint layer's centre formula indexes from the right edge while the layout
+// string lists buttons left to right).
+pub const CaptionSlots = struct { kinds: [3]CaptionButton, count: u8 };
+
+pub fn caption_slots() CaptionSlots {
+    const layout = desktop_theme.caption_layout();
+    std.debug.assert(layout.count >= 1);
+    std.debug.assert(layout.count <= 3);
+    var out = CaptionSlots{ .kinds = .{ .none, .none, .none }, .count = layout.count };
+    var i: u8 = 0;
+    while (i < layout.count) : (i += 1) {
+        out.kinds[i] = switch (layout.kinds[layout.count - 1 - i]) {
+            .minimize => .minimize,
+            .maximize => .maximize,
+            .close => .close,
+        };
+    }
+    return out;
 }
 
 pub fn display_count() u32 {
