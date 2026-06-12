@@ -136,6 +136,59 @@ pub const PropertyNotifyEvent = extern struct {
     pad1: [3]u8,
 };
 
+pub const SelectionRequestEvent = extern struct {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    time: u32,
+    owner: u32,
+    requestor: u32,
+    selection: u32,
+    target: u32,
+    property: u32,
+};
+
+pub const SelectionNotifyEvent = extern struct {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    time: u32,
+    requestor: u32,
+    selection: u32,
+    target: u32,
+    property: u32,
+};
+
+pub const SelectionClearEvent = extern struct {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    time: u32,
+    owner: u32,
+    selection: u32,
+};
+
+// Extension events (XInput raw, XFixes selection) arrive as GE_GENERIC or at
+// the extension's first_event offset; the header carries the routing keys.
+pub const GeGenericEvent = extern struct {
+    response_type: u8,
+    extension: u8,
+    sequence: u16,
+    length: u32,
+    event_type: u16,
+};
+
+pub const ExtensionData = extern struct {
+    response_type: u8,
+    pad0: u8,
+    sequence: u16,
+    length: u32,
+    present: u8,
+    major_opcode: u8,
+    first_event: u8,
+    first_error: u8,
+};
+
 pub const GetPropertyReply = extern struct {
     response_type: u8,
     format: u8,
@@ -174,8 +227,12 @@ pub const EXPOSE: u8 = 12;
 pub const DESTROY_NOTIFY: u8 = 17;
 pub const CONFIGURE_NOTIFY: u8 = 22;
 pub const PROPERTY_NOTIFY: u8 = 28;
+pub const SELECTION_CLEAR: u8 = 29;
+pub const SELECTION_REQUEST: u8 = 30;
+pub const SELECTION_NOTIFY: u8 = 31;
 pub const CLIENT_MESSAGE: u8 = 33;
 pub const MAPPING_NOTIFY: u8 = 34;
+pub const GE_GENERIC: u8 = 35;
 
 pub const ATOM_ATOM: u32 = 4;
 pub const ATOM_STRING: u32 = 31;
@@ -290,6 +347,57 @@ const Fns = struct {
     ) callconv(.c) ?*GetPropertyReply,
     xcb_get_property_value: *const fn (*const GetPropertyReply) callconv(.c) ?*anyopaque,
     xcb_get_property_value_length: *const fn (*const GetPropertyReply) callconv(.c) c_int,
+    xcb_delete_property: *const fn (*Connection, u32, u32) callconv(.c) VoidCookie,
+    xcb_set_selection_owner: *const fn (*Connection, u32, u32, u32) callconv(.c) VoidCookie,
+    xcb_convert_selection: *const fn (
+        *Connection,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+    ) callconv(.c) VoidCookie,
+    xcb_grab_pointer: *const fn (
+        *Connection,
+        u8,
+        u32,
+        u16,
+        u8,
+        u8,
+        u32,
+        u32,
+        u32,
+    ) callconv(.c) GrabPointerCookie,
+    xcb_grab_pointer_reply: *const fn (
+        *Connection,
+        GrabPointerCookie,
+        ?*?*anyopaque,
+    ) callconv(.c) ?*GrabPointerReply,
+    xcb_create_pixmap: *const fn (*Connection, u8, u32, u32, u16, u16) callconv(.c) VoidCookie,
+    xcb_free_pixmap: *const fn (*Connection, u32) callconv(.c) VoidCookie,
+    xcb_create_cursor: *const fn (
+        *Connection,
+        u32,
+        u32,
+        u32,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+    ) callconv(.c) VoidCookie,
+    xcb_get_extension_data: *const fn (*Connection, *anyopaque) callconv(.c) ?*const ExtensionData,
+};
+
+const GrabPointerCookie = extern struct { sequence: c_uint };
+const GrabPointerReply = extern struct {
+    response_type: u8,
+    status: u8,
+    sequence: u16,
+    length: u32,
 };
 
 var fns: Fns = undefined;
@@ -490,6 +598,117 @@ pub fn get_property_into(
     const bytes: [*]const u8 = @ptrCast(value);
     @memcpy(buf[0..copy_len], bytes[0..copy_len]);
     return buf[0..copy_len];
+}
+
+pub fn delete_property(window: u32, property: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(window != 0);
+    _ = fns.xcb_delete_property(conn.?, window, property);
+}
+
+pub fn set_selection_owner(owner: u32, selection: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(selection != 0);
+    _ = fns.xcb_set_selection_owner(conn.?, owner, selection, TIME_CURRENT);
+}
+
+pub fn convert_selection(requestor: u32, selection: u32, target: u32, property: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(requestor != 0);
+    std.debug.assert(selection != 0);
+    _ = fns.xcb_convert_selection(conn.?, requestor, selection, target, property, TIME_CURRENT);
+}
+
+// A 32-byte wire event delivered to one window's client (event_mask 0), the
+// selection-protocol reply path.
+pub fn send_event_to(window: u32, event: *const [32]u8) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(window != 0);
+    _ = fns.xcb_send_event(conn.?, 0, window, 0, event);
+}
+
+// Synchronous: the grab either takes or the capture must not pretend it did.
+pub fn grab_pointer(window: u32, event_mask: u16, confine_to: u32, cursor: u32) bool {
+    std.debug.assert(conn != null);
+    std.debug.assert(window != 0);
+    const ASYNC: u8 = 1;
+    const cookie = fns.xcb_grab_pointer(
+        conn.?,
+        0,
+        window,
+        event_mask,
+        ASYNC,
+        ASYNC,
+        confine_to,
+        cursor,
+        TIME_CURRENT,
+    );
+    const reply = fns.xcb_grab_pointer_reply(conn.?, cookie, null) orelse return false;
+    const status = reply.status;
+    free(reply);
+    return status == 0; // GrabSuccess
+}
+
+pub fn create_pixmap(depth: u8, id: u32, drawable: u32, width: u16, height: u16) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(id != 0);
+    _ = fns.xcb_create_pixmap(conn.?, depth, id, drawable, width, height);
+}
+
+pub fn free_pixmap(id: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(id != 0);
+    _ = fns.xcb_free_pixmap(conn.?, id);
+}
+
+// Both pixmaps 1x1 and all colors zero yields the invisible cursor a grab
+// hides the pointer with.
+pub fn create_cursor_from_pixmap(id: u32, source: u32, mask: u32) void {
+    std.debug.assert(conn != null);
+    std.debug.assert(id != 0);
+    _ = fns.xcb_create_cursor(conn.?, id, source, mask, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+// extension is the lib's xcb_extension_t data symbol (dlsym'd by the
+// per-extension binding); the reply is cached by libxcb, do not free it.
+pub fn extension_data(extension: *anyopaque) ?*const ExtensionData {
+    std.debug.assert(conn != null);
+    const data = fns.xcb_get_extension_data(conn.?, extension) orelse return null;
+    if (data.present == 0) return null;
+    return data;
+}
+
+// Property fetch with the reply's type and the delete flag exposed: the
+// selection paths need both (INCR detection, chunk consumption).
+pub const PropertyValue = struct { bytes: []const u8, property_type: u32 };
+
+pub fn read_property(
+    window: u32,
+    property: u32,
+    delete: bool,
+    buf: []u8,
+) ?PropertyValue {
+    std.debug.assert(conn != null);
+    std.debug.assert(buf.len >= 4);
+    const long_length: u32 = @intCast(buf.len / 4);
+    const cookie = fns.xcb_get_property(
+        conn.?,
+        @intFromBool(delete),
+        window,
+        property,
+        0, // AnyPropertyType
+        0,
+        long_length,
+    );
+    const reply = fns.xcb_get_property_reply(conn.?, cookie, null) orelse return null;
+    defer free(reply);
+    if (reply.type == 0) return null;
+    const value = fns.xcb_get_property_value(reply) orelse return null;
+    const len: usize = @intCast(fns.xcb_get_property_value_length(reply));
+    const copy_len = @min(len, buf.len);
+    const bytes: [*]const u8 = @ptrCast(value);
+    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+    return .{ .bytes = buf[0..copy_len], .property_type = reply.type };
 }
 
 pub fn change_property(
