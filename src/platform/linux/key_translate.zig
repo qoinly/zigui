@@ -5,10 +5,46 @@
 const std = @import("std");
 const xkb = @import("xkbcommon.zig");
 const shell_types = @import("shell_types.zig");
+const input = @import("../../input.zig");
 
 const KeyMods = shell_types.KeyMods;
 const KeyCode = shell_types.KeyCode;
 const KeyEvent = shell_types.KeyEvent;
+
+// Evdev keycodes (linux/input-event-codes.h) the raw-capture path reads;
+// X11 core keycodes are these plus 8.
+pub const KEY_ESC: u32 = 1;
+pub const KEY_LEFTCTRL: u32 = 29;
+pub const KEY_LEFTSHIFT: u32 = 42;
+pub const KEY_RIGHTSHIFT: u32 = 54;
+pub const KEY_LEFTALT: u32 = 56;
+pub const KEY_RIGHTCTRL: u32 = 97;
+pub const KEY_RIGHTALT: u32 = 100;
+pub const KEY_LEFTMETA: u32 = 125;
+pub const KEY_RIGHTMETA: u32 = 126;
+
+// Left/right modifiers tracked from the raw evdev stream itself; xkb only
+// folds them, and the remote needs the sides apart (the input.Mods contract).
+pub fn update_raw_mods(
+    mods: *input.Mods,
+    key: u32,
+    down: bool,
+    xkb_state: ?*xkb.State,
+    caps_index: u32,
+) void {
+    switch (key) {
+        KEY_LEFTSHIFT => mods.left_shift = down,
+        KEY_RIGHTSHIFT => mods.right_shift = down,
+        KEY_LEFTCTRL => mods.left_control = down,
+        KEY_RIGHTCTRL => mods.right_control = down,
+        KEY_LEFTALT => mods.left_option = down,
+        KEY_RIGHTALT => mods.right_option = down,
+        KEY_LEFTMETA => mods.left_command = down,
+        KEY_RIGHTMETA => mods.right_command = down,
+        else => {},
+    }
+    if (xkb_state) |state| mods.caps_lock = xkb.mod_active(state, caps_index);
+}
 
 pub fn key_event_for(sym: u32, keycode: u32, state: *xkb.State, mods: KeyMods) ?KeyEvent {
     std.debug.assert(keycode >= 8);

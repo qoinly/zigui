@@ -70,16 +70,7 @@ const MAP_PRIVATE: c_int = 2;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
-// Evdev keycodes (linux/input-event-codes.h) the raw-capture path reads.
-const KEY_ESC: u32 = 1;
-const KEY_LEFTCTRL: u32 = 29;
-const KEY_LEFTSHIFT: u32 = 42;
-const KEY_RIGHTSHIFT: u32 = 54;
-const KEY_LEFTALT: u32 = 56;
-const KEY_RIGHTCTRL: u32 = 97;
-const KEY_RIGHTALT: u32 = 100;
-const KEY_LEFTMETA: u32 = 125;
-const KEY_RIGHTMETA: u32 = 126;
+const KEY_ESC = key_translate.KEY_ESC;
 const WHEEL_NOTCH_PT = shell_types.WHEEL_NOTCH_PT;
 const SEAT_CAP_POINTER: u32 = 1;
 const SEAT_CAP_KEYBOARD: u32 = 2;
@@ -1483,21 +1474,8 @@ fn raw_key_event(key: u32, down: bool) void {
     } });
 }
 
-// Left/right modifiers tracked from the raw evdev stream itself; xkb only
-// folds them, and the remote needs the sides apart (the input.Mods contract).
 fn update_raw_mods(key: u32, down: bool) void {
-    switch (key) {
-        KEY_LEFTSHIFT => g_raw_mods.left_shift = down,
-        KEY_RIGHTSHIFT => g_raw_mods.right_shift = down,
-        KEY_LEFTCTRL => g_raw_mods.left_control = down,
-        KEY_RIGHTCTRL => g_raw_mods.right_control = down,
-        KEY_LEFTALT => g_raw_mods.left_option = down,
-        KEY_RIGHTALT => g_raw_mods.right_option = down,
-        KEY_LEFTMETA => g_raw_mods.left_command = down,
-        KEY_RIGHTMETA => g_raw_mods.right_command = down,
-        else => {},
-    }
-    if (g_xkb_state) |state| g_raw_mods.caps_lock = xkb.mod_active(state, g_mod_caps);
+    key_translate.update_raw_mods(&g_raw_mods, key, down, g_xkb_state, g_mod_caps);
 }
 
 fn hide_cursor() void {
