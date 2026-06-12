@@ -293,6 +293,9 @@ pub const Renderer = struct {
     // recording, so updates never touch a set the command buffer already holds.
     frame_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
 
+    // The buffer scale the current swapchain + surface state were built for.
+    applied_scale: i32 = 1,
+
     upload_cmd: ?*vk.CommandBuffer = null,
     mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
     device_ctx: DeviceContext = undefined,
@@ -574,15 +577,33 @@ pub const Renderer = struct {
         if (rc != vk.SUCCESS) return error.SwapchainCreateFailed;
     }
 
+    // The shell's configured points times the output's integer scale: the
+    // unit relationship every encoder's point-space viewport relies on.
+    fn pixel_extent(self: *const Renderer) vk.Extent2D {
+        std.debug.assert(self.win.scale >= 1);
+        const scale: u32 = @intCast(self.win.scale);
+        return .{
+            .width = @as(u32, @intCast(@max(self.win.width_pt, 1))) * scale,
+            .height = @as(u32, @intCast(@max(self.win.height_pt, 1))) * scale,
+        };
+    }
+
     fn surface_extent(self: *Renderer, caps: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
         // 0xFFFFFFFF means the surface size is whatever the client picks; the
-        // shell's configured size is the truth (buffer scale 1).
+        // shell's configured size (scaled to buffer pixels) is the truth.
         if (caps.current_extent.width != 0xFFFFFFFF) return caps.current_extent;
-        const w: u32 = @intCast(@max(self.win.width_pt, 1));
-        const h: u32 = @intCast(@max(self.win.height_pt, 1));
+        const want = self.pixel_extent();
         return .{
-            .width = std.math.clamp(w, caps.min_image_extent.width, caps.max_image_extent.width),
-            .height = std.math.clamp(h, caps.min_image_extent.height, caps.max_image_extent.height),
+            .width = std.math.clamp(
+                want.width,
+                caps.min_image_extent.width,
+                caps.max_image_extent.width,
+            ),
+            .height = std.math.clamp(
+                want.height,
+                caps.min_image_extent.height,
+                caps.max_image_extent.height,
+            ),
         };
     }
 
@@ -1266,10 +1287,17 @@ pub const Renderer = struct {
         color_atlas: ?*anyopaque,
     ) void {
         const device = self.device orelse return;
-        const win_w: u32 = @intCast(@max(self.win.width_pt, 1));
-        const win_h: u32 = @intCast(@max(self.win.height_pt, 1));
-        if (win_w != self.extent.width or win_h != self.extent.height) {
+        const want = self.pixel_extent();
+        if (want.width != self.extent.width or want.height != self.extent.height) {
             self.recreate_swapchain() catch return;
+            self.dirty = true;
+        }
+        const scale = @max(self.win.scale, 1);
+        if (scale != self.applied_scale) {
+            // Double-buffered surface state: the present's commit applies it
+            // together with the first buffer sized for the new scale.
+            wl.surface_set_buffer_scale(self.win.surface.?, scale);
+            self.applied_scale = scale;
             self.dirty = true;
         }
         if (!self.dirty) return;
@@ -1386,6 +1414,17 @@ pub const Renderer = struct {
         _ = self.dfns.vkEndCommandBuffer(cmd);
     }
 
+    // The point-unit viewport the shaders divide by: instance data is in
+    // points while the extent is buffer pixels (points * buffer scale).
+    fn viewport_points(self: *const Renderer) [2]f32 {
+        std.debug.assert(self.applied_scale >= 1);
+        const scale: f32 = @floatFromInt(self.applied_scale);
+        return .{
+            @as(f32, @floatFromInt(self.extent.width)) / scale,
+            @as(f32, @floatFromInt(self.extent.height)) / scale,
+        };
+    }
+
     fn encode_scene(self: *Renderer, cmd: *vk.CommandBuffer, prims: []const Primitive) void {
         std.debug.assert(prims.len <= MAX_QUADS * 8); // sane per-frame ceiling
         var quad_offset: u32 = 0;
@@ -1468,10 +1507,7 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = [2]f32{
-            @floatFromInt(self.extent.width),
-            @floatFromInt(self.extent.height),
-        };
+        const viewport_pt = self.viewport_points();
         self.dfns.vkCmdPushConstants(
             cmd,
             pipe.layout,
@@ -1507,10 +1543,7 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = [2]f32{
-            @floatFromInt(self.extent.width),
-            @floatFromInt(self.extent.height),
-        };
+        const viewport_pt = self.viewport_points();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.color_pipe.layout,
@@ -1532,10 +1565,7 @@ pub const Renderer = struct {
         // Same soft budget as the other encoders: an over-cap batch is skipped
         // whole for the frame.
         if (frame_offset.* + batch.len > MAX_FRAMES) return;
-        const viewport_pt = [2]f32{
-            @floatFromInt(self.extent.width),
-            @floatFromInt(self.extent.height),
-        };
+        const viewport_pt = self.viewport_points();
         for (batch) |prim| {
             const f = prim.frame;
             const raw = f.tex orelse continue;
@@ -1643,11 +1673,7 @@ pub const Renderer = struct {
             0,
             null,
         );
-        // Buffer scale is 1, so the point-unit viewport equals the pixel extent.
-        const viewport_pt = [2]f32{
-            @floatFromInt(self.extent.width),
-            @floatFromInt(self.extent.height),
-        };
+        const viewport_pt = self.viewport_points();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.quad_pipeline_layout,
@@ -1682,10 +1708,7 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = [2]f32{
-            @floatFromInt(self.extent.width),
-            @floatFromInt(self.extent.height),
-        };
+        const viewport_pt = self.viewport_points();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.text_pipeline_layout,
