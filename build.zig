@@ -31,10 +31,14 @@ fn add_shadergen(b: *std.Build) void {
     const step = b.step("shadergen", "Recompile src/platform/linux/shaders/*.spv from GLSL");
     const dir = "src/platform/linux/shaders/";
     const stages = [_][]const u8{
-        "quad.vert",       "quad.frag",
-        "text.vert",       "text.frag",
-        "frame.vert",      "frame_rgba.frag",
-        "frame_nv12.frag",
+        "quad.vert",         "quad.frag",
+        "text.vert",         "text.frag",
+        "frame.vert",        "frame_rgba.frag",
+        "frame_nv12.frag",   "color_sprite.vert",
+        "color_sprite.frag", "polyline.vert",
+        "polyline.frag",     "line.vert",
+        "line.frag",         "ring.vert",
+        "ring.frag",
     };
     for (stages) |stage| {
         const run = b.addSystemCommand(&.{ "glslang", "-V" });
