@@ -149,6 +149,7 @@ const ST_FRAMEBUFFER_CREATE_INFO: u32 = 37;
 const ST_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
 const ST_PRESENT_INFO_KHR: u32 = 1000001001;
 const ST_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
+const ST_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1000005000;
 const ST_IMAGE_CREATE_INFO: u32 = 14;
 const ST_SAMPLER_CREATE_INFO: u32 = 31;
 const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
@@ -285,6 +286,31 @@ pub const WaylandSurfaceCreateInfoKHR = extern struct {
     display: *anyopaque,
     surface: *anyopaque,
 };
+
+pub const XcbSurfaceCreateInfoKHR = extern struct {
+    s_type: u32 = ST_XCB_SURFACE_CREATE_INFO_KHR,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    connection: *anyopaque,
+    window: u32,
+};
+
+// The surface constructors come from backend-specific instance extensions,
+// so they cannot live in the strict InstanceFns table (loading the inactive
+// one would fail); the renderer fetches the active one by name.
+pub const CreateWaylandSurfaceFn = *const fn (
+    *Instance,
+    *const WaylandSurfaceCreateInfoKHR,
+    ?*const anyopaque,
+    *SurfaceKHR,
+) callconv(.c) Result;
+
+pub const CreateXcbSurfaceFn = *const fn (
+    *Instance,
+    *const XcbSurfaceCreateInfoKHR,
+    ?*const anyopaque,
+    *SurfaceKHR,
+) callconv(.c) Result;
 
 pub const SurfaceCapabilitiesKHR = extern struct {
     min_image_count: u32,
@@ -855,12 +881,6 @@ pub const InstanceFns = struct {
         **Device,
     ) callconv(.c) Result,
     vkGetDeviceProcAddr: GetDeviceProcAddr,
-    vkCreateWaylandSurfaceKHR: *const fn (
-        *Instance,
-        *const WaylandSurfaceCreateInfoKHR,
-        ?*const anyopaque,
-        *SurfaceKHR,
-    ) callconv(.c) Result,
     vkDestroySurfaceKHR: *const fn (*Instance, SurfaceKHR, ?*const anyopaque) callconv(.c) void,
     vkGetPhysicalDeviceSurfaceSupportKHR: *const fn (
         *PhysicalDevice,
