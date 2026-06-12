@@ -30,6 +30,74 @@ const ACCENT_KEYS = [_][]const u8{
 // One desktop session per process; the resolved accent never changes mid-run.
 var g_resolved = false;
 var g_accent: ?color.Rgba = null;
+var g_layout_resolved = false;
+var g_layout: CaptionLayout = default_layout;
+
+// kinds[0..count] in VISUAL left-to-right order on the band's right cluster.
+pub const CaptionKind = enum { minimize, maximize, close };
+pub const CaptionLayout = struct { kinds: [3]CaptionKind, count: u8 };
+
+const default_layout = CaptionLayout{
+    .kinds = .{ .minimize, .maximize, .close },
+    .count = 3,
+};
+
+pub fn caption_layout() CaptionLayout {
+    if (g_layout_resolved) return g_layout;
+    g_layout_resolved = true;
+    var buf: [THEME_NAME_MAX]u8 = undefined;
+    if (read_button_layout(&buf)) |raw| g_layout = parse_button_layout(raw);
+    std.debug.assert(g_layout.count >= 1);
+    std.debug.assert(g_layout.count <= 3);
+    return g_layout;
+}
+
+// Drop both caches so the next read re-resolves (the caller decides when).
+pub fn refresh() void {
+    g_resolved = false;
+    g_accent = null;
+    g_layout_resolved = false;
+    g_layout = default_layout;
+}
+
+fn read_button_layout(buf: *[THEME_NAME_MAX]u8) ?[]const u8 {
+    const commands = [_][*:0]const u8{
+        "gsettings get org.cinnamon.desktop.wm.preferences button-layout 2>/dev/null",
+        "gsettings get org.gnome.desktop.wm.preferences button-layout 2>/dev/null",
+        "gsettings get org.mate.marco.general button-layout 2>/dev/null",
+    };
+    for (commands) |command| {
+        if (theme_from_command(command, buf)) |raw| return raw;
+    }
+    return null;
+}
+
+// The metacity grammar: "left:right" with comma-separated items; this shell
+// draws only the right cluster, so left-side items and non-button items
+// (menu, appmenu, spacer) are skipped. A layout with no recognized right-side
+// button falls back to the default trio - honoring an all-left layout would
+// strip the window of its controls entirely.
+pub fn parse_button_layout(raw: []const u8) CaptionLayout {
+    std.debug.assert(raw.len < THEME_NAME_MAX);
+    const colon = std.mem.indexOfScalar(u8, raw, ':') orelse return default_layout;
+    var out = CaptionLayout{ .kinds = undefined, .count = 0 };
+    var it = std.mem.splitScalar(u8, raw[colon + 1 ..], ',');
+    while (it.next()) |token| {
+        if (out.count >= 3) break;
+        const kind: CaptionKind = if (std.mem.eql(u8, token, "minimize"))
+            .minimize
+        else if (std.mem.eql(u8, token, "maximize"))
+            .maximize
+        else if (std.mem.eql(u8, token, "close"))
+            .close
+        else
+            continue;
+        out.kinds[out.count] = kind;
+        out.count += 1;
+    }
+    if (out.count == 0) return default_layout;
+    return out;
+}
 
 pub fn accent_color() ?color.Rgba {
     if (g_resolved) return g_accent;
@@ -187,4 +255,28 @@ fn scan_css_for_accent(path: [*:0]const u8) ?color.Rgba {
 fn parse_hex_rgb(hex: *const [6]u8) ?color.Rgba {
     const value = std.fmt.parseInt(u24, hex, 16) catch return null;
     return color.Rgba.from_hex((@as(u32, value) << 8) | 0xFF);
+}
+
+test "button layout: the metacity grammar maps to the right cluster" {
+    const t = std.testing;
+    // The Mint default: everything on the right, full trio in order.
+    const mint = parse_button_layout(":minimize,maximize,close");
+    try t.expectEqual(@as(u8, 3), mint.count);
+    try t.expectEqual(CaptionKind.minimize, mint.kinds[0]);
+    try t.expectEqual(CaptionKind.close, mint.kinds[2]);
+
+    // GNOME ships non-button items on the left; only the right side counts.
+    const gnome = parse_button_layout("appmenu:close");
+    try t.expectEqual(@as(u8, 1), gnome.count);
+    try t.expectEqual(CaptionKind.close, gnome.kinds[0]);
+
+    // Unknown right-side items are skipped, order preserved.
+    const spaced = parse_button_layout(":maximize,spacer,close");
+    try t.expectEqual(@as(u8, 2), spaced.count);
+    try t.expectEqual(CaptionKind.maximize, spaced.kinds[0]);
+    try t.expectEqual(CaptionKind.close, spaced.kinds[1]);
+
+    // An all-left layout (old Ubuntu) and garbage both fall back whole.
+    try t.expectEqual(@as(u8, 3), parse_button_layout("close,minimize,maximize:").count);
+    try t.expectEqual(@as(u8, 3), parse_button_layout("nonsense").count);
 }

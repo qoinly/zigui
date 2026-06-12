@@ -535,12 +535,23 @@ pub const PaintContext = struct {
         const fid = self.text_system.get_font_id("Segoe Fluent Icons", .normal);
         const max_glyph: u21 = if (self.handle.is_maximized()) 0xE923 else 0xE922;
         const Btn = struct { kind: custom_shell.CaptionButton, cx: f32, glyph: u21 };
-        const buttons = [_]Btn{
-            .{ .kind = .close, .cx = pane_w - right_margin - bw * 0.5, .glyph = 0xE8BB },
-            .{ .kind = .maximize, .cx = pane_w - right_margin - bw * 1.5, .glyph = max_glyph },
-            .{ .kind = .minimize, .cx = pane_w - right_margin - bw * 2.5, .glyph = 0xE921 },
-        };
-        for (buttons) |btn| {
+        const slots = custom_shell.caption_slots();
+        std.debug.assert(slots.count >= 1);
+        std.debug.assert(slots.count <= 3);
+        var buttons: [3]Btn = undefined;
+        for (slots.kinds[0..slots.count], 0..) |kind, i| {
+            buttons[i] = .{
+                .kind = kind,
+                .cx = pane_w - right_margin - bw * (@as(f32, @floatFromInt(i)) + 0.5),
+                .glyph = switch (kind) {
+                    .close => 0xE8BB,
+                    .maximize => max_glyph,
+                    .minimize => 0xE921,
+                    .none => 0,
+                },
+            };
+        }
+        for (buttons[0..slots.count]) |btn| {
             const is_hover = hovered == btn.kind;
             if (builtin.os.tag == .linux) {
                 // The Yaru/GNOME idiom: close keeps a permanent circle in the
