@@ -1,10 +1,9 @@
 // Vulkan renderer over the Wayland custom shell (the d3d11_renderer.zig
 // analogue). Same architecture: instance data streamed into per-class storage
 // buffers, the unit square expanded by gl_VertexIndex, one instanced draw per
-// batch. Quads, monochrome sprites (text + icons), and external frames have
-// pipelines; polylines, line segments, ring charts, and color sprites draw
-// nowhere on this backend. The modal blur pass does not exist here either -
-// modal frames draw crisp.
+// batch. Every primitive class has a pipeline (quads, mono + color sprites,
+// polylines, line segments, ring charts, external frames). The modal blur
+// pass does not exist here - modal frames draw crisp.
 
 const std = @import("std");
 const vk = @import("vulkan.zig");
@@ -16,11 +15,18 @@ const Primitive = primitives.Primitive;
 const Quad = primitives.Quad;
 const MonochromeSprite = primitives.MonochromeSprite;
 const PolychromeSprite = primitives.PolychromeSprite;
+const Polyline = primitives.Polyline;
+const LineSegment = primitives.LineSegment;
+const RingChart = primitives.RingChart;
 
 pub const max_frames_in_flight: u32 = 3;
 
 const MAX_QUADS: u32 = 1024;
 const MAX_SPRITES: u32 = 4096;
+const MAX_COLOR_SPRITES: u32 = 256;
+const MAX_POLYLINES: u32 = 1024;
+const MAX_LINES: u32 = 1024;
+const MAX_RINGS: u32 = 256;
 const MAX_FRAMES: u32 = 8;
 const MAX_FRAME_DIM: u32 = 8192;
 const MAX_SWAPCHAIN_IMAGES: u32 = 8;
@@ -46,6 +52,14 @@ const text_frag_spv align(@alignOf(u32)) = @embedFile("shaders/text.frag.spv").*
 const frame_vert_spv align(@alignOf(u32)) = @embedFile("shaders/frame.vert.spv").*;
 const frame_rgba_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_rgba.frag.spv").*;
 const frame_nv12_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_nv12.frag.spv").*;
+const color_vert_spv align(@alignOf(u32)) = @embedFile("shaders/color_sprite.vert.spv").*;
+const color_frag_spv align(@alignOf(u32)) = @embedFile("shaders/color_sprite.frag.spv").*;
+const polyline_vert_spv align(@alignOf(u32)) = @embedFile("shaders/polyline.vert.spv").*;
+const polyline_frag_spv align(@alignOf(u32)) = @embedFile("shaders/polyline.frag.spv").*;
+const line_vert_spv align(@alignOf(u32)) = @embedFile("shaders/line.vert.spv").*;
+const line_frag_spv align(@alignOf(u32)) = @embedFile("shaders/line.frag.spv").*;
+const ring_vert_spv align(@alignOf(u32)) = @embedFile("shaders/ring.vert.spv").*;
+const ring_frag_spv align(@alignOf(u32)) = @embedFile("shaders/ring.frag.spv").*;
 
 // What get_device() hands the atlas/text layers on this backend: enough of the
 // renderer to allocate and upload GPU resources, never a bare VkDevice.
@@ -204,6 +218,18 @@ fn destroy_frame_plane(r: *Renderer, plane: *FramePlane) void {
     plane.* = .{};
 }
 
+// One instanced primitive class beyond the founding quad/text pair: its
+// persistently mapped storage buffer, descriptors, and pipeline.
+const PrimPipe = struct {
+    pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    layout: vk.PipelineLayout = vk.NULL_HANDLE,
+    dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
+    dset: vk.DescriptorSet = vk.NULL_HANDLE,
+    buffer: vk.Buffer = vk.NULL_HANDLE,
+    memory: vk.DeviceMemory = vk.NULL_HANDLE,
+    mapped: ?[*]u8 = null,
+};
+
 pub const Renderer = struct {
     win: *shell.ShellWindow,
     instance: ?*vk.Instance = null,
@@ -252,6 +278,12 @@ pub const Renderer = struct {
     sprite_mapped: ?[*]MonochromeSprite = null,
     sampler: vk.Sampler = vk.NULL_HANDLE,
     bound_atlas_view: vk.ImageView = vk.NULL_HANDLE,
+    bound_color_view: vk.ImageView = vk.NULL_HANDLE,
+
+    color_pipe: PrimPipe = .{},
+    polyline_pipe: PrimPipe = .{},
+    line_pipe: PrimPipe = .{},
+    ring_pipe: PrimPipe = .{},
 
     frame_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
     frame_pipeline: vk.Pipeline = vk.NULL_HANDLE,
@@ -298,6 +330,38 @@ pub const Renderer = struct {
         try self.build_quad_pipeline();
         try self.build_text_pipeline();
         try self.build_frame_pipelines();
+        try self.build_prim_pipe(
+            &self.color_pipe,
+            PolychromeSprite,
+            MAX_COLOR_SPRITES,
+            &color_vert_spv,
+            &color_frag_spv,
+            true,
+        );
+        try self.build_prim_pipe(
+            &self.polyline_pipe,
+            Polyline,
+            MAX_POLYLINES,
+            &polyline_vert_spv,
+            &polyline_frag_spv,
+            false,
+        );
+        try self.build_prim_pipe(
+            &self.line_pipe,
+            LineSegment,
+            MAX_LINES,
+            &line_vert_spv,
+            &line_frag_spv,
+            false,
+        );
+        try self.build_prim_pipe(
+            &self.ring_pipe,
+            RingChart,
+            MAX_RINGS,
+            &ring_vert_spv,
+            &ring_frag_spv,
+            false,
+        );
 
         shell.renderer_takeover(win);
         return self;
@@ -330,6 +394,10 @@ pub const Renderer = struct {
             self.dfns.vkDestroyPipelineLayout(device, self.text_pipeline_layout, null);
         if (self.text_dsl != vk.NULL_HANDLE)
             self.dfns.vkDestroyDescriptorSetLayout(device, self.text_dsl, null);
+        self.destroy_prim_pipe(&self.color_pipe);
+        self.destroy_prim_pipe(&self.polyline_pipe);
+        self.destroy_prim_pipe(&self.line_pipe);
+        self.destroy_prim_pipe(&self.ring_pipe);
         if (self.frame_pipeline != vk.NULL_HANDLE)
             self.dfns.vkDestroyPipeline(device, self.frame_pipeline, null);
         if (self.frame_nv12_pipeline != vk.NULL_HANDLE)
@@ -699,17 +767,17 @@ pub const Renderer = struct {
         };
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
-        // Quad + text storage buffers, the text atlas sampler, then two
-        // samplers (luma + chroma) for each of the MAX_FRAMES frame sets.
+        // Storage buffers: quad + text + the four PrimPipe classes. Samplers:
+        // the mono and color atlases plus two (luma + chroma) per frame set.
         const pool_sizes = [_]vk.DescriptorPoolSize{
-            .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 2 },
+            .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 6 },
             .{
                 .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptor_count = 1 + 2 * MAX_FRAMES,
+                .descriptor_count = 2 + 2 * MAX_FRAMES,
             },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 2 + MAX_FRAMES,
+            .max_sets = 6 + MAX_FRAMES,
             .pool_size_count = pool_sizes.len,
             .pool_sizes = &pool_sizes,
         };
@@ -964,6 +1032,126 @@ pub const Renderer = struct {
         );
     }
 
+    fn destroy_prim_pipe(self: *Renderer, pipe: *PrimPipe) void {
+        const device = self.device orelse return;
+        if (pipe.pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, pipe.pipeline, null);
+        if (pipe.layout != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipelineLayout(device, pipe.layout, null);
+        if (pipe.dsl != vk.NULL_HANDLE)
+            self.dfns.vkDestroyDescriptorSetLayout(device, pipe.dsl, null);
+        if (pipe.buffer != vk.NULL_HANDLE)
+            self.dfns.vkDestroyBuffer(device, pipe.buffer, null);
+        if (pipe.memory != vk.NULL_HANDLE)
+            self.dfns.vkFreeMemory(device, pipe.memory, null);
+        pipe.* = .{};
+    }
+
+    fn build_prim_buffer(self: *Renderer, pipe: *PrimPipe, size: vk.DeviceSize) Error!void {
+        std.debug.assert(self.device != null);
+        std.debug.assert(pipe.buffer == vk.NULL_HANDLE);
+        const info = vk.BufferCreateInfo{
+            .size = size,
+            .usage = vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        };
+        if (self.dfns.vkCreateBuffer(self.device.?, &info, null, &pipe.buffer) != vk.SUCCESS)
+            return error.BufferCreateFailed;
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetBufferMemoryRequirements(self.device.?, pipe.buffer, &requirements);
+        const wanted = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        const type_index = self.find_memory_type(requirements.memory_type_bits, wanted) orelse
+            return error.BufferCreateFailed;
+        const alloc = vk.MemoryAllocateInfo{
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        if (self.dfns.vkAllocateMemory(self.device.?, &alloc, null, &pipe.memory) != vk.SUCCESS)
+            return error.BufferCreateFailed;
+        if (self.dfns.vkBindBufferMemory(self.device.?, pipe.buffer, pipe.memory, 0) != vk.SUCCESS)
+            return error.BufferCreateFailed;
+        var mapped: *anyopaque = undefined;
+        if (self.dfns.vkMapMemory(self.device.?, pipe.memory, 0, size, 0, &mapped) != vk.SUCCESS)
+            return error.BufferCreateFailed;
+        pipe.mapped = @ptrCast(@alignCast(mapped));
+    }
+
+    fn build_prim_descriptors(
+        self: *Renderer,
+        pipe: *PrimPipe,
+        size: vk.DeviceSize,
+        with_sampler: bool,
+    ) Error!void {
+        std.debug.assert(pipe.buffer != vk.NULL_HANDLE);
+        std.debug.assert(self.descriptor_pool != vk.NULL_HANDLE);
+        const bindings = [_]vk.DescriptorSetLayoutBinding{
+            .{
+                .binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
+            },
+            .{
+                .binding = 1,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            },
+        };
+        const dsl_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = if (with_sampler) bindings.len else 1,
+            .bindings = &bindings,
+        };
+        if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &pipe.dsl) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        const set_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .set_layouts = @ptrCast(&pipe.dsl),
+        };
+        if (self.dfns.vkAllocateDescriptorSets(self.device.?, &set_info, @ptrCast(&pipe.dset)) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        const buffer_info = vk.DescriptorBufferInfo{ .buffer = pipe.buffer, .range = size };
+        const write = vk.WriteDescriptorSet{
+            .dst_set = pipe.dset,
+            .dst_binding = 0,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .buffer_info = @ptrCast(&buffer_info),
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, 1, @ptrCast(&write), 0, null);
+    }
+
+    fn build_prim_pipe(
+        self: *Renderer,
+        pipe: *PrimPipe,
+        comptime T: type,
+        max: u32,
+        vert_code: []const u8,
+        frag_code: []const u8,
+        with_sampler: bool,
+    ) Error!void {
+        std.debug.assert(pipe.pipeline == vk.NULL_HANDLE);
+        std.debug.assert(max > 0);
+        const size: vk.DeviceSize = @sizeOf(T) * max;
+        try self.build_prim_buffer(pipe, size);
+        try self.build_prim_descriptors(pipe, size, with_sampler);
+
+        const vert = try self.make_shader_module(vert_code);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, vert, null);
+        const frag = try self.make_shader_module(frag_code);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag, null);
+
+        const push_range = vk.PushConstantRange{
+            .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
+            .size = 8, // vec2 viewport_size in points
+        };
+        const layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .set_layouts = @ptrCast(&pipe.dsl),
+            .push_constant_range_count = 1,
+            .push_constant_ranges = @ptrCast(&push_range),
+        };
+        if (self.dfns.vkCreatePipelineLayout(self.device.?, &layout_info, null, &pipe.layout) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        pipe.pipeline = try self.make_pipeline(vert, frag, pipe.layout);
+    }
+
     // The shared fixed-function recipe: every stage pair differs only by layout.
     fn make_pipeline(
         self: *Renderer,
@@ -1043,9 +1231,7 @@ pub const Renderer = struct {
         color_sprites: []const PolychromeSprite,
         color_atlas: ?*anyopaque,
     ) void {
-        _ = color_sprites;
-        _ = color_atlas;
-        self.draw_frame_impl(clear, prims, sprites, mono_atlas);
+        self.draw_frame_impl(clear, prims, sprites, mono_atlas, color_sprites, color_atlas);
     }
 
     pub fn draw_frame_modal(
@@ -1061,13 +1247,13 @@ pub const Renderer = struct {
         split_color: usize,
         crisp_top: f32,
     ) void {
-        _ = color_sprites;
-        _ = color_atlas;
+        // No blur pass on this backend: the split points are meaningless and
+        // the whole scene draws crisp.
         _ = split_prims;
         _ = split_sprites;
         _ = split_color;
         _ = crisp_top;
-        self.draw_frame_impl(clear, prims, sprites, mono_atlas);
+        self.draw_frame_impl(clear, prims, sprites, mono_atlas, color_sprites, color_atlas);
     }
 
     fn draw_frame_impl(
@@ -1076,6 +1262,8 @@ pub const Renderer = struct {
         prims: []const Primitive,
         sprites: []const MonochromeSprite,
         mono_atlas: ?*anyopaque,
+        color_sprites: []const PolychromeSprite,
+        color_atlas: ?*anyopaque,
     ) void {
         const device = self.device orelse return;
         const win_w: u32 = @intCast(@max(self.win.width_pt, 1));
@@ -1092,7 +1280,8 @@ pub const Renderer = struct {
         _ = self.dfns.vkResetFences(device, 1, @ptrCast(&self.in_flight));
 
         self.bind_atlas(mono_atlas);
-        self.record_scene(image_index, clear, prims, sprites);
+        self.bind_color_atlas(color_atlas);
+        self.record_scene(image_index, clear, prims, sprites, color_sprites);
         self.submit_and_present(image_index);
         self.dirty = false;
     }
@@ -1136,12 +1325,31 @@ pub const Renderer = struct {
         self.bound_atlas_view = view;
     }
 
+    // The color-atlas twin of bind_atlas, feeding the color-sprite pipeline.
+    fn bind_color_atlas(self: *Renderer, color_atlas: ?*anyopaque) void {
+        const raw = color_atlas orelse return;
+        const view_ptr: *const vk.ImageView = @ptrCast(@alignCast(raw));
+        const view = view_ptr.*;
+        std.debug.assert(view != vk.NULL_HANDLE);
+        if (view == self.bound_color_view) return;
+        const image_info = vk.DescriptorImageInfo{ .sampler = self.sampler, .image_view = view };
+        const write = vk.WriteDescriptorSet{
+            .dst_set = self.color_pipe.dset,
+            .dst_binding = 1,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .image_info = @ptrCast(&image_info),
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, 1, @ptrCast(&write), 0, null);
+        self.bound_color_view = view;
+    }
+
     fn record_scene(
         self: *Renderer,
         image_index: u32,
         clear: ClearColor,
         prims: []const Primitive,
         sprites: []const MonochromeSprite,
+        color_sprites: []const PolychromeSprite,
     ) void {
         const cmd = self.cmd_buf.?;
         const begin = vk.CommandBufferBeginInfo{};
@@ -1171,6 +1379,8 @@ pub const Renderer = struct {
         self.encode_scene(cmd, prims);
         if (sprites.len > 0 and self.bound_atlas_view != vk.NULL_HANDLE)
             self.encode_sprites(cmd, sprites);
+        if (color_sprites.len > 0 and self.bound_color_view != vk.NULL_HANDLE)
+            self.encode_color_sprites(cmd, color_sprites);
 
         self.dfns.vkCmdEndRenderPass(cmd);
         _ = self.dfns.vkEndCommandBuffer(cmd);
@@ -1180,6 +1390,9 @@ pub const Renderer = struct {
         std.debug.assert(prims.len <= MAX_QUADS * 8); // sane per-frame ceiling
         var quad_offset: u32 = 0;
         var frame_offset: u32 = 0;
+        var polyline_offset: u32 = 0;
+        var line_offset: u32 = 0;
+        var ring_offset: u32 = 0;
         var i: usize = 0;
         while (i < prims.len) {
             const start = i;
@@ -1190,11 +1403,123 @@ pub const Renderer = struct {
             switch (tag) {
                 .quad => self.encode_quad_batch(cmd, batch, &quad_offset),
                 .frame => self.encode_frame_batch(cmd, batch, &frame_offset),
-                // No pipeline exists for these classes on this backend; they
-                // draw nowhere, the metal.zig empty-arm precedent.
-                .polyline, .line_segment, .ring_chart => {},
+                .polyline => self.encode_prim_batch(
+                    Polyline,
+                    "polyline",
+                    cmd,
+                    &self.polyline_pipe,
+                    MAX_POLYLINES,
+                    batch,
+                    &polyline_offset,
+                ),
+                .line_segment => self.encode_prim_batch(
+                    LineSegment,
+                    "line_segment",
+                    cmd,
+                    &self.line_pipe,
+                    MAX_LINES,
+                    batch,
+                    &line_offset,
+                ),
+                .ring_chart => self.encode_prim_batch(
+                    RingChart,
+                    "ring_chart",
+                    cmd,
+                    &self.ring_pipe,
+                    MAX_RINGS,
+                    batch,
+                    &ring_offset,
+                ),
             }
         }
+    }
+
+    // The d3d11 encode_prim_batch shape: copy the run's payloads into the
+    // class buffer at the running offset, one instanced draw for the run.
+    fn encode_prim_batch(
+        self: *Renderer,
+        comptime T: type,
+        comptime field: []const u8,
+        cmd: *vk.CommandBuffer,
+        pipe: *const PrimPipe,
+        max: u32,
+        batch: []const Primitive,
+        offset: *u32,
+    ) void {
+        std.debug.assert(batch.len > 0);
+        const raw = pipe.mapped orelse return;
+        const mapped: [*]T = @ptrCast(@alignCast(raw));
+        // The cap is a soft budget: a batch that does not fit is skipped whole
+        // for this frame, the same trade-off as the other encoders.
+        if (offset.* + batch.len > max) return;
+        const first = offset.*;
+        for (batch, 0..) |prim, index| mapped[first + index] = @field(prim, field);
+        offset.* = first + @as(u32, @intCast(batch.len));
+        std.debug.assert(offset.* <= max);
+
+        self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, pipe.pipeline);
+        self.dfns.vkCmdBindDescriptorSets(
+            cmd,
+            vk.PIPELINE_BIND_POINT_GRAPHICS,
+            pipe.layout,
+            0,
+            1,
+            @ptrCast(&pipe.dset),
+            0,
+            null,
+        );
+        const viewport_pt = [2]f32{
+            @floatFromInt(self.extent.width),
+            @floatFromInt(self.extent.height),
+        };
+        self.dfns.vkCmdPushConstants(
+            cmd,
+            pipe.layout,
+            vk.SHADER_STAGE_VERTEX_BIT,
+            0,
+            8,
+            @ptrCast(&viewport_pt),
+        );
+        self.dfns.vkCmdDraw(cmd, 6, @intCast(batch.len), 0, first);
+    }
+
+    fn encode_color_sprites(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        color_sprites: []const PolychromeSprite,
+    ) void {
+        std.debug.assert(color_sprites.len > 0);
+        const raw = self.color_pipe.mapped orelse return;
+        const mapped: [*]PolychromeSprite = @ptrCast(@alignCast(raw));
+        // Same soft budget as the other encoders: an over-cap batch is skipped
+        // whole for the frame.
+        if (color_sprites.len > MAX_COLOR_SPRITES) return;
+        @memcpy(mapped[0..color_sprites.len], color_sprites);
+
+        self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, self.color_pipe.pipeline);
+        self.dfns.vkCmdBindDescriptorSets(
+            cmd,
+            vk.PIPELINE_BIND_POINT_GRAPHICS,
+            self.color_pipe.layout,
+            0,
+            1,
+            @ptrCast(&self.color_pipe.dset),
+            0,
+            null,
+        );
+        const viewport_pt = [2]f32{
+            @floatFromInt(self.extent.width),
+            @floatFromInt(self.extent.height),
+        };
+        self.dfns.vkCmdPushConstants(
+            cmd,
+            self.color_pipe.layout,
+            vk.SHADER_STAGE_VERTEX_BIT,
+            0,
+            8,
+            @ptrCast(&viewport_pt),
+        );
+        self.dfns.vkCmdDraw(cmd, 6, @intCast(color_sprites.len), 0, 0);
     }
 
     fn encode_frame_batch(
