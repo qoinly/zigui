@@ -523,6 +523,7 @@ const WL_SURFACE_DESTROY: u32 = 0;
 const WL_SURFACE_ATTACH: u32 = 1;
 const WL_SURFACE_DAMAGE: u32 = 2;
 const WL_SURFACE_COMMIT: u32 = 6;
+const WL_SURFACE_SET_BUFFER_SCALE: u32 = 8;
 const WL_SHM_CREATE_POOL: u32 = 0;
 const WL_SHM_POOL_CREATE_BUFFER: u32 = 0;
 const WL_SHM_POOL_DESTROY: u32 = 1;
@@ -697,6 +698,16 @@ fn remove_output(name: u32) void {
         slot.* = .{};
         return;
     }
+}
+
+// The integer scale of a bound output, for surface enter events; an unknown
+// proxy (an output past the slab cap) reads as 1.
+pub fn output_scale_of(output: ?*wl_proxy) i32 {
+    const proxy = output orelse return 1;
+    for (&outputs) |*slot| {
+        if (slot.proxy == proxy) return @max(slot.scale, 1);
+    }
+    return 1;
 }
 
 pub fn connect() Error!void {
@@ -907,6 +918,12 @@ pub fn surface_damage(surface: *wl_proxy, x: i32, y: i32, w: i32, h: i32) void {
 
 pub fn surface_commit(surface: *wl_proxy) void {
     marshal(surface, WL_SURFACE_COMMIT, null);
+}
+
+pub fn surface_set_buffer_scale(surface: *wl_proxy, scale: i32) void {
+    std.debug.assert(scale >= 1);
+    var args = [_]wl_argument{.{ .i = scale }};
+    marshal(surface, WL_SURFACE_SET_BUFFER_SCALE, &args);
 }
 
 pub fn surface_destroy(surface: *wl_proxy) void {

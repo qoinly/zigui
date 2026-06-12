@@ -393,6 +393,17 @@ pub const PaintContext = struct {
         const pane_w: f32 = @floatCast(size.width);
         const pane_h: f32 = @floatCast(size.height);
 
+        // The scale is dynamic on non-macOS: Wayland learns it from a surface
+        // enter AFTER init, and a Windows window dragged onto a different-DPI
+        // monitor changes scale mid-run.
+        if (builtin.os.tag != .macos) {
+            const live_scale = self.handle.backing_scale_factor();
+            if (live_scale != self.scale_factor) {
+                self.scale_factor = live_scale;
+                self.renderer.request_redraw();
+            }
+        }
+
         // Skip degenerate frames (minimized / closing window): laying the node
         // tree out into a zero-size rect underflows widths and asserts in the kit.
         if (pane_w < 1 or pane_h < 1) return null;

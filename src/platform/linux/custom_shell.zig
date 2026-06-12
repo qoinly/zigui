@@ -160,6 +160,9 @@ pub const ShellWindow = struct {
     activated: bool = false,
     maximized: bool = false,
     fullscreen: bool = false,
+    // Integer scale of the output the surface last entered; the renderer
+    // sizes its buffers point * scale and declares it via set_buffer_scale.
+    scale: i32 = 1,
     bg_pixel: u32 = 0,
     surface_ctx: ?*anyopaque = null,
     renderer_owned: bool = false,
@@ -245,10 +248,11 @@ pub const CustomShellHandle = struct {
         wl.flush();
     }
 
-    // Fractional scaling is unread; everything renders at scale 1.
+    // Only the integer output scale is consumed; fractional scaling is unread.
     pub fn backing_scale_factor(self: CustomShellHandle) f32 {
         std.debug.assert(self.window.in_use);
-        return 1.0;
+        std.debug.assert(self.window.scale >= 1);
+        return @floatFromInt(self.window.scale);
     }
 
     pub fn is_maximized(self: CustomShellHandle) bool {
@@ -366,6 +370,7 @@ fn create_protocol_objects(win: *ShellWindow, opts: types.NativeShellOptions) Er
     std.debug.assert(win.in_use);
     std.debug.assert(win.surface == null);
     win.surface = wl.compositor_create_surface() orelse return error.WindowCreateFailed;
+    wl.add_listener(win.surface.?, &surface_listener, win);
     win.xdg_surface = wl.wm_base_get_xdg_surface(win.surface.?) orelse
         return error.WindowCreateFailed;
     win.toplevel = wl.xdg_surface_get_toplevel(win.xdg_surface.?) orelse
@@ -571,6 +576,70 @@ fn on_xdg_surface_configure(
     ensure_buffer(win);
     wl.surface_commit(win.surface.?);
     win.configured = true;
+}
+
+const SurfaceListener = extern struct {
+    enter: *const fn (?*anyopaque, ?*wl.wl_proxy, ?*wl.wl_proxy) callconv(.c) void,
+    leave: *const fn (?*anyopaque, ?*wl.wl_proxy, ?*wl.wl_proxy) callconv(.c) void,
+    preferred_buffer_scale: *const fn (?*anyopaque, ?*wl.wl_proxy, i32) callconv(.c) void,
+    preferred_buffer_transform: *const fn (?*anyopaque, ?*wl.wl_proxy, u32) callconv(.c) void,
+};
+
+const surface_listener = SurfaceListener{
+    .enter = on_surface_enter,
+    .leave = on_surface_leave,
+    .preferred_buffer_scale = on_surface_preferred_scale,
+    .preferred_buffer_transform = on_surface_preferred_transform,
+};
+
+// Newest-entered output wins, the per-monitor-DPI convention: while a window
+// straddles two outputs it renders at the scale of the one it is moving onto.
+fn on_surface_enter(
+    data: ?*anyopaque,
+    surface: ?*wl.wl_proxy,
+    output: ?*wl.wl_proxy,
+) callconv(.c) void {
+    std.debug.assert(data != null);
+    std.debug.assert(surface != null);
+    const win: *ShellWindow = @ptrCast(@alignCast(data.?));
+    const scale = wl.output_scale_of(output);
+    if (scale == win.scale) return;
+    win.scale = scale;
+    if (g_paint_now) |paint| {
+        if (win.surface_ctx orelse g_ctx) |ctx| paint(ctx);
+    }
+}
+
+fn on_surface_leave(
+    data: ?*anyopaque,
+    surface: ?*wl.wl_proxy,
+    output: ?*wl.wl_proxy,
+) callconv(.c) void {
+    _ = data;
+    _ = output;
+    std.debug.assert(surface != null);
+}
+
+// Arrives only from a v6 surface bind; this binds wl_compositor at v4, so
+// the enter path above carries the scale.
+fn on_surface_preferred_scale(
+    data: ?*anyopaque,
+    surface: ?*wl.wl_proxy,
+    factor: i32,
+) callconv(.c) void {
+    _ = data;
+    _ = factor;
+    std.debug.assert(surface != null);
+}
+
+fn on_surface_preferred_transform(
+    data: ?*anyopaque,
+    surface: ?*wl.wl_proxy,
+    transform: u32,
+) callconv(.c) void {
+    _ = data;
+    _ = transform;
+    std.debug.assert(surface != null);
 }
 
 const XdgToplevelListener = extern struct {
