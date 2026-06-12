@@ -11,8 +11,8 @@ const KeyEvent = shell_types.KeyEvent;
 
 pub const FIELD_BUF_MAX: usize = 256; // matches the kit TextField buffer
 
-// The arms' clipboard entry points. X11 has no clipboard wired, so paste
-// and copy quietly no-op there.
+// The arms' clipboard entry points, kept as a vtable so the engine never
+// imports either arm.
 pub const Clipboard = struct {
     read_into: *const fn (buf: []u8) []const u8,
     write_string: *const fn (text: []const u8) void,
