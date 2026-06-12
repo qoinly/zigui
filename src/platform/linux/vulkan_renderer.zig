@@ -2,8 +2,8 @@
 // analogue). Same architecture: instance data streamed into per-class storage
 // buffers, the unit square expanded by gl_VertexIndex, one instanced draw per
 // batch. Every primitive class has a pipeline (quads, mono + color sprites,
-// polylines, line segments, ring charts, external frames). The modal blur
-// pass does not exist here - modal frames draw crisp.
+// polylines, line segments, ring charts, external frames), and modal frames
+// frost their backdrop through the offscreen separable-blur passes.
 
 const std = @import("std");
 const vk = @import("vulkan.zig");
@@ -33,6 +33,9 @@ const MAX_SWAPCHAIN_IMAGES: u32 = 8;
 const MAX_PHYSICAL_DEVICES: u32 = 16;
 const MAX_QUEUE_FAMILIES: u32 = 32;
 const ACQUIRE_ATTEMPTS_MAX: u32 = 2;
+// Modal-backdrop blur radius in points; scaled to pixels at draw time so the
+// frost reads the same at every output scale (the d3d11 constant).
+const BLUR_SIGMA_PT: f32 = 6.0;
 
 pub const ClearColor = extern struct {
     rgba: [4]f32,
@@ -60,6 +63,10 @@ const line_vert_spv align(@alignOf(u32)) = @embedFile("shaders/line.vert.spv").*
 const line_frag_spv align(@alignOf(u32)) = @embedFile("shaders/line.frag.spv").*;
 const ring_vert_spv align(@alignOf(u32)) = @embedFile("shaders/ring.vert.spv").*;
 const ring_frag_spv align(@alignOf(u32)) = @embedFile("shaders/ring.frag.spv").*;
+const blit_vert_spv align(@alignOf(u32)) = @embedFile("shaders/blit.vert.spv").*;
+const blit_frag_spv align(@alignOf(u32)) = @embedFile("shaders/blit.frag.spv").*;
+const blur_h_frag_spv align(@alignOf(u32)) = @embedFile("shaders/blur_h.frag.spv").*;
+const blur_v_frag_spv align(@alignOf(u32)) = @embedFile("shaders/blur_v.frag.spv").*;
 
 // What get_device() hands the atlas/text layers on this backend: enough of the
 // renderer to allocate and upload GPU resources, never a bare VkDevice.
@@ -230,6 +237,27 @@ const PrimPipe = struct {
     mapped: ?[*]u8 = null,
 };
 
+// Per-frame instance-buffer cursors, shared by every encode call in the
+// frame (see encode_layers).
+const EncodeOffsets = struct {
+    quad: u32 = 0,
+    frame: u32 = 0,
+    polyline: u32 = 0,
+    line: u32 = 0,
+    ring: u32 = 0,
+    sprite: u32 = 0,
+    color: u32 = 0,
+};
+
+// An offscreen color target usable as both a render target and a sampled
+// texture: the modal blur ping-pongs between two of these (the d3d11 shape).
+const Offscreen = struct {
+    image: vk.Image = vk.NULL_HANDLE,
+    memory: vk.DeviceMemory = vk.NULL_HANDLE,
+    view: vk.ImageView = vk.NULL_HANDLE,
+    framebuffer: vk.Framebuffer = vk.NULL_HANDLE,
+};
+
 pub const Renderer = struct {
     win: *shell.ShellWindow,
     instance: ?*vk.Instance = null,
@@ -284,6 +312,17 @@ pub const Renderer = struct {
     polyline_pipe: PrimPipe = .{},
     line_pipe: PrimPipe = .{},
     ring_pipe: PrimPipe = .{},
+
+    offscreen_pass: vk.RenderPass = vk.NULL_HANDLE,
+    scene_target: Offscreen = .{},
+    blur_target: Offscreen = .{},
+    blit_layout: vk.PipelineLayout = vk.NULL_HANDLE,
+    blit_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
+    blit_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    blur_h_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    blur_v_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    scene_dset: vk.DescriptorSet = vk.NULL_HANDLE,
+    aux_dset: vk.DescriptorSet = vk.NULL_HANDLE,
 
     frame_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
     frame_pipeline: vk.Pipeline = vk.NULL_HANDLE,
@@ -365,6 +404,7 @@ pub const Renderer = struct {
             &ring_frag_spv,
             false,
         );
+        try self.build_blit_pipelines();
 
         shell.renderer_takeover(win);
         return self;
@@ -397,6 +437,20 @@ pub const Renderer = struct {
             self.dfns.vkDestroyPipelineLayout(device, self.text_pipeline_layout, null);
         if (self.text_dsl != vk.NULL_HANDLE)
             self.dfns.vkDestroyDescriptorSetLayout(device, self.text_dsl, null);
+        self.destroy_offscreen(&self.scene_target);
+        self.destroy_offscreen(&self.blur_target);
+        if (self.offscreen_pass != vk.NULL_HANDLE)
+            self.dfns.vkDestroyRenderPass(device, self.offscreen_pass, null);
+        if (self.blit_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.blit_pipeline, null);
+        if (self.blur_h_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.blur_h_pipeline, null);
+        if (self.blur_v_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.blur_v_pipeline, null);
+        if (self.blit_layout != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipelineLayout(device, self.blit_layout, null);
+        if (self.blit_dsl != vk.NULL_HANDLE)
+            self.dfns.vkDestroyDescriptorSetLayout(device, self.blit_dsl, null);
         self.destroy_prim_pipe(&self.color_pipe);
         self.destroy_prim_pipe(&self.polyline_pipe);
         self.destroy_prim_pipe(&self.line_pipe);
@@ -440,6 +494,9 @@ pub const Renderer = struct {
 
     fn destroy_swapchain_objects(self: *Renderer) void {
         const device = self.device orelse return;
+        // The blur targets are extent-sized; the next modal frame recreates them.
+        self.destroy_offscreen(&self.scene_target);
+        self.destroy_offscreen(&self.blur_target);
         std.debug.assert(self.image_count <= MAX_SWAPCHAIN_IMAGES);
         var index: u32 = 0;
         while (index < self.image_count) : (index += 1) {
@@ -789,16 +846,17 @@ pub const Renderer = struct {
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
         // Storage buffers: quad + text + the four PrimPipe classes. Samplers:
-        // the mono and color atlases plus two (luma + chroma) per frame set.
+        // the mono and color atlases, the two blur sources, plus two (luma +
+        // chroma) per frame set.
         const pool_sizes = [_]vk.DescriptorPoolSize{
             .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 6 },
             .{
                 .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptor_count = 2 + 2 * MAX_FRAMES,
+                .descriptor_count = 4 + 2 * MAX_FRAMES,
             },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 6 + MAX_FRAMES,
+            .max_sets = 8 + MAX_FRAMES,
             .pool_size_count = pool_sizes.len,
             .pool_sizes = &pool_sizes,
         };
@@ -1173,6 +1231,173 @@ pub const Renderer = struct {
         pipe.pipeline = try self.make_pipeline(vert, frag, pipe.layout);
     }
 
+    // The offscreen pass renders into a sampled target: same format and
+    // subpass shape as the main pass (so every pipeline is compatible with
+    // both), but the image ends SHADER_READ_ONLY for the next blur tap.
+    fn create_offscreen_pass(self: *Renderer) Error!void {
+        std.debug.assert(self.offscreen_pass == vk.NULL_HANDLE);
+        const attachment = vk.AttachmentDescription{
+            .format = self.format,
+            .load_op = vk.ATTACHMENT_LOAD_OP_CLEAR,
+            .store_op = vk.ATTACHMENT_STORE_OP_STORE,
+            .initial_layout = vk.IMAGE_LAYOUT_UNDEFINED,
+            .final_layout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const color_ref = vk.AttachmentReference{};
+        const subpass = vk.SubpassDescription{ .color_attachments = @ptrCast(&color_ref) };
+        const dependency = vk.SubpassDependency{};
+        const info = vk.RenderPassCreateInfo{
+            .attachments = @ptrCast(&attachment),
+            .subpasses = @ptrCast(&subpass),
+            .dependencies = @ptrCast(&dependency),
+        };
+        const rc = self.dfns.vkCreateRenderPass(self.device.?, &info, null, &self.offscreen_pass);
+        if (rc != vk.SUCCESS) return error.PipelineCreateFailed;
+    }
+
+    fn build_blit_pipelines(self: *Renderer) Error!void {
+        std.debug.assert(self.render_pass != vk.NULL_HANDLE);
+        std.debug.assert(self.blit_pipeline == vk.NULL_HANDLE);
+        try self.create_offscreen_pass();
+        const binding = vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+        };
+        const dsl_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = 1,
+            .bindings = @ptrCast(&binding),
+        };
+        if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.blit_dsl) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        const layouts = [_]vk.DescriptorSetLayout{ self.blit_dsl, self.blit_dsl };
+        const set_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = 2,
+            .set_layouts = &layouts,
+        };
+        var sets: [2]vk.DescriptorSet = undefined;
+        if (self.dfns.vkAllocateDescriptorSets(self.device.?, &set_info, &sets) != vk.SUCCESS)
+            return error.PipelineCreateFailed;
+        self.scene_dset = sets[0];
+        self.aux_dset = sets[1];
+
+        const push_range = vk.PushConstantRange{
+            .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            .size = 16, // texel vec2 + sigma + pad
+        };
+        const layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .set_layouts = @ptrCast(&self.blit_dsl),
+            .push_constant_range_count = 1,
+            .push_constant_ranges = @ptrCast(&push_range),
+        };
+        const layout_rc = self.dfns.vkCreatePipelineLayout(
+            self.device.?,
+            &layout_info,
+            null,
+            &self.blit_layout,
+        );
+        if (layout_rc != vk.SUCCESS) return error.PipelineCreateFailed;
+
+        const vert = try self.make_shader_module(&blit_vert_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, vert, null);
+        const frag_blit = try self.make_shader_module(&blit_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag_blit, null);
+        const frag_h = try self.make_shader_module(&blur_h_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag_h, null);
+        const frag_v = try self.make_shader_module(&blur_v_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(self.device.?, frag_v, null);
+        self.blit_pipeline = try self.make_pipeline(vert, frag_blit, self.blit_layout);
+        self.blur_h_pipeline = try self.make_pipeline(vert, frag_h, self.blit_layout);
+        self.blur_v_pipeline = try self.make_pipeline(vert, frag_v, self.blit_layout);
+    }
+
+    fn destroy_offscreen(self: *Renderer, target: *Offscreen) void {
+        const device = self.device orelse return;
+        if (target.framebuffer != vk.NULL_HANDLE)
+            self.dfns.vkDestroyFramebuffer(device, target.framebuffer, null);
+        if (target.view != vk.NULL_HANDLE)
+            self.dfns.vkDestroyImageView(device, target.view, null);
+        if (target.image != vk.NULL_HANDLE)
+            self.dfns.vkDestroyImage(device, target.image, null);
+        if (target.memory != vk.NULL_HANDLE)
+            self.dfns.vkFreeMemory(device, target.memory, null);
+        target.* = .{};
+    }
+
+    fn create_offscreen(self: *Renderer, target: *Offscreen) bool {
+        std.debug.assert(target.image == vk.NULL_HANDLE);
+        std.debug.assert(self.extent.width > 0);
+        const device = self.device orelse return false;
+        const info = vk.ImageCreateInfo{
+            .format = self.format,
+            .extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 },
+            .usage = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.IMAGE_USAGE_SAMPLED_BIT,
+        };
+        if (self.dfns.vkCreateImage(device, &info, null, &target.image) != vk.SUCCESS)
+            return false;
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetImageMemoryRequirements(device, target.image, &requirements);
+        const type_index = self.find_memory_type(
+            requirements.memory_type_bits,
+            vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        ) orelse return false;
+        const alloc = vk.MemoryAllocateInfo{
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        if (self.dfns.vkAllocateMemory(device, &alloc, null, &target.memory) != vk.SUCCESS)
+            return false;
+        if (self.dfns.vkBindImageMemory(device, target.image, target.memory, 0) != vk.SUCCESS)
+            return false;
+        const view_info = vk.ImageViewCreateInfo{ .image = target.image, .format = self.format };
+        if (self.dfns.vkCreateImageView(device, &view_info, null, &target.view) != vk.SUCCESS)
+            return false;
+        const fb_info = vk.FramebufferCreateInfo{
+            .render_pass = self.offscreen_pass,
+            .attachments = @ptrCast(&target.view),
+            .width = self.extent.width,
+            .height = self.extent.height,
+        };
+        return self.dfns.vkCreateFramebuffer(device, &fb_info, null, &target.framebuffer) ==
+            vk.SUCCESS;
+    }
+
+    // Extent-sized lazily: a window that never opens a modal never pays for
+    // the two full-screen targets. Commits nothing on failure so the modal
+    // path can fall back to crisp and retry next frame.
+    fn ensure_offscreen(self: *Renderer) bool {
+        if (self.scene_target.framebuffer != vk.NULL_HANDLE) return true;
+        if (!self.create_offscreen(&self.scene_target) or
+            !self.create_offscreen(&self.blur_target))
+        {
+            self.destroy_offscreen(&self.scene_target);
+            self.destroy_offscreen(&self.blur_target);
+            return false;
+        }
+        const infos = [_]vk.DescriptorImageInfo{
+            .{ .sampler = self.sampler, .image_view = self.scene_target.view },
+            .{ .sampler = self.sampler, .image_view = self.blur_target.view },
+        };
+        const writes = [_]vk.WriteDescriptorSet{
+            .{
+                .dst_set = self.scene_dset,
+                .dst_binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .image_info = infos[0..1].ptr,
+            },
+            .{
+                .dst_set = self.aux_dset,
+                .dst_binding = 0,
+                .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .image_info = infos[1..2].ptr,
+            },
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, writes.len, &writes, 0, null);
+        return true;
+    }
+
     // The shared fixed-function recipe: every stage pair differs only by layout.
     fn make_pipeline(
         self: *Renderer,
@@ -1268,14 +1493,23 @@ pub const Renderer = struct {
         split_color: usize,
         crisp_top: f32,
     ) void {
-        // No blur pass on this backend: the split points are meaningless and
-        // the whole scene draws crisp.
-        _ = split_prims;
-        _ = split_sprites;
-        _ = split_color;
-        _ = crisp_top;
-        self.draw_frame_impl(clear, prims, sprites, mono_atlas, color_sprites, color_atlas);
+        self.draw_frame_with(clear, prims, sprites, mono_atlas, color_sprites, color_atlas, .{
+            .split_prims = split_prims,
+            .split_sprites = split_sprites,
+            .split_color = split_color,
+            .crisp_top = crisp_top,
+        });
     }
+
+    // The blur split: everything before the indices is the backdrop (frosted),
+    // the rest draws crisp on top; crisp_top points stay unblurred so the
+    // title bar never frosts (the d3d11 Modal contract).
+    const Modal = struct {
+        split_prims: usize,
+        split_sprites: usize,
+        split_color: usize,
+        crisp_top: f32,
+    };
 
     fn draw_frame_impl(
         self: *Renderer,
@@ -1285,6 +1519,19 @@ pub const Renderer = struct {
         mono_atlas: ?*anyopaque,
         color_sprites: []const PolychromeSprite,
         color_atlas: ?*anyopaque,
+    ) void {
+        self.draw_frame_with(clear, prims, sprites, mono_atlas, color_sprites, color_atlas, null);
+    }
+
+    fn draw_frame_with(
+        self: *Renderer,
+        clear: ClearColor,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        mono_atlas: ?*anyopaque,
+        color_sprites: []const PolychromeSprite,
+        color_atlas: ?*anyopaque,
+        modal: ?Modal,
     ) void {
         const device = self.device orelse return;
         const want = self.pixel_extent();
@@ -1309,9 +1556,184 @@ pub const Renderer = struct {
 
         self.bind_atlas(mono_atlas);
         self.bind_color_atlas(color_atlas);
-        self.record_scene(image_index, clear, prims, sprites, color_sprites);
+        var drew_modal = false;
+        if (modal) |m| {
+            drew_modal =
+                self.record_modal_scene(image_index, clear, prims, sprites, color_sprites, m);
+        }
+        if (!drew_modal) self.record_scene(image_index, clear, prims, sprites, color_sprites);
         self.submit_and_present(image_index);
         self.dirty = false;
+    }
+
+    // Backdrop -> offscreen, separable blur via the aux target, composite to
+    // the backbuffer, re-blit the crisp top strip, then the modal crisp on
+    // top. Returns false (the caller falls back to a plain crisp frame) when
+    // the splits are stale or the offscreen targets cannot be built.
+    fn record_modal_scene(
+        self: *Renderer,
+        image_index: u32,
+        clear: ClearColor,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        color_sprites: []const PolychromeSprite,
+        m: Modal,
+    ) bool {
+        std.debug.assert(self.extent.width > 0);
+        std.debug.assert(self.applied_scale >= 1);
+        if (m.split_prims > prims.len or m.split_sprites > sprites.len or
+            m.split_color > color_sprites.len) return false;
+        if (self.blit_pipeline == vk.NULL_HANDLE) return false;
+        if (!self.ensure_offscreen()) return false;
+        const scale: f32 = @floatFromInt(self.applied_scale);
+        const push = BlurPush{
+            .texel = .{
+                1.0 / @as(f32, @floatFromInt(self.extent.width)),
+                1.0 / @as(f32, @floatFromInt(self.extent.height)),
+            },
+            .sigma = @max(BLUR_SIGMA_PT * scale, 0.5),
+        };
+        var offsets = EncodeOffsets{};
+
+        const cmd = self.cmd_buf.?;
+        const begin = vk.CommandBufferBeginInfo{};
+        _ = self.dfns.vkBeginCommandBuffer(cmd, &begin);
+
+        // Pass A: backdrop into the scene target.
+        self.begin_pass(cmd, self.offscreen_pass, self.scene_target.framebuffer, clear);
+        self.encode_layers(
+            cmd,
+            prims[0..m.split_prims],
+            sprites[0..m.split_sprites],
+            color_sprites[0..m.split_color],
+            &offsets,
+        );
+        self.dfns.vkCmdEndRenderPass(cmd);
+        self.offscreen_read_barrier(cmd, self.scene_target.image);
+
+        // Pass H: horizontal blur scene -> aux.
+        self.begin_pass(cmd, self.offscreen_pass, self.blur_target.framebuffer, clear);
+        self.fullscreen_pass(cmd, self.blur_h_pipeline, self.scene_dset, push);
+        self.dfns.vkCmdEndRenderPass(cmd);
+        self.offscreen_read_barrier(cmd, self.blur_target.image);
+
+        // Backbuffer: vertical blur aux -> full frame, the crisp strip re-blit,
+        // then the modal layer crisp on top.
+        self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
+        self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
+        const top_px = m.crisp_top * scale;
+        if (top_px >= 1) {
+            const strip = vk.Rect2D{ .extent = .{
+                .width = self.extent.width,
+                .height = @intFromFloat(@min(top_px, @as(f32, @floatFromInt(self.extent.height)))),
+            } };
+            self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&strip));
+            self.fullscreen_pass(cmd, self.blit_pipeline, self.scene_dset, push);
+            const full = vk.Rect2D{ .extent = self.extent };
+            self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&full));
+        }
+        self.encode_layers(
+            cmd,
+            prims[m.split_prims..],
+            sprites[m.split_sprites..],
+            color_sprites[m.split_color..],
+            &offsets,
+        );
+        self.dfns.vkCmdEndRenderPass(cmd);
+        _ = self.dfns.vkEndCommandBuffer(cmd);
+        return true;
+    }
+
+    const BlurPush = extern struct {
+        texel: [2]f32,
+        sigma: f32,
+        _pad: f32 = 0,
+    };
+
+    fn begin_pass(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        pass: vk.RenderPass,
+        framebuffer: vk.Framebuffer,
+        clear: ClearColor,
+    ) void {
+        std.debug.assert(framebuffer != vk.NULL_HANDLE);
+        const clear_value = vk.ClearValue{ .color = .{ .float32 = clear.rgba } };
+        const pass_begin = vk.RenderPassBeginInfo{
+            .render_pass = pass,
+            .framebuffer = framebuffer,
+            .render_area = .{ .extent = self.extent },
+            .clear_values = @ptrCast(&clear_value),
+        };
+        self.dfns.vkCmdBeginRenderPass(cmd, &pass_begin, vk.SUBPASS_CONTENTS_INLINE);
+        const viewport = vk.Viewport{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(self.extent.width),
+            .height = @floatFromInt(self.extent.height),
+            .min_depth = 0,
+            .max_depth = 1,
+        };
+        self.dfns.vkCmdSetViewport(cmd, 0, 1, @ptrCast(&viewport));
+        const scissor = vk.Rect2D{ .extent = self.extent };
+        self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&scissor));
+    }
+
+    fn fullscreen_pass(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        pipeline: vk.Pipeline,
+        dset: vk.DescriptorSet,
+        push: BlurPush,
+    ) void {
+        std.debug.assert(pipeline != vk.NULL_HANDLE);
+        self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        self.dfns.vkCmdBindDescriptorSets(
+            cmd,
+            vk.PIPELINE_BIND_POINT_GRAPHICS,
+            self.blit_layout,
+            0,
+            1,
+            @ptrCast(&dset),
+            0,
+            null,
+        );
+        self.dfns.vkCmdPushConstants(
+            cmd,
+            self.blit_layout,
+            vk.SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            @sizeOf(BlurPush),
+            @ptrCast(&push),
+        );
+        self.dfns.vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
+
+    // Execution + visibility between an offscreen pass's color writes and the
+    // next pass sampling it; the layout itself was settled by the pass's
+    // final layout.
+    fn offscreen_read_barrier(self: *Renderer, cmd: *vk.CommandBuffer, image: vk.Image) void {
+        std.debug.assert(image != vk.NULL_HANDLE);
+        const b = vk.ImageMemoryBarrier{
+            .src_access_mask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dst_access_mask = vk.ACCESS_SHADER_READ_BIT,
+            .old_layout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .new_layout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .image = image,
+        };
+        const one: [*]const vk.ImageMemoryBarrier = @ptrCast(&b);
+        self.dfns.vkCmdPipelineBarrier(
+            cmd,
+            vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            one,
+        );
     }
 
     fn acquire_image(self: *Renderer) ?u32 {
@@ -1382,36 +1804,32 @@ pub const Renderer = struct {
         const cmd = self.cmd_buf.?;
         const begin = vk.CommandBufferBeginInfo{};
         _ = self.dfns.vkBeginCommandBuffer(cmd, &begin);
+        self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
 
-        const clear_value = vk.ClearValue{ .color = .{ .float32 = clear.rgba } };
-        const pass_begin = vk.RenderPassBeginInfo{
-            .render_pass = self.render_pass,
-            .framebuffer = self.framebuffers[image_index],
-            .render_area = .{ .extent = self.extent },
-            .clear_values = @ptrCast(&clear_value),
-        };
-        self.dfns.vkCmdBeginRenderPass(cmd, &pass_begin, vk.SUBPASS_CONTENTS_INLINE);
-
-        const viewport = vk.Viewport{
-            .x = 0,
-            .y = 0,
-            .width = @floatFromInt(self.extent.width),
-            .height = @floatFromInt(self.extent.height),
-            .min_depth = 0,
-            .max_depth = 1,
-        };
-        self.dfns.vkCmdSetViewport(cmd, 0, 1, @ptrCast(&viewport));
-        const scissor = vk.Rect2D{ .extent = self.extent };
-        self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&scissor));
-
-        self.encode_scene(cmd, prims);
-        if (sprites.len > 0 and self.bound_atlas_view != vk.NULL_HANDLE)
-            self.encode_sprites(cmd, sprites);
-        if (color_sprites.len > 0 and self.bound_color_view != vk.NULL_HANDLE)
-            self.encode_color_sprites(cmd, color_sprites);
+        var offsets = EncodeOffsets{};
+        self.encode_layers(cmd, prims, sprites, color_sprites, &offsets);
 
         self.dfns.vkCmdEndRenderPass(cmd);
         _ = self.dfns.vkEndCommandBuffer(cmd);
+    }
+
+    // One scene layer (a prim list + its sprite overlays). The offsets carry
+    // across layers within a frame: the instance buffers are persistently
+    // mapped, so a second layer must append, never restart at zero - the GPU
+    // reads the first layer's rows only at execution time.
+    fn encode_layers(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        color_sprites: []const PolychromeSprite,
+        offsets: *EncodeOffsets,
+    ) void {
+        self.encode_scene(cmd, prims, offsets);
+        if (sprites.len > 0 and self.bound_atlas_view != vk.NULL_HANDLE)
+            self.encode_sprites(cmd, sprites, &offsets.sprite);
+        if (color_sprites.len > 0 and self.bound_color_view != vk.NULL_HANDLE)
+            self.encode_color_sprites(cmd, color_sprites, &offsets.color);
     }
 
     // The point-unit viewport the shaders divide by: instance data is in
@@ -1425,13 +1843,13 @@ pub const Renderer = struct {
         };
     }
 
-    fn encode_scene(self: *Renderer, cmd: *vk.CommandBuffer, prims: []const Primitive) void {
+    fn encode_scene(
+        self: *Renderer,
+        cmd: *vk.CommandBuffer,
+        prims: []const Primitive,
+        offsets: *EncodeOffsets,
+    ) void {
         std.debug.assert(prims.len <= MAX_QUADS * 8); // sane per-frame ceiling
-        var quad_offset: u32 = 0;
-        var frame_offset: u32 = 0;
-        var polyline_offset: u32 = 0;
-        var line_offset: u32 = 0;
-        var ring_offset: u32 = 0;
         var i: usize = 0;
         while (i < prims.len) {
             const start = i;
@@ -1440,8 +1858,8 @@ pub const Renderer = struct {
             std.debug.assert(i > start);
             const batch = prims[start..i];
             switch (tag) {
-                .quad => self.encode_quad_batch(cmd, batch, &quad_offset),
-                .frame => self.encode_frame_batch(cmd, batch, &frame_offset),
+                .quad => self.encode_quad_batch(cmd, batch, &offsets.quad),
+                .frame => self.encode_frame_batch(cmd, batch, &offsets.frame),
                 .polyline => self.encode_prim_batch(
                     Polyline,
                     "polyline",
@@ -1449,7 +1867,7 @@ pub const Renderer = struct {
                     &self.polyline_pipe,
                     MAX_POLYLINES,
                     batch,
-                    &polyline_offset,
+                    &offsets.polyline,
                 ),
                 .line_segment => self.encode_prim_batch(
                     LineSegment,
@@ -1458,7 +1876,7 @@ pub const Renderer = struct {
                     &self.line_pipe,
                     MAX_LINES,
                     batch,
-                    &line_offset,
+                    &offsets.line,
                 ),
                 .ring_chart => self.encode_prim_batch(
                     RingChart,
@@ -1467,7 +1885,7 @@ pub const Renderer = struct {
                     &self.ring_pipe,
                     MAX_RINGS,
                     batch,
-                    &ring_offset,
+                    &offsets.ring,
                 ),
             }
         }
@@ -1523,14 +1941,17 @@ pub const Renderer = struct {
         self: *Renderer,
         cmd: *vk.CommandBuffer,
         color_sprites: []const PolychromeSprite,
+        offset: *u32,
     ) void {
         std.debug.assert(color_sprites.len > 0);
         const raw = self.color_pipe.mapped orelse return;
         const mapped: [*]PolychromeSprite = @ptrCast(@alignCast(raw));
         // Same soft budget as the other encoders: an over-cap batch is skipped
         // whole for the frame.
-        if (color_sprites.len > MAX_COLOR_SPRITES) return;
-        @memcpy(mapped[0..color_sprites.len], color_sprites);
+        if (offset.* + color_sprites.len > MAX_COLOR_SPRITES) return;
+        const first = offset.*;
+        @memcpy(mapped[first .. first + color_sprites.len], color_sprites);
+        offset.* = first + @as(u32, @intCast(color_sprites.len));
 
         self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, self.color_pipe.pipeline);
         self.dfns.vkCmdBindDescriptorSets(
@@ -1552,7 +1973,7 @@ pub const Renderer = struct {
             8,
             @ptrCast(&viewport_pt),
         );
-        self.dfns.vkCmdDraw(cmd, 6, @intCast(color_sprites.len), 0, 0);
+        self.dfns.vkCmdDraw(cmd, 6, @intCast(color_sprites.len), 0, first);
     }
 
     fn encode_frame_batch(
@@ -1689,13 +2110,16 @@ pub const Renderer = struct {
         self: *Renderer,
         cmd: *vk.CommandBuffer,
         sprites: []const MonochromeSprite,
+        offset: *u32,
     ) void {
         std.debug.assert(sprites.len > 0);
         const mapped = self.sprite_mapped orelse return;
         // Same soft budget as the other encoders: an over-cap batch is skipped
         // whole for the frame.
-        if (sprites.len > MAX_SPRITES) return;
-        @memcpy(mapped[0..sprites.len], sprites);
+        if (offset.* + sprites.len > MAX_SPRITES) return;
+        const first = offset.*;
+        @memcpy(mapped[first .. first + sprites.len], sprites);
+        offset.* = first + @as(u32, @intCast(sprites.len));
 
         self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, self.text_pipeline);
         self.dfns.vkCmdBindDescriptorSets(
@@ -1717,7 +2141,7 @@ pub const Renderer = struct {
             8,
             @ptrCast(&viewport_pt),
         );
-        self.dfns.vkCmdDraw(cmd, 6, @intCast(sprites.len), 0, 0);
+        self.dfns.vkCmdDraw(cmd, 6, @intCast(sprites.len), 0, first);
     }
 
     fn submit_and_present(self: *Renderer, image_index: u32) void {

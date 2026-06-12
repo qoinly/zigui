@@ -38,7 +38,9 @@ fn add_shadergen(b: *std.Build) void {
         "color_sprite.frag", "polyline.vert",
         "polyline.frag",     "line.vert",
         "line.frag",         "ring.vert",
-        "ring.frag",
+        "ring.frag",         "blit.vert",
+        "blit.frag",         "blur_h.frag",
+        "blur_v.frag",
     };
     for (stages) |stage| {
         const run = b.addSystemCommand(&.{ "glslang", "-V" });
