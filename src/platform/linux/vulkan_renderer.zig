@@ -54,6 +54,7 @@ const text_frag_spv align(@alignOf(u32)) = @embedFile("shaders/text.frag.spv").*
 const frame_vert_spv align(@alignOf(u32)) = @embedFile("shaders/frame.vert.spv").*;
 const frame_rgba_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_rgba.frag.spv").*;
 const frame_nv12_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_nv12.frag.spv").*;
+const frame_ycbcr_frag_spv align(@alignOf(u32)) = @embedFile("shaders/frame_ycbcr.frag.spv").*;
 const color_vert_spv align(@alignOf(u32)) = @embedFile("shaders/color_sprite.vert.spv").*;
 const color_frag_spv align(@alignOf(u32)) = @embedFile("shaders/color_sprite.frag.spv").*;
 const polyline_vert_spv align(@alignOf(u32)) = @embedFile("shaders/polyline.vert.spv").*;
@@ -107,7 +108,7 @@ const FramePush = extern struct {
     }
 };
 
-const SurfaceFormat = enum { bgra, nv12, shared_nv12 };
+const SurfaceFormat = enum { bgra, nv12, shared_nv12, dmabuf_nv12 };
 
 // "Shared" surfaces own no CPU pixels; the legacy field stays non-null so old
 // pointer-shape checks cannot trip over this format (the d3d11 convention).
@@ -331,6 +332,21 @@ pub const Renderer = struct {
     // recording, so updates never touch a set the command buffer already holds.
     frame_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
 
+    // Dmabuf zero-copy import: present only when the loader speaks 1.1 and
+    // the device carries the external-memory + drm-modifier extensions. The
+    // entry points resolve by name (a plain device has no such symbols).
+    dmabuf_capable: bool = false,
+    instance_11: bool = false,
+    fn_create_ycbcr: ?vk.CreateSamplerYcbcrConversionFn = null,
+    fn_destroy_ycbcr: ?vk.DestroySamplerYcbcrConversionFn = null,
+    fn_memory_fd_props: ?vk.GetMemoryFdPropertiesFn = null,
+    ycbcr_conversion: vk.SamplerYcbcrConversion = vk.NULL_HANDLE,
+    ycbcr_sampler: vk.Sampler = vk.NULL_HANDLE,
+    ycbcr_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
+    ycbcr_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
+    ycbcr_pipeline: vk.Pipeline = vk.NULL_HANDLE,
+    ycbcr_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
+
     // The buffer scale the current swapchain + surface state were built for.
     applied_scale: i32 = 1,
 
@@ -461,6 +477,17 @@ pub const Renderer = struct {
             self.dfns.vkDestroyPipelineLayout(device, self.frame_pipeline_layout, null);
         if (self.frame_dsl != vk.NULL_HANDLE)
             self.dfns.vkDestroyDescriptorSetLayout(device, self.frame_dsl, null);
+        if (self.ycbcr_pipeline != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipeline(device, self.ycbcr_pipeline, null);
+        if (self.ycbcr_pipeline_layout != vk.NULL_HANDLE)
+            self.dfns.vkDestroyPipelineLayout(device, self.ycbcr_pipeline_layout, null);
+        if (self.ycbcr_dsl != vk.NULL_HANDLE)
+            self.dfns.vkDestroyDescriptorSetLayout(device, self.ycbcr_dsl, null);
+        if (self.ycbcr_sampler != vk.NULL_HANDLE)
+            self.dfns.vkDestroySampler(device, self.ycbcr_sampler, null);
+        if (self.ycbcr_conversion != vk.NULL_HANDLE) {
+            if (self.fn_destroy_ycbcr) |destroy| destroy(device, self.ycbcr_conversion, null);
+        }
         if (self.sprite_buffer != vk.NULL_HANDLE)
             self.dfns.vkDestroyBuffer(device, self.sprite_buffer, null);
         if (self.sprite_memory != vk.NULL_HANDLE)
@@ -514,7 +541,17 @@ pub const Renderer = struct {
     fn create_instance(self: *Renderer) Error!void {
         std.debug.assert(self.instance == null);
         const extensions = [_][*:0]const u8{ "VK_KHR_surface", backend.vk_surface_extension() };
-        const app_info = vk.ApplicationInfo{ .application_name = "zigui" };
+        // 1.1 unlocks the ycbcr-conversion core the dmabuf path samples
+        // through; a 1.0 loader rejects the higher apiVersion, so ask first.
+        const api_version = if (vk.instance_api_version() >= vk.API_VERSION_1_1)
+            vk.API_VERSION_1_1
+        else
+            vk.API_VERSION_1_0;
+        self.instance_11 = api_version >= vk.API_VERSION_1_1;
+        const app_info = vk.ApplicationInfo{
+            .application_name = "zigui",
+            .api_version = api_version,
+        };
         const info = vk.InstanceCreateInfo{
             .application_info = &app_info,
             .enabled_extension_count = extensions.len,
@@ -606,24 +643,82 @@ pub const Renderer = struct {
     fn create_device(self: *Renderer) Error!void {
         std.debug.assert(self.physical_device != null);
         std.debug.assert(self.device == null);
+        // The dmabuf-capable device is an attempt, never a requirement: when
+        // the create fails (missing extension or feature on this driver) the
+        // plain device serves everything except zero-copy import.
+        if (self.instance_11 and self.ycbcr_feature_present()) {
+            if (self.try_create_device(true)) {
+                self.dmabuf_capable = self.resolve_dmabuf_fns();
+                return self.finish_device_setup();
+            }
+        }
+        if (!self.try_create_device(false)) return error.DeviceCreateFailed;
+        return self.finish_device_setup();
+    }
+
+    // samplerYcbcrConversion is a feature bit, not an extension: it must be
+    // queried through features2 and explicitly enabled at device create.
+    fn ycbcr_feature_present(self: *Renderer) bool {
+        const instance = self.instance orelse return false;
+        const proc = vk.get_instance_proc_addr(instance, "vkGetPhysicalDeviceFeatures2") orelse
+            return false;
+        const get_features2: vk.GetPhysicalDeviceFeatures2Fn = @ptrCast(proc);
+        var ycbcr = vk.PhysicalDeviceSamplerYcbcrConversionFeatures{};
+        var features2 = vk.PhysicalDeviceFeatures2{ .p_next = &ycbcr };
+        get_features2(self.physical_device.?, &features2);
+        return ycbcr.sampler_ycbcr_conversion == 1;
+    }
+
+    fn try_create_device(self: *Renderer, with_dmabuf: bool) bool {
+        std.debug.assert(self.device == null);
         const priorities = [_]f32{1.0};
         const queue_info = vk.DeviceQueueCreateInfo{
             .queue_family_index = self.queue_family,
             .queue_priorities = &priorities,
         };
-        const extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
+        const plain_exts = [_][*:0]const u8{"VK_KHR_swapchain"};
+        const dmabuf_exts = [_][*:0]const u8{
+            "VK_KHR_swapchain",
+            "VK_KHR_external_memory_fd",
+            "VK_EXT_external_memory_dma_buf",
+            "VK_EXT_image_drm_format_modifier",
+            "VK_EXT_queue_family_foreign",
+        };
         // Per-instance clip rects ride on gl_ClipDistance, an opt-in feature.
         const features = vk.PhysicalDeviceFeatures{ .shader_clip_distance = 1 };
+        var ycbcr = vk.PhysicalDeviceSamplerYcbcrConversionFeatures{
+            .sampler_ycbcr_conversion = 1,
+        };
+        const ext_names: [*]const [*:0]const u8 = if (with_dmabuf) &dmabuf_exts else &plain_exts;
+        const ext_count: u32 = if (with_dmabuf) dmabuf_exts.len else plain_exts.len;
         const info = vk.DeviceCreateInfo{
+            .p_next = if (with_dmabuf) @as(?*const anyopaque, &ycbcr) else null,
             .queue_create_infos = @ptrCast(&queue_info),
-            .enabled_extension_count = extensions.len,
-            .enabled_extension_names = &extensions,
+            .enabled_extension_count = ext_count,
+            .enabled_extension_names = ext_names,
             .enabled_features = &features,
         };
         var device: *vk.Device = undefined;
         const rc = self.ifns.vkCreateDevice(self.physical_device.?, &info, null, &device);
-        if (rc != vk.SUCCESS) return error.DeviceCreateFailed;
+        if (rc != vk.SUCCESS) return false;
         self.device = device;
+        return true;
+    }
+
+    fn resolve_dmabuf_fns(self: *Renderer) bool {
+        const device = self.device.?;
+        const gdpa = self.ifns.vkGetDeviceProcAddr;
+        const create = gdpa(device, "vkCreateSamplerYcbcrConversion") orelse return false;
+        const destroy = gdpa(device, "vkDestroySamplerYcbcrConversion") orelse return false;
+        const fd_props = gdpa(device, "vkGetMemoryFdPropertiesKHR") orelse return false;
+        self.fn_create_ycbcr = @ptrCast(create);
+        self.fn_destroy_ycbcr = @ptrCast(destroy);
+        self.fn_memory_fd_props = @ptrCast(fd_props);
+        return true;
+    }
+
+    fn finish_device_setup(self: *Renderer) Error!void {
+        const device = self.device.?;
         vk.load_device_fns(device, self.ifns.vkGetDeviceProcAddr, &self.dfns) catch
             return error.LoaderMissing;
         var queue: *vk.Queue = undefined;
@@ -868,17 +963,17 @@ pub const Renderer = struct {
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
         // Storage buffers: quad + text + the four PrimPipe classes. Samplers:
-        // the mono and color atlases, the two blur sources, plus two (luma +
-        // chroma) per frame set.
+        // the mono and color atlases, the two blur sources, two (luma +
+        // chroma) per frame set, plus one per ycbcr (dmabuf) frame set.
         const pool_sizes = [_]vk.DescriptorPoolSize{
             .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 6 },
             .{
                 .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptor_count = 4 + 2 * MAX_FRAMES,
+                .descriptor_count = 4 + 3 * MAX_FRAMES,
             },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 8 + MAX_FRAMES,
+            .max_sets = 8 + 2 * MAX_FRAMES,
             .pool_size_count = pool_sizes.len,
             .pool_sizes = &pool_sizes,
         };
@@ -1131,6 +1226,66 @@ pub const Renderer = struct {
             frag_nv12,
             self.frame_pipeline_layout,
         );
+        if (self.dmabuf_capable) try self.build_ycbcr_pipeline(vert);
+    }
+
+    // The dmabuf pipeline differs from the staging pair in one structural
+    // way: ycbcr conversion lives in an IMMUTABLE sampler baked into the
+    // descriptor layout (the spec forbids a mutable one), so it needs its
+    // own DSL, layout, and descriptor sets - the push block stays shared.
+    fn build_ycbcr_pipeline(self: *Renderer, vert: vk.ShaderModule) Error!void {
+        std.debug.assert(self.dmabuf_capable);
+        std.debug.assert(self.ycbcr_pipeline == vk.NULL_HANDLE);
+        const device = self.device.?;
+        const create_conversion = self.fn_create_ycbcr.?;
+        const conv_info = vk.SamplerYcbcrConversionCreateInfo{};
+        if (create_conversion(device, &conv_info, null, &self.ycbcr_conversion) != vk.SUCCESS)
+            return error.PipelineCreateFailed;
+        const conv_chain = vk.SamplerYcbcrConversionInfo{ .conversion = self.ycbcr_conversion };
+        const sampler_info = vk.SamplerCreateInfo{ .p_next = &conv_chain };
+        if (self.dfns.vkCreateSampler(device, &sampler_info, null, &self.ycbcr_sampler) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+
+        const binding = vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .stage_flags = vk.SHADER_STAGE_FRAGMENT_BIT,
+            .immutable_samplers = @ptrCast(&self.ycbcr_sampler),
+        };
+        const dsl_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = 1,
+            .bindings = @ptrCast(&binding),
+        };
+        if (self.dfns.vkCreateDescriptorSetLayout(device, &dsl_info, null, &self.ycbcr_dsl) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+        const layouts = [_]vk.DescriptorSetLayout{self.ycbcr_dsl} ** MAX_FRAMES;
+        const set_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = MAX_FRAMES,
+            .set_layouts = &layouts,
+        };
+        if (self.dfns.vkAllocateDescriptorSets(device, &set_info, &self.ycbcr_dsets) !=
+            vk.SUCCESS) return error.PipelineCreateFailed;
+
+        const push_range = vk.PushConstantRange{
+            .stage_flags = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+            .size = @sizeOf(FramePush),
+        };
+        const layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .set_layouts = @ptrCast(&self.ycbcr_dsl),
+            .push_constant_range_count = 1,
+            .push_constant_ranges = @ptrCast(&push_range),
+        };
+        if (self.dfns.vkCreatePipelineLayout(
+            device,
+            &layout_info,
+            null,
+            &self.ycbcr_pipeline_layout,
+        ) != vk.SUCCESS) return error.PipelineCreateFailed;
+        const frag = try self.make_shader_module(&frame_ycbcr_frag_spv);
+        defer self.dfns.vkDestroyShaderModule(device, frag, null);
+        self.ycbcr_pipeline = try self.make_pipeline(vert, frag, self.ycbcr_pipeline_layout);
     }
 
     fn destroy_prim_pipe(self: *Renderer, pipe: *PrimPipe) void {
@@ -2012,27 +2167,47 @@ pub const Renderer = struct {
         for (batch) |prim| {
             const f = prim.frame;
             const raw = f.tex orelse continue;
-            const luma_view = @as(*const vk.ImageView, @ptrCast(@alignCast(raw))).*;
+            const luma_ptr: *const vk.ImageView = @ptrCast(@alignCast(raw));
+            const luma_view = luma_ptr.*;
             if (luma_view == vk.NULL_HANDLE) continue;
+            // A dmabuf frame and a bgra frame both carry a null chroma, so
+            // the owning surface's format tag is the only honest router.
+            const is_dmabuf = frame_surface_of(luma_ptr).format == .dmabuf_nv12;
             const nv12 = f.tex_cbcr != null;
-            const pipeline = if (nv12) self.frame_nv12_pipeline else self.frame_pipeline;
+            const pipeline = if (is_dmabuf)
+                self.ycbcr_pipeline
+            else if (nv12)
+                self.frame_nv12_pipeline
+            else
+                self.frame_pipeline;
             if (pipeline == vk.NULL_HANDLE) continue;
+            const layout = if (is_dmabuf)
+                self.ycbcr_pipeline_layout
+            else
+                self.frame_pipeline_layout;
             // RGBA never samples binding 1; aliasing it to luma keeps the set
-            // fully written so both pipelines share one layout.
+            // fully written so both staging pipelines share one layout.
             const chroma_view = if (f.tex_cbcr) |c|
                 @as(*const vk.ImageView, @ptrCast(@alignCast(c))).*
             else
                 luma_view;
             std.debug.assert(frame_offset.* < MAX_FRAMES);
-            const dset = self.frame_dsets[frame_offset.*];
+            const dset = if (is_dmabuf)
+                self.ycbcr_dsets[frame_offset.*]
+            else
+                self.frame_dsets[frame_offset.*];
             frame_offset.* += 1;
-            self.write_frame_dset(dset, luma_view, chroma_view);
+            if (is_dmabuf) {
+                self.write_ycbcr_dset(dset, luma_view);
+            } else {
+                self.write_frame_dset(dset, luma_view, chroma_view);
+            }
 
             self.dfns.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             self.dfns.vkCmdBindDescriptorSets(
                 cmd,
                 vk.PIPELINE_BIND_POINT_GRAPHICS,
-                self.frame_pipeline_layout,
+                layout,
                 0,
                 1,
                 @ptrCast(&dset),
@@ -2048,7 +2223,7 @@ pub const Renderer = struct {
             };
             self.dfns.vkCmdPushConstants(
                 cmd,
-                self.frame_pipeline_layout,
+                layout,
                 vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 @sizeOf(FramePush),
@@ -2056,6 +2231,16 @@ pub const Renderer = struct {
             );
             self.dfns.vkCmdDraw(cmd, 6, 1, 0, 0);
         }
+    }
+
+    // Every Linux import path hands the scene `&state.luma.view` as the luma
+    // texture pointer, so the owning surface is recoverable from it; the
+    // walk is what lets the encode read the format tag without widening the
+    // cross-platform frame primitive.
+    fn frame_surface_of(view_ptr: *const vk.ImageView) *const FrameSurface {
+        const plane: *const FramePlane = @fieldParentPtr("view", view_ptr);
+        const state: *const FrameSurfaceState = @fieldParentPtr("luma", plane);
+        return @fieldParentPtr("state", state);
     }
 
     // Writing right before the set's only bind in this freshly begun recording
@@ -2088,6 +2273,24 @@ pub const Renderer = struct {
             },
         };
         self.dfns.vkUpdateDescriptorSets(self.device.?, writes.len, &writes, 0, null);
+    }
+
+    // The sampler field is dead weight here: an immutable-sampler binding
+    // ignores it by spec, only the view and layout land.
+    fn write_ycbcr_dset(self: *Renderer, dset: vk.DescriptorSet, view: vk.ImageView) void {
+        std.debug.assert(view != vk.NULL_HANDLE);
+        std.debug.assert(self.ycbcr_sampler != vk.NULL_HANDLE);
+        const image_info = vk.DescriptorImageInfo{
+            .sampler = self.ycbcr_sampler,
+            .image_view = view,
+        };
+        const write = vk.WriteDescriptorSet{
+            .dst_set = dset,
+            .dst_binding = 0,
+            .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .image_info = @ptrCast(&image_info),
+        };
+        self.dfns.vkUpdateDescriptorSets(self.device.?, 1, @ptrCast(&write), 0, null);
     }
 
     fn encode_quad_batch(
@@ -2219,6 +2422,184 @@ pub const Renderer = struct {
         return out;
     }
 
+    // A producer's dmabuf NV12 frame, described the way VAAPI PRIME_2 export
+    // hands it out: one fd, per-plane offsets and strides, one DRM modifier.
+    pub const DmabufNv12Desc = struct {
+        fd: i32,
+        width: u32,
+        height: u32,
+        drm_modifier: u64,
+        offsets: [2]u64,
+        strides: [2]u32,
+    };
+
+    pub fn dmabuf_supported(self: *const Renderer) bool {
+        return self.dmabuf_capable;
+    }
+
+    // Wraps a decoder's dmabuf as a sampled multiplanar image: no copy is
+    // made, the image aliases the producer's memory for the surface's whole
+    // lifetime. The fd is ALWAYS consumed - by the allocation on success, by
+    // an explicit close on failure - so the caller dups it first if it still
+    // needs it and never closes it afterward.
+    pub fn create_dmabuf_nv12_surface(self: *Renderer, desc: DmabufNv12Desc) ?FrameSurface {
+        if (!self.dmabuf_capable) {
+            _ = close_fd(desc.fd);
+            return null;
+        }
+        std.debug.assert(desc.fd >= 0);
+        std.debug.assert(desc.width > 0);
+        std.debug.assert(desc.height > 0);
+        std.debug.assert(desc.width <= MAX_FRAME_DIM);
+        std.debug.assert(desc.height <= MAX_FRAME_DIM);
+        std.debug.assert(desc.width % 2 == 0);
+        std.debug.assert(desc.height % 2 == 0);
+        std.debug.assert(desc.strides[0] >= desc.width);
+        std.debug.assert(desc.strides[1] >= desc.width);
+        const device = self.device.?;
+
+        const plane_layouts = [2]vk.SubresourceLayout{
+            .{ .offset = desc.offsets[0], .row_pitch = desc.strides[0] },
+            .{ .offset = desc.offsets[1], .row_pitch = desc.strides[1] },
+        };
+        const modifier_info = vk.ImageDrmFormatModifierExplicitCreateInfoEXT{
+            .drm_format_modifier = desc.drm_modifier,
+            .drm_format_modifier_plane_count = plane_layouts.len,
+            .plane_layouts = &plane_layouts,
+        };
+        const external_info = vk.ExternalMemoryImageCreateInfo{ .p_next = &modifier_info };
+        const image_info = vk.ImageCreateInfo{
+            .p_next = &external_info,
+            .format = vk.FORMAT_G8_B8R8_2PLANE_420_UNORM,
+            .extent = .{ .width = desc.width, .height = desc.height, .depth = 1 },
+            .tiling = vk.IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+            .usage = vk.IMAGE_USAGE_SAMPLED_BIT,
+        };
+        var image: vk.Image = vk.NULL_HANDLE;
+        if (self.dfns.vkCreateImage(device, &image_info, null, &image) != vk.SUCCESS) {
+            _ = close_fd(desc.fd);
+            return null;
+        }
+
+        // The spec requires asking which memory types accept this exact fd
+        // before importing it.
+        var fd_props = vk.MemoryFdPropertiesKHR{};
+        const fd_props_fn = self.fn_memory_fd_props.?;
+        const props_rc = fd_props_fn(
+            device,
+            vk.EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            desc.fd,
+            &fd_props,
+        );
+        if (props_rc != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            _ = close_fd(desc.fd);
+            return null;
+        }
+        var requirements: vk.MemoryRequirements = undefined;
+        self.dfns.vkGetImageMemoryRequirements(device, image, &requirements);
+        const type_bits = requirements.memory_type_bits & fd_props.memory_type_bits;
+        const type_index = self.find_memory_type(type_bits, 0) orelse {
+            self.dfns.vkDestroyImage(device, image, null);
+            _ = close_fd(desc.fd);
+            return null;
+        };
+        const dedicated = vk.MemoryDedicatedAllocateInfo{ .image = image };
+        const import_info = vk.ImportMemoryFdInfoKHR{ .p_next = &dedicated, .fd = desc.fd };
+        const alloc_info = vk.MemoryAllocateInfo{
+            .p_next = &import_info,
+            .allocation_size = requirements.size,
+            .memory_type_index = type_index,
+        };
+        var memory: vk.DeviceMemory = vk.NULL_HANDLE;
+        if (self.dfns.vkAllocateMemory(device, &alloc_info, null, &memory) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            _ = close_fd(desc.fd);
+            return null;
+        }
+        // From here the fd belongs to the allocation; freeing the memory
+        // closes it, so failure paths must not close it again.
+        if (self.dfns.vkBindImageMemory(device, image, memory, 0) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+        const conv_chain = vk.SamplerYcbcrConversionInfo{ .conversion = self.ycbcr_conversion };
+        const view_info = vk.ImageViewCreateInfo{
+            .p_next = &conv_chain,
+            .image = image,
+            .format = vk.FORMAT_G8_B8R8_2PLANE_420_UNORM,
+        };
+        var view: vk.ImageView = vk.NULL_HANDLE;
+        if (self.dfns.vkCreateImageView(device, &view_info, null, &view) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+        // The producer is no Vulkan queue: ownership is acquired from the
+        // FOREIGN family while the layout moves to shader-read, before any
+        // draw samples the planes.
+        if (!self.acquire_dmabuf_image(image)) {
+            self.dfns.vkDestroyImageView(device, view, null);
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+
+        var out = FrameSurface{
+            .format = .dmabuf_nv12,
+            .width = desc.width,
+            .height = desc.height,
+            .stride = desc.strides[0],
+            .pixels = @ptrCast(&shared_frame_pixel),
+            .chroma_stride = desc.strides[1],
+        };
+        out.state.renderer = self;
+        out.state.luma = .{ .image = image, .memory = memory, .view = view };
+        // The producer finished writing before exporting; the frame is
+        // sampleable from the first import.
+        out.state.uploaded = true;
+        return out;
+    }
+
+    // Synchronous like submit_frame_upload: surface creation runs at producer
+    // pace, and the wait keeps the one upload command buffer reusable.
+    fn acquire_dmabuf_image(self: *Renderer, image: vk.Image) bool {
+        std.debug.assert(image != vk.NULL_HANDLE);
+        const cmd = self.upload_cmd orelse return false;
+        _ = self.dfns.vkResetCommandBuffer(cmd, 0);
+        const begin = vk.CommandBufferBeginInfo{};
+        _ = self.dfns.vkBeginCommandBuffer(cmd, &begin);
+        const barrier = vk.ImageMemoryBarrier{
+            .src_access_mask = 0,
+            .dst_access_mask = vk.ACCESS_SHADER_READ_BIT,
+            .old_layout = vk.IMAGE_LAYOUT_UNDEFINED,
+            .new_layout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .src_queue_family_index = vk.QUEUE_FAMILY_FOREIGN_EXT,
+            .dst_queue_family_index = self.queue_family,
+            .image = image,
+        };
+        const one: [*]const vk.ImageMemoryBarrier = @ptrCast(&barrier);
+        self.dfns.vkCmdPipelineBarrier(
+            cmd,
+            vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            one,
+        );
+        _ = self.dfns.vkEndCommandBuffer(cmd);
+        const submit = vk.SubmitInfo{ .command_buffers = @ptrCast(&cmd) };
+        if (self.dfns.vkQueueSubmit(self.queue.?, 1, @ptrCast(&submit), vk.NULL_HANDLE) !=
+            vk.SUCCESS) return false;
+        _ = self.dfns.vkQueueWaitIdle(self.queue.?);
+        return true;
+    }
+
     // Copies the caller's NV12 planes through the surface's staging buffer into
     // its images. Call only while the surface is available(): with no ref held
     // by the mailbox or the GPU ring, nothing in flight samples the planes.
@@ -2263,6 +2644,7 @@ pub const Renderer = struct {
             .bgra => self.import_bgra(surface),
             .nv12 => self.import_nv12_surface(surface),
             .shared_nv12 => import_shared_nv12_surface(surface),
+            .dmabuf_nv12 => import_dmabuf_surface(surface),
         };
     }
 
@@ -2342,6 +2724,24 @@ pub const Renderer = struct {
         };
     }
 
+    // The dmabuf image needs no chroma pointer: its single ycbcr view covers
+    // both planes. The encode recognizes the surface by walking back from
+    // the luma view pointer (frame_surface_of) and picks the ycbcr pipeline.
+    fn import_dmabuf_surface(surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.format == .dmabuf_nv12);
+        std.debug.assert(surface.state.uploaded);
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = @ptrCast(&surface.state.luma.view),
+            .chroma = null,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
     fn import_shared_nv12_surface(surface: *FrameSurface) ?Nv12Textures {
         std.debug.assert(surface.format == .shared_nv12);
         std.debug.assert(surface.width % 2 == 0);
@@ -2386,10 +2786,14 @@ pub const Renderer = struct {
                 h / 2,
                 vk.FORMAT_R8G8_UNORM,
             ),
+            // A dmabuf surface owns its imported image from creation and
+            // never stages.
+            .dmabuf_nv12 => unreachable,
         };
         const staging_bytes: usize = switch (surface.format) {
             .bgra => @as(usize, w) * h * 4,
             .nv12, .shared_nv12 => @as(usize, w) * h * 3 / 2,
+            .dmabuf_nv12 => unreachable,
         };
         if (!ok or !self.create_frame_staging(&surface.state, staging_bytes)) {
             destroy_frame_plane(self, &surface.state.luma);
@@ -2557,6 +2961,13 @@ pub const Renderer = struct {
         self.dfns.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, null, 0, null, 1, one);
     }
 };
+
+extern "c" fn close(fd: c_int) c_int;
+
+fn close_fd(fd: i32) c_int {
+    std.debug.assert(fd >= 0);
+    return close(fd);
+}
 
 // Packs `rows` rows of `row_bytes` from a strided source into a tight
 // destination (the staging layout vkCmdCopyBufferToImage expects with

@@ -85,6 +85,7 @@ pub const DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
 pub const FORMAT_R8_UNORM: u32 = 9;
 pub const FORMAT_R8G8_UNORM: u32 = 16;
 pub const FORMAT_R8G8B8A8_UNORM: u32 = 37;
+pub const FORMAT_G8_B8R8_2PLANE_420_UNORM: u32 = 1000156003;
 pub const IMAGE_TYPE_2D: u32 = 1;
 pub const IMAGE_TILING_OPTIMAL: u32 = 0;
 pub const IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 2;
@@ -99,6 +100,9 @@ pub const PIPELINE_STAGE_FRAGMENT_SHADER_BIT: u32 = 0x80;
 pub const ACCESS_TRANSFER_WRITE_BIT: u32 = 0x1000;
 pub const ACCESS_SHADER_READ_BIT: u32 = 0x20;
 pub const QUEUE_FAMILY_IGNORED: u32 = 0xFFFFFFFF;
+// The acquire side of a dmabuf import: the producer is no Vulkan queue, so
+// ownership transfers from the FOREIGN family (VK_EXT_queue_family_foreign).
+pub const QUEUE_FAMILY_FOREIGN_EXT: u32 = 0xFFFFFFFD;
 pub const FILTER_LINEAR: u32 = 1;
 pub const SAMPLER_MIPMAP_MODE_NEAREST: u32 = 0;
 pub const SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: u32 = 2;
@@ -153,8 +157,18 @@ const ST_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1000005000;
 const ST_IMAGE_CREATE_INFO: u32 = 14;
 const ST_SAMPLER_CREATE_INFO: u32 = 31;
 const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
+const ST_PHYSICAL_DEVICE_FEATURES_2: u32 = 1000059000;
+const ST_EXTERNAL_MEMORY_IMAGE_CREATE_INFO: u32 = 1000072001;
+const ST_IMPORT_MEMORY_FD_INFO_KHR: u32 = 1000074000;
+const ST_MEMORY_FD_PROPERTIES_KHR: u32 = 1000074001;
+const ST_MEMORY_DEDICATED_ALLOCATE_INFO: u32 = 1000127001;
+const ST_SAMPLER_YCBCR_CONVERSION_CREATE_INFO: u32 = 1000156000;
+const ST_SAMPLER_YCBCR_CONVERSION_INFO: u32 = 1000156001;
+const ST_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: u32 = 1000156004;
+const ST_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT: u32 = 1000158004;
 
 pub const API_VERSION_1_0: u32 = 1 << 22;
+pub const API_VERSION_1_1: u32 = (1 << 22) | (1 << 12);
 
 pub const ApplicationInfo = extern struct {
     s_type: u32 = ST_APPLICATION_INFO,
@@ -310,6 +324,124 @@ pub const CreateXcbSurfaceFn = *const fn (
     *const XcbSurfaceCreateInfoKHR,
     ?*const anyopaque,
     *SurfaceKHR,
+) callconv(.c) Result;
+
+// ---- dmabuf zero-copy NV12 import (the IOSurface analogue) ----
+// A decoder's dmabuf fd becomes a multiplanar VkImage sampled through a
+// ycbcr-conversion sampler. Everything here is Vulkan 1.1 core or device
+// extensions resolved by name at runtime - none of it may sit in the strict
+// fn tables, because a 1.0 loader or an extensionless device has no entry.
+
+pub const EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT: u32 = 0x200;
+pub const IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: u32 = 1000158000;
+pub const SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709: u32 = 2;
+pub const SAMPLER_YCBCR_RANGE_ITU_NARROW: u32 = 1;
+pub const CHROMA_LOCATION_COSITED_EVEN: u32 = 0;
+pub const CHROMA_LOCATION_MIDPOINT: u32 = 1;
+
+pub const SamplerYcbcrConversion = u64;
+
+pub const PhysicalDeviceFeatures2 = extern struct {
+    s_type: u32 = ST_PHYSICAL_DEVICE_FEATURES_2,
+    p_next: ?*anyopaque = null,
+    features: PhysicalDeviceFeatures = .{},
+};
+
+pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct {
+    s_type: u32 = ST_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES,
+    p_next: ?*anyopaque = null,
+    sampler_ycbcr_conversion: Bool32 = 0,
+};
+
+pub const ExtensionProperties = extern struct {
+    extension_name: [256]u8,
+    spec_version: u32,
+};
+
+pub const ExternalMemoryImageCreateInfo = extern struct {
+    s_type: u32 = ST_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+    p_next: ?*const anyopaque = null,
+    handle_types: u32 = EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+};
+
+pub const ImportMemoryFdInfoKHR = extern struct {
+    s_type: u32 = ST_IMPORT_MEMORY_FD_INFO_KHR,
+    p_next: ?*const anyopaque = null,
+    handle_type: u32 = EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    fd: i32,
+};
+
+pub const MemoryFdPropertiesKHR = extern struct {
+    s_type: u32 = ST_MEMORY_FD_PROPERTIES_KHR,
+    p_next: ?*anyopaque = null,
+    memory_type_bits: u32 = 0,
+};
+
+pub const MemoryDedicatedAllocateInfo = extern struct {
+    s_type: u32 = ST_MEMORY_DEDICATED_ALLOCATE_INFO,
+    p_next: ?*const anyopaque = null,
+    image: Image = NULL_HANDLE,
+    buffer: Buffer = NULL_HANDLE,
+};
+
+pub const SubresourceLayout = extern struct {
+    offset: DeviceSize,
+    size: DeviceSize = 0,
+    row_pitch: DeviceSize,
+    array_pitch: DeviceSize = 0,
+    depth_pitch: DeviceSize = 0,
+};
+
+pub const ImageDrmFormatModifierExplicitCreateInfoEXT = extern struct {
+    s_type: u32 = ST_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+    p_next: ?*const anyopaque = null,
+    drm_format_modifier: u64,
+    drm_format_modifier_plane_count: u32,
+    plane_layouts: [*]const SubresourceLayout,
+};
+
+pub const SamplerYcbcrConversionCreateInfo = extern struct {
+    s_type: u32 = ST_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+    p_next: ?*const anyopaque = null,
+    format: u32 = FORMAT_G8_B8R8_2PLANE_420_UNORM,
+    ycbcr_model: u32 = SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709,
+    ycbcr_range: u32 = SAMPLER_YCBCR_RANGE_ITU_NARROW,
+    components: ComponentMapping = .{},
+    x_chroma_offset: u32 = CHROMA_LOCATION_MIDPOINT,
+    y_chroma_offset: u32 = CHROMA_LOCATION_MIDPOINT,
+    chroma_filter: u32 = FILTER_LINEAR,
+    force_explicit_reconstruction: Bool32 = 0,
+};
+
+pub const SamplerYcbcrConversionInfo = extern struct {
+    s_type: u32 = ST_SAMPLER_YCBCR_CONVERSION_INFO,
+    p_next: ?*const anyopaque = null,
+    conversion: SamplerYcbcrConversion,
+};
+
+pub const GetPhysicalDeviceFeatures2Fn = *const fn (
+    *PhysicalDevice,
+    *PhysicalDeviceFeatures2,
+) callconv(.c) void;
+
+pub const CreateSamplerYcbcrConversionFn = *const fn (
+    *Device,
+    *const SamplerYcbcrConversionCreateInfo,
+    ?*const anyopaque,
+    *SamplerYcbcrConversion,
+) callconv(.c) Result;
+
+pub const DestroySamplerYcbcrConversionFn = *const fn (
+    *Device,
+    SamplerYcbcrConversion,
+    ?*const anyopaque,
+) callconv(.c) void;
+
+pub const GetMemoryFdPropertiesFn = *const fn (
+    *Device,
+    u32,
+    i32,
+    *MemoryFdPropertiesKHR,
 ) callconv(.c) Result;
 
 pub const SurfaceCapabilitiesKHR = extern struct {
@@ -880,6 +1012,12 @@ pub const InstanceFns = struct {
         ?*const anyopaque,
         **Device,
     ) callconv(.c) Result,
+    vkEnumerateDeviceExtensionProperties: *const fn (
+        *PhysicalDevice,
+        ?[*:0]const u8,
+        *u32,
+        ?[*]ExtensionProperties,
+    ) callconv(.c) Result,
     vkGetDeviceProcAddr: GetDeviceProcAddr,
     vkDestroySurfaceKHR: *const fn (*Instance, SurfaceKHR, ?*const anyopaque) callconv(.c) void,
     vkGetPhysicalDeviceSurfaceSupportKHR: *const fn (
@@ -1153,6 +1291,19 @@ pub fn load() Error!void {
     }
     g_loaded = true;
     std.debug.assert(g_loaded);
+}
+
+// 1.0 loaders predate vkEnumerateInstanceVersion, so its absence IS the
+// version answer; the probe must run before vkCreateInstance because a 1.0
+// loader rejects an apiVersion above what it speaks.
+pub fn instance_api_version() u32 {
+    std.debug.assert(g_loaded);
+    const proc = get_instance_proc_addr(null, "vkEnumerateInstanceVersion") orelse
+        return API_VERSION_1_0;
+    const enumerate: *const fn (*u32) callconv(.c) Result = @ptrCast(proc);
+    var version: u32 = API_VERSION_1_0;
+    if (enumerate(&version) != SUCCESS) return API_VERSION_1_0;
+    return version;
 }
 
 pub fn load_instance_fns(instance: *Instance, fns: *InstanceFns) Error!void {
