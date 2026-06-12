@@ -86,6 +86,18 @@ pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
     return null;
 }
 
+// Caption slots indexed from the right edge (slot 0 = rightmost). Linux
+// follows the desktop's button-layout; Windows keeps its fixed trio.
+pub const CaptionSlots = struct { kinds: [3]CaptionButton, count: u8 };
+
+pub fn caption_slots() CaptionSlots {
+    if (builtin.os.tag == .linux) {
+        const slots = impl.caption_slots();
+        return .{ .kinds = slots.kinds, .count = slots.count };
+    }
+    return .{ .kinds = .{ .close, .maximize, .minimize }, .count = 3 };
+}
+
 pub fn hovered_caption_button() CaptionButton {
     if (builtin.os.tag == .macos) return .none;
     return impl.hovered_caption_button();
