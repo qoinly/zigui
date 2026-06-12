@@ -45,6 +45,8 @@ const icon_render = @import("render/icon.zig");
 const color = @import("color.zig");
 const callbacks = @import("callbacks.zig");
 const custom_paint = @import("window/paint.zig");
+const custom_shell = @import("custom_shell.zig");
+const theme_resolve = @import("kit/theme_resolve.zig");
 const primitives = @import("primitives.zig");
 const frame_mod = @import("frame.zig");
 
@@ -1120,6 +1122,18 @@ const SelectOverlaySpec = struct {
                 pc.animating = true; // poll the native field while the combobox is open
                 var tmp: [256]u8 = undefined;
                 fld.set(pc.text_field_value(&tmp));
+                if (!custom_shell.text_field_native_paint) {
+                    try draw_field_overlay(
+                        b,
+                        pc,
+                        sr[0],
+                        sr[1],
+                        sr[2],
+                        sr[3],
+                        fld.slice(),
+                        theme,
+                    );
+                }
             }
         };
         if (o.on_dismiss) |cb|
@@ -1375,12 +1389,13 @@ const EDITOR_H: f32 = 18;
 
 // Drive the shared native editor over a focused field's rect and poll the value.
 fn edit_native(
+    b: *RenderBuilder,
     pc: *custom_paint.PaintContext,
     r: BoundsF,
     field: *TextField,
     theme: *const Theme,
     id: u32,
-) void {
+) RenderError!void {
     std.debug.assert(id != 0); // 0 is the native editor's inactive sentinel
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
     const ey = r.origin.y + (r.size.height - EDITOR_H) / 2;
@@ -1401,6 +1416,89 @@ fn edit_native(
     pc.animating = true;
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
+    if (!custom_shell.text_field_native_paint)
+        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme);
+}
+
+// On a backend whose editor is state-only (no native control to float), the
+// overlay's pixels are drawn here, where the text tooling lives: the live
+// value, the selection band, and a blinking caret, scrolled to keep the
+// caret inside the box and clipped to it.
+fn draw_field_overlay(
+    b: *RenderBuilder,
+    pc: *custom_paint.PaintContext,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    value: []const u8,
+    theme: *const Theme,
+) RenderError!void {
+    std.debug.assert(!custom_shell.text_field_native_paint);
+    // A secure field must never paint its plaintext; bullets carry the same
+    // caret/selection offsets because the mask is per-codepoint.
+    var mask_buf: [256 * 3]u8 = undefined;
+    const shown_value = if (custom_shell.text_field_secure())
+        field_mask(value, &mask_buf)
+    else
+        value;
+    const sty = label_render.Style{ .font_size = theme.font_size, .color = theme.foreground };
+    // An empty value measures zero; a reference glyph keeps the caret's
+    // vertical metrics stable while the field is empty.
+    const m = label_render.measure(b, if (shown_value.len == 0) "M" else shown_value, sty);
+    const caret = @min(mask_offset(value, custom_shell.text_field_caret(), shown_value), shown_value.len);
+    const raw_sel = custom_shell.text_field_selection();
+    const sel = [2]usize{
+        mask_offset(value, raw_sel[0], shown_value),
+        mask_offset(value, raw_sel[1], shown_value),
+    };
+    const caret_x = label_render.measure(b, shown_value[0..caret], sty).width;
+    const shift: f32 = if (caret_x > w) caret_x - w else 0;
+    const top = label_render.centered_top(y, h, m);
+    const line_h = @max(m.ascent + m.descent, theme.font_size);
+    const clip: [4]f32 = .{ x, y - 2, w, h + 4 }; // caret may stand taller than glyphs
+
+    if (sel[0] != sel[1] and sel[1] <= shown_value.len) {
+        // The textarea's selection recipe, so the two editors read as one family.
+        var band_color = theme_resolve.mix(theme.background, theme.ring, 0.5);
+        band_color.a = 0.30;
+        const ax = label_render.measure(b, shown_value[0..sel[0]], sty).width;
+        const bx = label_render.measure(b, shown_value[0..sel[1]], sty).width;
+        var band = primitives.Quad.init(x - shift + ax, top, bx - ax, line_h);
+        _ = band.set_background(band_color).set_clip_bounds(clip);
+        try b.append_quad(band);
+    }
+
+    const t0 = b.sprites.items.len;
+    _ = try label_render.render(b, x - shift, top, shown_value, sty);
+    for (b.sprites.items[t0..]) |*sp| {
+        sp.clip_bounds = theme_resolve.clip_intersect(sp.clip_bounds, clip);
+    }
+
+    if (@mod(pc.now_s, 1.0) < 0.5) {
+        var caret_q = primitives.Quad.init(x - shift + caret_x, top, 1.5, line_h);
+        _ = caret_q.set_background(theme.foreground).set_clip_bounds(clip);
+        try b.append_quad(caret_q);
+    }
+}
+
+// One U+2022 (3 bytes) per codepoint; a 256-byte value caps the buffer.
+fn field_mask(value: []const u8, buf: *[256 * 3]u8) []const u8 {
+    const dot = "\u{2022}";
+    const n = std.unicode.utf8CountCodepoints(value) catch value.len;
+    const count = @min(n, 256);
+    var i: usize = 0;
+    while (i < count) : (i += 1) @memcpy(buf[i * 3 .. i * 3 + 3], dot);
+    return buf[0 .. count * 3];
+}
+
+// Map a byte offset in the real value onto the shown string: identity when
+// unmasked, codepoints-times-three when bullets replaced the text.
+fn mask_offset(value: []const u8, at: usize, shown: []const u8) usize {
+    if (shown.ptr == value.ptr) return @min(at, shown.len);
+    const clamped = @min(at, value.len);
+    const n = std.unicode.utf8CountCodepoints(value[0..clamped]) catch clamped;
+    return @min(n * 3, shown.len);
 }
 
 pub const TextInputOpts = struct {
@@ -1436,7 +1534,7 @@ const TextInputSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            edit_native(pc, r, self.field, self.theme, self.o.id);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
         };
     }
 };
@@ -1480,7 +1578,7 @@ const TextEditableSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            edit_native(pc, r, self.field, self.theme, self.o.id);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
         };
     }
 };

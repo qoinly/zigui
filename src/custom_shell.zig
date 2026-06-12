@@ -33,6 +33,24 @@ pub const current_shift_down = impl.current_shift_down;
 pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
+
+// Whether the platform's text-field overlay paints itself (a real native
+// control floats above the surface). When false the platform owns only the
+// editing state and the kit draws the value, caret, and selection.
+pub const text_field_native_paint = builtin.os.tag != .linux;
+
+pub fn text_field_caret() usize {
+    return if (builtin.os.tag == .linux) impl.text_field_caret() else 0;
+}
+
+pub fn text_field_selection() [2]usize {
+    return if (builtin.os.tag == .linux) impl.text_field_selection() else .{ 0, 0 };
+}
+
+pub fn text_field_secure() bool {
+    return if (builtin.os.tag == .linux) impl.text_field_secure() else false;
+}
+
 pub const pasteboard_read_into = impl.pasteboard_read_into;
 pub const pasteboard_write_string = impl.pasteboard_write_string;
 pub const clipboard_changed_external = impl.clipboard_changed_external;

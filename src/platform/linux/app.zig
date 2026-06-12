@@ -5,6 +5,7 @@
 const std = @import("std");
 const wl = @import("wayland.zig");
 const loop = @import("loop.zig");
+const shell = @import("custom_shell.zig");
 
 const pollfd = extern struct { fd: i32, events: i16, revents: i16 };
 extern "c" fn poll(fds: [*]pollfd, count: c_ulong, timeout_ms: c_int) c_int;
@@ -64,6 +65,7 @@ pub const App = struct {
             } else {
                 wl.cancel_read();
             }
+            shell.tick_key_repeat();
             loop.tick_all();
         }
     }
