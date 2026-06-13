@@ -113,13 +113,17 @@ fn android_lib(
     , .{ sysroot, sysroot, lib_dir }));
 
     const query = std.Target.Query{ .cpu_arch = arch, .os_tag = .linux, .abi = .android };
+    const target = b.resolveTargetQuery(query);
+    const zigui_dep = b.dependency("zigui", .{ .target = target, .optimize = optimize });
+    const zigui = zigui_dep.module("zigui");
     const lib = b.addLibrary(.{
         .name = "zigui_android_app",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.resolveTargetQuery(query),
+            .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "zigui", .module = zigui }},
         }),
     });
     lib.setLibCFile(libc);
