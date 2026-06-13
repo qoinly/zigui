@@ -9,7 +9,7 @@
 ## Requirements
 
 - Zig 0.16.0
-- macOS (Metal) or Windows (Direct3D 11)
+- macOS (Metal), Windows (Direct3D 11), or Linux (Vulkan; Wayland or X11)
 
 ## Install
 
@@ -19,7 +19,7 @@ Add zigui to your project:
 zig fetch --save git+https://github.com/qoinly/zigui
 ```
 
-Wire the module into your exe in `build.zig` (it carries its own framework links,
+Wire the module into your exe in `build.zig` (it carries its own platform links,
 so you do not repeat them):
 
 ```zig
@@ -75,7 +75,7 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 |---|---|---|
 | macOS | works | Metal |
 | Windows | works | Direct3D 11 |
-| Linux | not started | - |
+| Linux | works | Vulkan (Wayland + X11) |
 
 What works:
 
@@ -93,10 +93,10 @@ What works:
   depth-ordered hit-testing and drag capture.
 - Overlays - dialog, sheet, popover, nested menus - drawn over a blurred backdrop.
 - Custom window chrome: painted title band, native traffic lights on macOS,
-  caption buttons on Windows, drag-to-move, double-click zoom.
+  caption buttons on Windows and Linux, drag-to-move, double-click zoom.
 - Multiple windows, each with its own state, render loop, and input routing.
-- External frames: draw a decoded video / remote screen as a node (zero-copy NV12,
-  YUV->RGB on the GPU).
+- External frames: draw a decoded video / remote screen as a node (NV12,
+  YUV->RGB on the GPU; zero-copy import on macOS, Windows, and Linux).
 - Input capture: grab the mouse and keyboard for raw relative motion + scancodes.
 - System integration: clipboard read/write + change-notify, native fullscreen, and
   display enumeration.
@@ -105,8 +105,8 @@ What works:
 
 ## Limitations
 
-- Linux is not started.
 - On Windows, native file dialogs and the detached-panel helpers aren't there yet.
+- On Linux, fractional display scaling falls back to the nearest integer factor.
 - No accessibility. Nothing wires up VoiceOver or NSAccessibility roles and
   labels.
 - Text is BMP only. No IME composition (so no CJK input), no emoji or colour

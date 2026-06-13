@@ -4,7 +4,7 @@ zigui draws native UI on the GPU. You build a tree of nodes and return it from a
 view function; zigui lays it out and draws it. The tree is rebuilt every frame, so
 the UI is always a function of your state.
 
-macOS and Windows. Zig 0.16.0.
+macOS, Windows, and Linux. Zig 0.16.0.
 
 ## A window
 

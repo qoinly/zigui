@@ -2,8 +2,8 @@
 
 A `frame` node draws a GPU texture you own - a decoded video frame, a remote
 screen, a camera feed - and fits it into the layout like any other node. zigui
-imports the texture without a CPU copy (NV12, with the YUV->RGB done in the shader)
-and never reads the pixels itself.
+imports the texture as NV12, does the YUV->RGB in the shader, and never reads the
+pixels itself.
 
 You bring the decoder, the network, and the buffer pool; zigui just draws what you
 hand it. `examples/frame_demo.zig` is a full producer.
@@ -28,7 +28,10 @@ defer source.deinit();
 
 `renderer_handle()` returns the backend renderer, and only works inside a render
 pass. `pixel_buffer` is the platform texture your decoder fills - a `CVPixelBuffer`
-(IOSurface-backed NV12) on macOS, a `zigui.FrameSurface` on Windows.
+(IOSurface-backed NV12) on macOS, a `zigui.FrameSurface` on Windows and Linux. All
+three import a producer's GPU texture zero-copy (IOSurface on macOS, dmabuf on
+Linux, a same-device or shared NT-handle texture on Windows); a Windows
+decode-only array falls back to a GPU-side copy.
 
 ## The node
 
