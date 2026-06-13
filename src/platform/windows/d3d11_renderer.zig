@@ -899,6 +899,7 @@ pub const Renderer = struct {
         std.debug.assert(d.Format == dxgi.DXGI_FORMAT_NV12);
         std.debug.assert(d.Width == desc.width);
         std.debug.assert(d.Height == desc.height);
+        std.debug.assert(desc.array_slice < d.ArraySize);
         if (d.BindFlags & d3d11.D3D11_BIND_SHADER_RESOURCE == 0) return false;
         if (d.ArraySize != 1) return false;
         if (desc.array_slice != 0) return false;
