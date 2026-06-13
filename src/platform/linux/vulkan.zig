@@ -154,6 +154,7 @@ const ST_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
 const ST_PRESENT_INFO_KHR: u32 = 1000001001;
 const ST_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
 const ST_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1000005000;
+const ST_ANDROID_SURFACE_CREATE_INFO_KHR: u32 = 1000008000;
 const ST_IMAGE_CREATE_INFO: u32 = 14;
 const ST_SAMPLER_CREATE_INFO: u32 = 31;
 const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
@@ -322,6 +323,20 @@ pub const CreateWaylandSurfaceFn = *const fn (
 pub const CreateXcbSurfaceFn = *const fn (
     *Instance,
     *const XcbSurfaceCreateInfoKHR,
+    ?*const anyopaque,
+    *SurfaceKHR,
+) callconv(.c) Result;
+
+pub const AndroidSurfaceCreateInfoKHR = extern struct {
+    s_type: u32 = ST_ANDROID_SURFACE_CREATE_INFO_KHR,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    window: *anyopaque, // ANativeWindow*
+};
+
+pub const CreateAndroidSurfaceFn = *const fn (
+    *Instance,
+    *const AndroidSurfaceCreateInfoKHR,
     ?*const anyopaque,
     *SurfaceKHR,
 ) callconv(.c) Result;

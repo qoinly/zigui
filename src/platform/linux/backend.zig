@@ -4,6 +4,7 @@
 // per operation - one predictable branch per event, never per pixel.
 
 const std = @import("std");
+const vk = @import("vulkan.zig");
 const wl = @import("wayland.zig");
 const xcb = @import("xcb.zig");
 const wayland_shell = @import("wayland_shell.zig");
@@ -96,4 +97,36 @@ pub fn xcb_target(target: *anyopaque) ?XcbTarget {
     const connection = xcb.conn orelse return null;
     if (win.window == 0) return null;
     return .{ .connection = @ptrCast(connection), .window = win.window };
+}
+
+// Build the window-system VkSurfaceKHR for the active arm. The constructors
+// are backend-specific instance extensions, fetched by name (they cannot live
+// in the strict InstanceFns table - loading the inactive one would fail).
+pub fn create_vk_surface(instance: *vk.Instance, target: *anyopaque) ?vk.SurfaceKHR {
+    var surface: vk.SurfaceKHR = vk.NULL_HANDLE;
+    switch (active) {
+        .wayland => {
+            const t = wayland_target(target) orelse return null;
+            const create: vk.CreateWaylandSurfaceFn = @ptrCast(
+                vk.get_instance_proc_addr(instance, "vkCreateWaylandSurfaceKHR") orelse return null,
+            );
+            const info = vk.WaylandSurfaceCreateInfoKHR{
+                .display = t.display,
+                .surface = t.surface,
+            };
+            if (create(instance, &info, null, &surface) != vk.SUCCESS) return null;
+        },
+        .x11 => {
+            const t = xcb_target(target) orelse return null;
+            const create: vk.CreateXcbSurfaceFn = @ptrCast(
+                vk.get_instance_proc_addr(instance, "vkCreateXcbSurfaceKHR") orelse return null,
+            );
+            const info = vk.XcbSurfaceCreateInfoKHR{
+                .connection = t.connection,
+                .window = t.window,
+            };
+            if (create(instance, &info, null, &surface) != vk.SUCCESS) return null;
+        },
+    }
+    return surface;
 }
