@@ -46,6 +46,14 @@ pub fn release(ptr: anytype) void {
     }
 }
 
+// AddRef a COM pointer through its IUnknown-compatible vtable head. The caller
+// then owns one reference and must release it exactly once. Used when a borrowed
+// resource must outlive the call that handed it over.
+pub fn add_ref(obj: *anyopaque) void {
+    const unk: *IUnknown = @ptrCast(@alignCast(obj));
+    _ = unk.vtable.AddRef(unk);
+}
+
 pub fn query_interface(obj: *anyopaque, iid: *const GUID, out: *?*anyopaque) HRESULT {
     const unk: *IUnknown = @ptrCast(@alignCast(obj));
     return unk.vtable.QueryInterface(unk, iid, out);

@@ -2,6 +2,7 @@
 // we call; earlier unused slots are pointer-sized placeholders so the call-site
 // slot indices still line up with the COM ABI.
 
+const std = @import("std");
 const win32 = @import("win32.zig");
 const com = @import("com.zig");
 
@@ -16,6 +17,13 @@ pub const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
 pub const DXGI_FORMAT_R8G8_UNORM: u32 = 49;
 pub const DXGI_FORMAT_R8_UNORM: u32 = 61;
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+// Bi-planar 4:2:0: one texture, R8 luma plane plus a half-size R8G8 chroma plane
+// selected by the SRV's format (D3D11 has no plane-slice field).
+pub const DXGI_FORMAT_NV12: u32 = 103;
+
+// Access rights for IDXGIResource1::CreateSharedHandle.
+pub const DXGI_SHARED_RESOURCE_READ: u32 = 0x80000000;
+pub const DXGI_SHARED_RESOURCE_WRITE: u32 = 1;
 
 pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: u32 = 0x00000020;
 
@@ -81,6 +89,20 @@ pub const IID_IDXGIResource = com.guid(
     0x0b,
 );
 
+pub const IID_IDXGIResource1 = com.guid(
+    0x30961379,
+    0x4609,
+    0x4a41,
+    0x99,
+    0x8e,
+    0x54,
+    0xfe,
+    0x56,
+    0x7e,
+    0xe0,
+    0xc1,
+);
+
 pub const IID_IDXGIKeyedMutex = com.guid(
     0x9d8e1289,
     0xd7b3,
@@ -119,6 +141,47 @@ pub const IDXGIResource = extern struct {
 
     pub fn get_shared_handle(self: *IDXGIResource, out: *?HANDLE) HRESULT {
         return self.vtable.GetSharedHandle(self, out);
+    }
+};
+
+// IDXGIResource1 adds slots 12..13 over IDXGIResource. CreateSharedHandle is the
+// only way to export an NT handle for a resource created with SHARED_NTHANDLE |
+// SHARED_KEYEDMUTEX; IDXGIResource::GetSharedHandle fails for those resources.
+pub const IDXGIResource1 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const anyopaque,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetParent: *const anyopaque,
+        GetDevice: *const anyopaque,
+        GetSharedHandle: *const anyopaque,
+        GetUsage: *const anyopaque,
+        SetEvictionPriority: *const anyopaque,
+        GetEvictionPriority: *const anyopaque,
+        CreateSubresourceSurface: *const anyopaque,
+        CreateSharedHandle: *const fn (
+            *IDXGIResource1,
+            ?*const anyopaque,
+            u32,
+            ?[*:0]const u16,
+            *?HANDLE,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(VTable, "CreateSharedHandle") ==
+            13 * @sizeOf(*const anyopaque));
+    }
+
+    // Name is NULL: the handle is opened by value via OpenSharedResource1, not by
+    // name. The returned NT handle is the caller's to CloseHandle exactly once.
+    pub fn create_shared_handle(self: *IDXGIResource1, access: u32, out: *?HANDLE) HRESULT {
+        return self.vtable.CreateSharedHandle(self, null, access, null, out);
     }
 };
 
