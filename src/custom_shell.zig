@@ -4,7 +4,13 @@
 
 const builtin = @import("builtin");
 
-const impl = switch (builtin.os.tag) {
+// Android is os.tag == .linux but has no desktop shell (NativeActivity owns one
+// fullscreen surface, no CSD, no clipboard/grab); it gets its own arm ahead of
+// the os.tag switch, mirroring app.zig. Its pub surface matches the Linux one
+// exactly so the os.tag == .linux branches below resolve to it unchanged.
+const impl = if (builtin.abi.isAndroid())
+    @import("platform/android/custom_shell.zig")
+else switch (builtin.os.tag) {
     .macos => @import("platform/macos/custom_shell.zig"),
     .windows => @import("platform/windows/custom_shell.zig"),
     .linux => @import("platform/linux/custom_shell.zig"),
