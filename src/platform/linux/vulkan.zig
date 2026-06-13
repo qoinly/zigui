@@ -82,6 +82,7 @@ pub const SHADER_STAGE_FRAGMENT_BIT: u32 = 0x10;
 pub const DESCRIPTOR_TYPE_STORAGE_BUFFER: u32 = 7;
 pub const DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
 
+pub const FORMAT_UNDEFINED: u32 = 0;
 pub const FORMAT_R8_UNORM: u32 = 9;
 pub const FORMAT_R8G8_UNORM: u32 = 16;
 pub const FORMAT_R8G8B8A8_UNORM: u32 = 37;
@@ -154,6 +155,7 @@ const ST_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
 const ST_PRESENT_INFO_KHR: u32 = 1000001001;
 const ST_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
 const ST_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1000005000;
+const ST_ANDROID_SURFACE_CREATE_INFO_KHR: u32 = 1000008000;
 const ST_IMAGE_CREATE_INFO: u32 = 14;
 const ST_SAMPLER_CREATE_INFO: u32 = 31;
 const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
@@ -322,6 +324,20 @@ pub const CreateWaylandSurfaceFn = *const fn (
 pub const CreateXcbSurfaceFn = *const fn (
     *Instance,
     *const XcbSurfaceCreateInfoKHR,
+    ?*const anyopaque,
+    *SurfaceKHR,
+) callconv(.c) Result;
+
+pub const AndroidSurfaceCreateInfoKHR = extern struct {
+    s_type: u32 = ST_ANDROID_SURFACE_CREATE_INFO_KHR,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    window: *anyopaque, // ANativeWindow*
+};
+
+pub const CreateAndroidSurfaceFn = *const fn (
+    *Instance,
+    *const AndroidSurfaceCreateInfoKHR,
     ?*const anyopaque,
     *SurfaceKHR,
 ) callconv(.c) Result;
@@ -1281,7 +1297,10 @@ pub var global: GlobalFns = undefined;
 
 pub fn load() Error!void {
     if (g_loaded) return;
-    const handle = dlopen("libvulkan.so.1", RTLD_NOW) orelse return error.LibraryLoadFailed;
+    // Desktop Linux ships the versioned soname; Android's loader is the
+    // unversioned libvulkan.so, so fall back to it.
+    const handle = dlopen("libvulkan.so.1", RTLD_NOW) orelse
+        dlopen("libvulkan.so", RTLD_NOW) orelse return error.LibraryLoadFailed;
     const gipa = dlsym(handle, "vkGetInstanceProcAddr") orelse return error.LibraryLoadFailed;
     get_instance_proc_addr = @ptrCast(@alignCast(gipa));
     inline for (@typeInfo(GlobalFns).@"struct".fields) |field| {

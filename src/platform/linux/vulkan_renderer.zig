@@ -6,8 +6,16 @@
 // frost their backdrop through the offscreen separable-blur passes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vk = @import("vulkan.zig");
-const backend = @import("backend.zig");
+// The renderer is shared by Linux and Android; the window-system seam
+// (surface + window accessors) is the one backend-specific piece, picked at
+// comptime. Zig only compiles the taken arm, so the wayland/x11 backend never
+// reaches the Android binary and vice versa.
+const backend = if (builtin.abi.isAndroid())
+    @import("../android/backend.zig")
+else
+    @import("backend.zig");
 const primitives = @import("../../primitives.zig");
 
 const Primitive = primitives.Primitive;
@@ -379,6 +387,9 @@ pub const Renderer = struct {
         try self.create_surface();
         try self.pick_device();
         try self.create_device();
+        // Settle the surface format before any consumer reads self.format - the
+        // render pass, swapchain views, and offscreen pass must all agree.
+        self.pick_surface_format();
         try self.create_render_pass();
         try self.create_swapchain();
         try self.create_commands_and_sync();
@@ -567,37 +578,10 @@ pub const Renderer = struct {
     fn create_surface(self: *Renderer) Error!void {
         std.debug.assert(self.instance != null);
         std.debug.assert(self.surface == vk.NULL_HANDLE);
-        const instance = self.instance.?;
-        switch (backend.active) {
-            .wayland => {
-                const target = backend.wayland_target(self.win) orelse
-                    return error.SurfaceCreateFailed;
-                const create: vk.CreateWaylandSurfaceFn = @ptrCast(
-                    vk.get_instance_proc_addr(instance, "vkCreateWaylandSurfaceKHR") orelse
-                        return error.SurfaceCreateFailed,
-                );
-                const info = vk.WaylandSurfaceCreateInfoKHR{
-                    .display = target.display,
-                    .surface = target.surface,
-                };
-                if (create(instance, &info, null, &self.surface) != vk.SUCCESS)
-                    return error.SurfaceCreateFailed;
-            },
-            .x11 => {
-                const target = backend.xcb_target(self.win) orelse
-                    return error.SurfaceCreateFailed;
-                const create: vk.CreateXcbSurfaceFn = @ptrCast(
-                    vk.get_instance_proc_addr(instance, "vkCreateXcbSurfaceKHR") orelse
-                        return error.SurfaceCreateFailed,
-                );
-                const info = vk.XcbSurfaceCreateInfoKHR{
-                    .connection = target.connection,
-                    .window = target.window,
-                };
-                if (create(instance, &info, null, &self.surface) != vk.SUCCESS)
-                    return error.SurfaceCreateFailed;
-            },
-        }
+        // The window-system surface is the backend's to build (wayland/xcb on
+        // Linux, ANativeWindow on Android); the renderer stays backend-neutral.
+        self.surface = backend.create_vk_surface(self.instance.?, self.win) orelse
+            return error.SurfaceCreateFailed;
     }
 
     fn pick_device(self: *Renderer) Error!void {
@@ -779,6 +763,35 @@ pub const Renderer = struct {
                 caps.max_image_extent.height,
             ),
         };
+    }
+
+    // Honor the surface's preferred format/colorspace (its first entry): weston
+    // leads with BGRA, the Android emulator with RGBA, and presenting through
+    // the wrong channel order swaps red and blue. UNDEFINED means "any", so the
+    // BGRA default stands.
+    fn pick_surface_format(self: *Renderer) void {
+        std.debug.assert(self.physical_device != null);
+        std.debug.assert(self.surface != vk.NULL_HANDLE);
+        var count: u32 = 0;
+        _ = self.ifns.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device.?,
+            self.surface,
+            &count,
+            null,
+        );
+        if (count == 0) return;
+        var formats: [32]vk.SurfaceFormatKHR = undefined;
+        if (count > formats.len) count = formats.len;
+        const rc = self.ifns.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device.?,
+            self.surface,
+            &count,
+            &formats,
+        );
+        if (rc != vk.SUCCESS or count == 0) return;
+        if (formats[0].format == vk.FORMAT_UNDEFINED) return;
+        self.format = formats[0].format;
+        self.color_space = formats[0].color_space;
     }
 
     fn create_swapchain(self: *Renderer) Error!void {
