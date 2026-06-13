@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Yet another native GUI library for Zig, but cross-platform. (early stage)
+  Yet another GUI library for Zig, but cross-platform and GPU-rendered. (early stage)
 </p>
 
 ## Requirements
