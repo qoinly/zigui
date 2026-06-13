@@ -1,0 +1,12 @@
+.{
+    .name = .zigui_android_app,
+    .version = "0.0.0",
+    .fingerprint = 0x214fdf90fcd0eda5,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "AndroidManifest.xml",
+    },
+}
