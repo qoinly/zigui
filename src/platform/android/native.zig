@@ -11,6 +11,15 @@ pub const ANativeWindow = opaque {};
 pub extern fn ANativeWindow_getWidth(*ANativeWindow) c_int;
 pub extern fn ANativeWindow_getHeight(*ANativeWindow) c_int;
 
+// The frame clock (android/choreographer.h, API 24+): a posted callback fires
+// once on the next vsync, so re-posting from inside it is the run loop. Lives on
+// the thread's looper, which the NativeActivity main thread already has.
+pub const AChoreographer = opaque {};
+pub const FrameCallback = *const fn (frame_time_nanos: i64, data: ?*anyopaque) callconv(.c) void;
+
+pub extern fn AChoreographer_getInstance() ?*AChoreographer;
+pub extern fn AChoreographer_postFrameCallback(*AChoreographer, FrameCallback, ?*anyopaque) void;
+
 // The framework calls the exported ANativeActivity_onCreate, then drives the
 // activity through these callbacks; we overwrite the slots we handle. Layout
 // mirrors android/native_activity.h exactly - the loader fills it.
