@@ -1,4 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Android has no main(): the framework calls the exported
+// ANativeActivity_onCreate. Zig emits an export only when it is reachable, so
+// force-reference it here - importing zigui from an Android app pulls the entry
+// into the binary.
+comptime {
+    if (builtin.abi.isAndroid()) {
+        _ = &@import("platform/android/app.zig").ANativeActivity_onCreate;
+    }
+}
 
 const color = @import("color.zig");
 const node = @import("node.zig");

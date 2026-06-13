@@ -11,6 +11,46 @@ pub const ANativeWindow = opaque {};
 pub extern fn ANativeWindow_getWidth(*ANativeWindow) c_int;
 pub extern fn ANativeWindow_getHeight(*ANativeWindow) c_int;
 
+// The framework calls the exported ANativeActivity_onCreate, then drives the
+// activity through these callbacks; we overwrite the slots we handle. Layout
+// mirrors android/native_activity.h exactly - the loader fills it.
+pub const ARect = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
+
+const ActivityFn = ?*const fn (*ANativeActivity) callconv(.c) void;
+const WindowFn = ?*const fn (*ANativeActivity, *ANativeWindow) callconv(.c) void;
+
+pub const ANativeActivityCallbacks = extern struct {
+    onStart: ActivityFn = null,
+    onResume: ActivityFn = null,
+    onSaveInstanceState: ?*const fn (*ANativeActivity, *usize) callconv(.c) ?*anyopaque = null,
+    onPause: ActivityFn = null,
+    onStop: ActivityFn = null,
+    onDestroy: ActivityFn = null,
+    onWindowFocusChanged: ?*const fn (*ANativeActivity, c_int) callconv(.c) void = null,
+    onNativeWindowCreated: WindowFn = null,
+    onNativeWindowResized: WindowFn = null,
+    onNativeWindowRedrawNeeded: WindowFn = null,
+    onNativeWindowDestroyed: WindowFn = null,
+    onInputQueueCreated: ?*const fn (*ANativeActivity, *anyopaque) callconv(.c) void = null,
+    onInputQueueDestroyed: ?*const fn (*ANativeActivity, *anyopaque) callconv(.c) void = null,
+    onContentRectChanged: ?*const fn (*ANativeActivity, *const ARect) callconv(.c) void = null,
+    onConfigurationChanged: ActivityFn = null,
+    onLowMemory: ActivityFn = null,
+};
+
+pub const ANativeActivity = extern struct {
+    callbacks: *ANativeActivityCallbacks,
+    vm: ?*anyopaque,
+    env: ?*anyopaque,
+    clazz: ?*anyopaque,
+    internal_data_path: ?[*:0]const u8,
+    external_data_path: ?[*:0]const u8,
+    sdk_version: i32,
+    instance: ?*anyopaque,
+    asset_manager: ?*anyopaque,
+    obb_path: ?[*:0]const u8,
+};
+
 pub const MAX_WINDOWS: u32 = 1; // one fullscreen surface per Activity
 
 pub const AndroidWindow = struct {

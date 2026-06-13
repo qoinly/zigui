@@ -1,6 +1,11 @@
 const builtin = @import("builtin");
 
-const impl = switch (builtin.os.tag) {
+// Android is os.tag == .linux, abi == .android; its app model (NativeActivity
+// lifecycle, no main()) is distinct from the desktop Linux arm, so it gets its
+// own file picked at comptime ahead of the os.tag switch.
+const impl = if (builtin.abi.isAndroid())
+    @import("platform/android/app.zig")
+else switch (builtin.os.tag) {
     .macos => @import("platform/macos/app.zig"),
     .windows => @import("platform/windows/app.zig"),
     .linux => @import("platform/linux/app.zig"),
