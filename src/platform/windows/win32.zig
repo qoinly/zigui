@@ -385,6 +385,7 @@ pub extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.wina
 pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
+pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.winapi) ?HMODULE;
 pub extern "kernel32" fn GetProcAddress(
     module: HMODULE,

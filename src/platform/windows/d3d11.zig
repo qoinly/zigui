@@ -4,8 +4,10 @@
 // all-in-one device+swapchain create, and runtime HLSL compilation via a
 // dynamically loaded d3dcompiler_47.dll.
 
+const std = @import("std");
 const win32 = @import("win32.zig");
 const dxgi = @import("dxgi.zig");
+const com = @import("com.zig");
 
 const HRESULT = win32.HRESULT;
 const GUID = win32.GUID;
@@ -30,6 +32,8 @@ pub const D3D11_CPU_ACCESS_WRITE: u32 = 0x10000;
 pub const D3D11_RESOURCE_MISC_SHARED: u32 = 0x2;
 pub const D3D11_RESOURCE_MISC_BUFFER_STRUCTURED: u32 = 0x40;
 pub const D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX: u32 = 0x100;
+// Required (with SHARED_KEYEDMUTEX) to export an NT handle via CreateSharedHandle.
+pub const D3D11_RESOURCE_MISC_SHARED_NTHANDLE: u32 = 0x800;
 
 pub const D3D11_MAP_WRITE_DISCARD: u32 = 4;
 
@@ -337,6 +341,52 @@ pub const ID3D11Device = extern struct {
     }
 };
 
+pub const IID_ID3D11Device1 = com.guid(
+    0xa04bfb29,
+    0x08ef,
+    0x43d6,
+    0xa4,
+    0x9c,
+    0xa9,
+    0xbd,
+    0xbd,
+    0xcb,
+    0xe6,
+    0x86,
+);
+
+// ID3D11Device1 inherits the 43 ID3D11Device methods (slots 0..42) and adds
+// GetImmediateContext1, CreateDeferredContext1, CreateBlendState1,
+// CreateRasterizerState1, CreateDeviceContextState (slots 43..47), then
+// OpenSharedResource1 at slot 48 - the only one called here. OpenSharedResource1
+// is the only opener for an NT-handle (SHARED_NTHANDLE) shared resource.
+pub const ID3D11Device1 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        inherited: [48]*const anyopaque,
+        OpenSharedResource1: *const fn (
+            *ID3D11Device1,
+            win32.HANDLE,
+            *const GUID,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(VTable) == 49 * @sizeOf(*const anyopaque));
+    }
+
+    pub fn open_shared_resource1(
+        self: *ID3D11Device1,
+        handle: win32.HANDLE,
+        riid: *const GUID,
+        out: *?*anyopaque,
+    ) HRESULT {
+        return self.vtable.OpenSharedResource1(self, handle, riid, out);
+    }
+};
+
 pub const ID3D11DeviceContext = extern struct {
     vtable: *const VTable,
 
@@ -447,7 +497,17 @@ pub const ID3D11DeviceContext = extern struct {
             u32,
             [*]const win32.RECT,
         ) callconv(.winapi) void,
-        CopySubresourceRegion: *const anyopaque,
+        CopySubresourceRegion: *const fn (
+            *ID3D11DeviceContext,
+            *anyopaque,
+            u32,
+            u32,
+            u32,
+            u32,
+            *anyopaque,
+            u32,
+            ?*const D3D11_BOX,
+        ) callconv(.winapi) void,
         CopyResource: *const fn (
             *ID3D11DeviceContext,
             *anyopaque,
@@ -565,6 +625,29 @@ pub const ID3D11DeviceContext = extern struct {
     }
     pub fn copy_resource(self: *ID3D11DeviceContext, dst: *anyopaque, src: *anyopaque) void {
         self.vtable.CopyResource(self, dst, src);
+    }
+    pub fn copy_subresource_region(
+        self: *ID3D11DeviceContext,
+        dst: *anyopaque,
+        dst_sub: u32,
+        dst_x: u32,
+        dst_y: u32,
+        dst_z: u32,
+        src: *anyopaque,
+        src_sub: u32,
+        box: ?*const D3D11_BOX,
+    ) void {
+        self.vtable.CopySubresourceRegion(
+            self,
+            dst,
+            dst_sub,
+            dst_x,
+            dst_y,
+            dst_z,
+            src,
+            src_sub,
+            box,
+        );
     }
     pub fn update_subresource(
         self: *ID3D11DeviceContext,
