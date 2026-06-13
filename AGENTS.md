@@ -10,12 +10,15 @@ A file for [guiding coding agents](https://agents.md/).
 - **Showcase** (demo + visual reference): `cd examples/showcase && zig build run`
 - **Regenerate icons:** `zig build icongen -Dlucide-dir=<path to the Lucide icons>`
   — only when changing the icon set; it rewrites `src/icon_lucide_data.zig`.
+- **Recompile Linux shaders:** `zig build shadergen` (needs `glslang` on PATH)
+  — only when changing `src/platform/linux/shaders/*`; it rewrites the `.spv`.
 
 ## Directory Structure
 
 - Library core: `src/`
 - Widgets: `src/kit/`
-- Platform backends: `src/platform/` (macOS/Metal, Windows/Direct3D 11)
+- Platform backends: `src/platform/` (macOS/Metal, Windows/Direct3D 11,
+  Linux/Vulkan with Wayland + X11)
 - Desktop showcase (demo + visual reference): `examples/showcase/`
 - Build-time codegen: `tools/`
 
