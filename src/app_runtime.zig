@@ -112,11 +112,16 @@ const WindowSet = struct {
 
 // The per-frame render bridge for one window, specialized on the view set. The
 // display link hands back the *Window as its context, so every callback drives
-// exactly the window it belongs to (no shared current-window global).
-fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
+// exactly the window it belongs to (no shared current-window global). Public so
+// the Android app runtime can reuse the identical bridge over its own lifecycle.
+pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
     comptime std.debug.assert(State == void or @typeInfo(State) == .pointer);
     return struct {
-        fn cb(ctx: *anyopaque, pc: *paint.PaintContext, raw: paint.Frame) paint.PaintError!void {
+        pub fn cb(
+            ctx: *anyopaque,
+            pc: *paint.PaintContext,
+            raw: paint.Frame,
+        ) paint.PaintError!void {
             const w: *Window = @ptrCast(@alignCast(ctx));
             // High-water pool: reset both before building this frame's tree.
             w.eng.clear();

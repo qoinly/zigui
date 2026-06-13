@@ -1,26 +1,40 @@
-// The Android app entry. There is no main() that owns the loop: the framework
-// calls the exported ANativeActivity_onCreate, the surface arrives
-// asynchronously via onNativeWindowCreated, and the OS runs the looper. So
-// App.init/run_forever are parity stubs (nothing to own here), and the real
-// work hangs off the window callbacks - build the shared Vulkan renderer over
-// the ANativeWindow and draw.
+// The Android app entry and lifecycle. There is no main() that owns the loop:
+// the framework calls the exported ANativeActivity_onCreate, which runs the
+// app's own main() (the @import("root").main bridge) so the SAME example main
+// drives desktop and Android. main() calls App.init/run, which defer the real
+// setup - the surface arrives asynchronously via onNativeWindowCreated, after
+// onCreate returns. So App.init/run_forever here are parity no-ops (the
+// process-level app owns nothing), and the high-level Android App (app_runtime.zig)
+// registers a surface delegate to receive the window create/destroy events.
 
 const std = @import("std");
 const native = @import("native.zig");
-const renderer = @import("../../renderer.zig");
-const primitives = @import("../../primitives.zig");
+const android_shell = @import("custom_shell.zig");
 
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 pub const Error = error{InitFailed};
 
-// One fullscreen surface per Activity; the renderer reads this by pointer.
+// One fullscreen surface per Activity; app_runtime.zig and the renderer both
+// read this storage, so it lives here (the shell holds a pointer to it).
 var g_window: native.AndroidWindow = .{};
-var g_renderer: ?renderer.Renderer = null;
-var g_choreographer: ?*native.AChoreographer = null;
-// Gates the vsync loop: cleared on window-destroy so a queued frame callback
-// that fires after teardown does nothing.
-var g_running: bool = false;
 
+// The high-level App registers this to receive surface lifecycle events; the
+// framework callbacks below fan into it.
+pub const SurfaceDelegate = struct {
+    ctx: *anyopaque,
+    on_ready: *const fn (ctx: *anyopaque, window: *native.AndroidWindow) void,
+    on_lost: *const fn (ctx: *anyopaque) void,
+};
+
+var g_delegate: ?SurfaceDelegate = null;
+
+pub fn set_surface_delegate(delegate: SurfaceDelegate) void {
+    g_delegate = delegate;
+}
+
+// The process-level platform app. Android has no dock/activation, app menu, or
+// last-window quit, and the framework owns the run loop, so every method is a
+// parity no-op - the high-level App in app_runtime.zig holds the real state.
 pub const App = struct {
     pub fn init() Error!App {
         return .{};
@@ -30,8 +44,6 @@ pub const App = struct {
         _ = self;
     }
 
-    // No dock/activation, app menu, or last-window quit on Android; kept for
-    // API parity so shared code compiles.
     pub fn set_activation_policy(self: App, policy: ActivationPolicy) void {
         _ = self;
         _ = policy;
@@ -45,8 +57,6 @@ pub const App = struct {
         _ = self;
     }
 
-    // The framework owns the run loop; the lifecycle callbacks below drive
-    // rendering, so there is nothing to block on here.
     pub fn run_forever(self: App) void {
         _ = self;
     }
@@ -65,6 +75,28 @@ pub export fn ANativeActivity_onCreate(
     _ = saved_state_size;
     activity.callbacks.onNativeWindowCreated = on_window_created;
     activity.callbacks.onNativeWindowDestroyed = on_window_destroyed;
+    // Run the app's main() now: it calls App.init/run, which register the
+    // surface delegate and return at once. The window callbacks above then fire.
+    run_root_main();
+}
+
+// Bridge to the app's main(): on the example build root is the example main.zig
+// (has main, builds the kit App); on a standalone zigui lib build root is
+// zigui's root.zig (no main, the guard skips it). A switch on the return type
+// (not a runtime if) keeps the dead branch out of analysis when main is void.
+fn run_root_main() void {
+    const root = @import("root");
+    // comptime so a no-main root (the standalone zigui lib build) prunes the
+    // whole block - a runtime guard would still analyze the root.main reference.
+    if (comptime @hasDecl(root, "main")) {
+        const Ret = @typeInfo(@TypeOf(root.main)).@"fn".return_type.?;
+        switch (@typeInfo(Ret)) {
+            .error_union => root.main() catch {
+                _ = __android_log_write(ANDROID_LOG_ERROR, "zigui", "app main returned an error");
+            },
+            else => root.main(),
+        }
+    }
 }
 
 const Activity = native.ANativeActivity;
@@ -72,61 +104,29 @@ const Window = native.ANativeWindow;
 
 fn on_window_created(activity: *Activity, window: *Window) callconv(.c) void {
     _ = activity;
-    // A resume can re-create the surface without a destroy in between; tear the
+    std.debug.assert(@intFromPtr(window) != 0); // the framework owns this surface ptr
+    // A resume can re-create the surface without a destroy in between; tear an
     // old renderer down first so it never leaks or samples a stale window.
-    teardown();
+    notify_lost();
     g_window = .{ .in_use = true, .native = window };
     g_window.sync_extent();
-    g_renderer = renderer.Renderer.init(@ptrCast(&g_window)) catch {
-        g_window = .{};
-        return;
-    };
-    // Drive the render loop off the frame clock: each posted callback fires on
-    // one vsync and re-posts, so presents pace to the display.
-    g_running = true;
-    g_choreographer = native.AChoreographer_getInstance();
-    if (g_choreographer) |c| {
-        native.AChoreographer_postFrameCallback(c, on_vsync, null);
-    } else {
-        render_frame(0); // no frame clock: at least show the first frame
-    }
+    android_shell.set_window(&g_window);
+    if (g_delegate) |d| d.on_ready(d.ctx, &g_window);
 }
 
 fn on_window_destroyed(activity: *Activity, window: *Window) callconv(.c) void {
     _ = activity;
     _ = window;
-    teardown();
-}
-
-fn teardown() void {
-    g_running = false;
-    g_choreographer = null;
-    if (g_renderer) |*r| r.deinit();
-    g_renderer = null;
+    notify_lost();
+    android_shell.clear_window();
     g_window = .{};
 }
 
-fn on_vsync(frame_time_nanos: i64, data: ?*anyopaque) callconv(.c) void {
-    _ = data;
-    if (!g_running) return;
-    render_frame(frame_time_nanos);
-    if (g_choreographer) |c| native.AChoreographer_postFrameCallback(c, on_vsync, null);
+fn notify_lost() void {
+    if (g_delegate) |d| d.on_lost(d.ctx);
 }
 
-fn render_frame(frame_time_nanos: i64) void {
-    const r = if (g_renderer) |*rp| rp else return;
-    std.debug.assert(g_window.native != null);
-    // The renderer only presents when dirty; a continuous animation marks each
-    // frame dirty (the desktop animate() contract).
-    r.request_redraw();
-    const clear = renderer.ClearColor.init(0.04, 0.04, 0.04, 1.0);
-    // Slide a rounded quad horizontally so the running vsync loop is visible:
-    // a 4s period, eased over the window's point width.
-    const seconds = @as(f32, @floatFromInt(@mod(frame_time_nanos, 4_000_000_000))) / 4.0e9;
-    const span = @as(f32, @floatFromInt(g_window.width_pt)) - 200;
-    const x = (1 - @abs(2 * seconds - 1)) * @max(span, 0);
-    var quad = primitives.Quad.init(x, 240, 200, 200);
-    _ = quad.set_background_hex(0x3B82F6).set_corner_radius(40);
-    const prims = [_]primitives.Primitive{.{ .quad = quad }};
-    r.draw_frame(clear, &prims, &.{}, null, &.{}, null);
-}
+// Minimal NDK logging (liblog) so a failed bring-up shows in logcat instead of a
+// silent black screen.
+const ANDROID_LOG_ERROR: c_int = 6;
+extern fn __android_log_write(prio: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;

@@ -557,7 +557,18 @@ pub fn on_move2(
 pub const kit = @import("kit/root.zig");
 
 pub const app = @import("app.zig");
-pub const App = app_runtime.App;
+// Android's high-level App owns a different lifecycle (the surface arrives async
+// via onNativeWindowCreated, the framework owns the run loop), so it gets a
+// parallel App that reuses the render bridge + paint machinery but forks the
+// loop ownership. The desktop App.init/run stays byte-for-byte. Select the
+// module first (the app.zig facade pattern) so the Android file stays out of
+// non-Android analysis - its NativeActivity export must never reach a desktop
+// binary.
+const app_runtime_impl = if (builtin.abi.isAndroid())
+    @import("platform/android/app_runtime.zig")
+else
+    app_runtime;
+pub const App = app_runtime_impl.App;
 pub const WindowOptions = app_runtime.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const Theme = window.Theme;

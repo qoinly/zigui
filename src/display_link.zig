@@ -1,6 +1,10 @@
 const builtin = @import("builtin");
 
-const impl = switch (builtin.os.tag) {
+// Android's vsync source is AChoreographer, not the Linux poll-loop cadence, so
+// it gets its own arm ahead of the os.tag switch (Android is os.tag == .linux).
+const impl = if (builtin.abi.isAndroid())
+    @import("platform/android/display_link.zig")
+else switch (builtin.os.tag) {
     .macos => @import("platform/macos/display_link.zig"),
     .windows => @import("platform/windows/display_link.zig"),
     .linux => @import("platform/linux/display_link.zig"),
