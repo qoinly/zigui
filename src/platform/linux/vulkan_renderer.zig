@@ -387,6 +387,9 @@ pub const Renderer = struct {
         try self.create_surface();
         try self.pick_device();
         try self.create_device();
+        // Settle the surface format before any consumer reads self.format - the
+        // render pass, swapchain views, and offscreen pass must all agree.
+        self.pick_surface_format();
         try self.create_render_pass();
         try self.create_swapchain();
         try self.create_commands_and_sync();
@@ -760,6 +763,35 @@ pub const Renderer = struct {
                 caps.max_image_extent.height,
             ),
         };
+    }
+
+    // Honor the surface's preferred format/colorspace (its first entry): weston
+    // leads with BGRA, the Android emulator with RGBA, and presenting through
+    // the wrong channel order swaps red and blue. UNDEFINED means "any", so the
+    // BGRA default stands.
+    fn pick_surface_format(self: *Renderer) void {
+        std.debug.assert(self.physical_device != null);
+        std.debug.assert(self.surface != vk.NULL_HANDLE);
+        var count: u32 = 0;
+        _ = self.ifns.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device.?,
+            self.surface,
+            &count,
+            null,
+        );
+        if (count == 0) return;
+        var formats: [32]vk.SurfaceFormatKHR = undefined;
+        if (count > formats.len) count = formats.len;
+        const rc = self.ifns.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device.?,
+            self.surface,
+            &count,
+            &formats,
+        );
+        if (rc != vk.SUCCESS or count == 0) return;
+        if (formats[0].format == vk.FORMAT_UNDEFINED) return;
+        self.format = formats[0].format;
+        self.color_space = formats[0].color_space;
     }
 
     fn create_swapchain(self: *Renderer) Error!void {
