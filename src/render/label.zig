@@ -107,6 +107,12 @@ pub fn measure(b: *RenderBuilder, text: []const u8, style: Style) Size {
 // A wrap producing more lines than this is a bug, not a layout - assert it.
 pub const MAX_WRAP_LINES: u32 = 4096;
 
+// The greedy wrap sums PER-WORD widths, but the layout box comes from shaping
+// the WHOLE line - contextual kerning across spaces makes the sum a hair wider,
+// so at the exact boundary a fitting line would split. Half a point absorbs
+// that and the engine's own f32 drift; it is far below visibility.
+const WRAP_EPSILON: f32 = 0.5;
+
 pub const Wrapped = struct {
     width: f32,
     height: f32,
@@ -137,6 +143,9 @@ pub fn measure_wrapped(b: *RenderBuilder, text: []const u8, style: Style, max_w:
     const base = measure(b, text, style);
     const lh = base.ascent + base.descent;
     if (max_w <= 0) return .{ .width = base.width, .height = lh, .lines = 1 };
+    if (base.width <= max_w + WRAP_EPSILON) {
+        return .{ .width = base.width, .height = lh, .lines = 1 };
+    }
     const space_w = measure(b, " ", style).width;
     var widest: f32 = 0;
     var line_w: f32 = 0;
@@ -149,7 +158,7 @@ pub fn measure_wrapped(b: *RenderBuilder, text: []const u8, style: Style, max_w:
         if (first) {
             line_w = ww;
             first = false;
-        } else if (line_w + space_w + ww > max_w) {
+        } else if (line_w + space_w + ww > max_w + WRAP_EPSILON) {
             widest = @max(widest, line_w);
             lines += 1;
             line_w = ww;
@@ -177,7 +186,7 @@ pub fn render_wrapped(
     std.debug.assert(style.font_size > 0);
     const base = measure(b, text, style);
     const lh = base.ascent + base.descent;
-    if (max_w <= 0) {
+    if (max_w <= 0 or base.width <= max_w + WRAP_EPSILON) {
         _ = try render(b, x, y, text, style);
         return lh;
     }
@@ -194,7 +203,7 @@ pub fn render_wrapped(
             _ = try render(b, x, y, word, style);
             line_x = ww;
             first = false;
-        } else if (line_x + space_w + ww > max_w) {
+        } else if (line_x + space_w + ww > max_w + WRAP_EPSILON) {
             line_y += lh;
             lines += 1;
             _ = try render(b, x, y + line_y, word, style);

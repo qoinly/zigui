@@ -22,14 +22,50 @@ pub fn build(b: *std.Build) void {
 
     add_examples(b, zigui, target, optimize);
     add_icongen(b);
+    add_shadergen(b);
+}
+
+// Recompiles the Linux GLSL to the committed SPIR-V (the icongen pattern: a
+// manual step needing glslang on PATH; consumer builds embed the .spv files).
+fn add_shadergen(b: *std.Build) void {
+    const step = b.step("shadergen", "Recompile src/platform/linux/shaders/*.spv from GLSL");
+    const dir = "src/platform/linux/shaders/";
+    const stages = [_][]const u8{
+        "quad.vert",         "quad.frag",
+        "text.vert",         "text.frag",
+        "frame.vert",        "frame_rgba.frag",
+        "frame_nv12.frag",   "frame_ycbcr.frag",
+        "color_sprite.vert", "color_sprite.frag",
+        "polyline.vert",     "polyline.frag",
+        "line.vert",         "line.frag",
+        "ring.vert",         "ring.frag",
+        "blit.vert",         "blit.frag",
+        "blur_h.frag",       "blur_v.frag",
+    };
+    for (stages) |stage| {
+        const run = b.addSystemCommand(&.{ "glslang", "-V" });
+        run.addFileArg(b.path(b.fmt("{s}{s}", .{ dir, stage })));
+        run.addArg("-o");
+        run.addArg(b.fmt("{s}{s}.spv", .{ dir, stage }));
+        run.setCwd(b.path("."));
+        run.has_side_effects = true; // rewrites committed source artifacts
+        step.dependOn(&run.step);
+    }
 }
 
 fn link_platform(zigui: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     switch (target.result.os.tag) {
         .macos => link_macos(zigui),
         .windows => link_windows(zigui),
+        .linux => link_linux(zigui),
         else => @panic("zigui: unsupported target OS"),
     }
+}
+
+fn link_linux(zigui: *std.Build.Module) void {
+    // libwayland-client.so.0 is dlopen'd at runtime (the d3dcompiler_47
+    // precedent), so only libc - which carries dlopen - is linked here.
+    zigui.link_libc = true;
 }
 
 fn link_macos(zigui: *std.Build.Module) void {

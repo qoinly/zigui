@@ -120,6 +120,7 @@ pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
 // The backend handle a FrameSource needs to allocate its textures. Reachable only
 // during a render pass (the render context owns the renderer).
 pub const Renderer = renderer.Renderer;
+pub const ClearColor = renderer.ClearColor;
 pub const FrameSurface = renderer.FrameSurface;
 pub fn renderer_handle() *Renderer {
     return &frame_ctx.get().paint.renderer;
@@ -646,7 +647,9 @@ pub const text_system = @import("text_system.zig");
 
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;
+pub const Primitive = primitives.Primitive;
 pub const MonochromeSprite = primitives.MonochromeSprite;
+pub const PolychromeSprite = primitives.PolychromeSprite;
 
 test {
     std.testing.refAllDecls(@This());

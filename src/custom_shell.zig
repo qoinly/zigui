@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const impl = switch (builtin.os.tag) {
     .macos => @import("platform/macos/custom_shell.zig"),
     .windows => @import("platform/windows/custom_shell.zig"),
+    .linux => @import("platform/linux/custom_shell.zig"),
     else => @compileError("zigui: unsupported OS for custom shell"),
 };
 
@@ -32,23 +33,41 @@ pub const current_shift_down = impl.current_shift_down;
 pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
+
+// Whether the platform's text-field overlay paints itself (a real native
+// control floats above the surface). When false the platform owns only the
+// editing state and the kit draws the value, caret, and selection.
+pub const text_field_native_paint = builtin.os.tag != .linux;
+
+pub fn text_field_caret() usize {
+    return if (builtin.os.tag == .linux) impl.text_field_caret() else 0;
+}
+
+pub fn text_field_selection() [2]usize {
+    return if (builtin.os.tag == .linux) impl.text_field_selection() else .{ 0, 0 };
+}
+
+pub fn text_field_secure() bool {
+    return if (builtin.os.tag == .linux) impl.text_field_secure() else false;
+}
+
 pub const pasteboard_read_into = impl.pasteboard_read_into;
 pub const pasteboard_write_string = impl.pasteboard_write_string;
 pub const clipboard_changed_external = impl.clipboard_changed_external;
 pub const display_count = impl.display_count;
 pub const display_bounds = impl.display_bounds;
 
-// Windows draws its window controls into the title-bar band itself (the macOS
-// backend uses native traffic lights). These hooks are no-ops elsewhere; the
-// caption metrics are defined here so the paint layer can reserve/draw them.
-pub const CaptionButton = if (builtin.os.tag == .windows) impl.CaptionButton else enum {
+// Windows and Linux draw their window controls into the title-bar band itself
+// (the macOS backend uses native traffic lights). These hooks are no-ops on
+// macOS; the caption metrics live here so the paint layer can reserve/draw them.
+pub const CaptionButton = if (builtin.os.tag == .macos) enum {
     none,
     minimize,
     maximize,
     close,
-};
-pub const CAPTION_BTN_W: f32 = if (builtin.os.tag == .windows) impl.CAPTION_BTN_W else 46;
-pub const CAPTION_CLUSTER_W: f32 = if (builtin.os.tag == .windows) impl.CAPTION_CLUSTER_W else 0;
+} else impl.CaptionButton;
+pub const CAPTION_BTN_W: f32 = if (builtin.os.tag == .macos) 46 else impl.CAPTION_BTN_W;
+pub const CAPTION_CLUSTER_W: f32 = if (builtin.os.tag == .macos) 0 else impl.CAPTION_CLUSTER_W;
 pub const HitTestFn = *const fn (ctx: *anyopaque, x: f32, y: f32, band_h: f32) bool;
 pub const RedrawFn = *const fn (ctx: *anyopaque) void;
 
@@ -57,10 +76,29 @@ pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyo
 }
 
 pub fn register_paint_now(cb: RedrawFn) void {
-    if (builtin.os.tag == .windows) impl.register_paint_now(cb);
+    if (builtin.os.tag != .macos) impl.register_paint_now(cb);
+}
+
+// Only Linux desktops keep the user's accent outside the app theme; the close
+// control there follows it.
+pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
+    if (builtin.os.tag == .linux) return impl.desktop_accent_color();
+    return null;
+}
+
+// Caption slots indexed from the right edge (slot 0 = rightmost). Linux
+// follows the desktop's button-layout; Windows keeps its fixed trio.
+pub const CaptionSlots = struct { kinds: [3]CaptionButton, count: u8 };
+
+pub fn caption_slots() CaptionSlots {
+    if (builtin.os.tag == .linux) {
+        const slots = impl.caption_slots();
+        return .{ .kinds = slots.kinds, .count = slots.count };
+    }
+    return .{ .kinds = .{ .close, .maximize, .minimize }, .count = 3 };
 }
 
 pub fn hovered_caption_button() CaptionButton {
-    if (builtin.os.tag == .windows) return impl.hovered_caption_button();
-    return .none;
+    if (builtin.os.tag == .macos) return .none;
+    return impl.hovered_caption_button();
 }
