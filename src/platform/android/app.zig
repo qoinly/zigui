@@ -85,7 +85,7 @@ pub export fn ANativeActivity_onCreate(
     activity.callbacks.onInputQueueDestroyed = on_input_queue_destroyed;
     activity.callbacks.onContentRectChanged = on_content_rect_changed;
     g_activity = activity;
-    jni.set_thread(activity.env); // the text system renders glyphs via JNI on this thread
+    jni.set_thread(activity.env, activity.clazz); // text/IME use JNI on this thread
     // Run the app's main() now: it calls App.init/run, which register the
     // surface delegate and return at once. The window callbacks above then fire.
     run_root_main();

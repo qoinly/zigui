@@ -4,9 +4,9 @@
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
 
-    <application android:label="zigui android" android:hasCode="false">
+    <application android:label="zigui android">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".ZiguiActivity"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize">
             <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />

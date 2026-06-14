@@ -29,7 +29,13 @@ pub fn build(b: *std.Build) void {
     const aapt2 = b.fmt("{s}/aapt2", .{build_tools});
     const zipalign = b.fmt("{s}/zipalign", .{build_tools});
     const apksigner = b.fmt("{s}/apksigner", .{build_tools});
+    const d8 = b.fmt("{s}/d8", .{build_tools});
     const adb = b.fmt("{s}/platform-tools/adb", .{sdk});
+    const java_home = env(b, "JAVA_HOME") orelse {
+        std.debug.print("android-app: set JAVA_HOME (javac compiles the IME shim)\n", .{});
+        return;
+    };
+    const javac = b.fmt("{s}/bin/javac", .{java_home});
 
     // One shared library per device ABI, bundled into the APK under lib/<abi>.
     const lib_x86 = android_lib(b, optimize, sysroot, "x86_64-linux-android", .x86_64, min_api);
@@ -40,6 +46,21 @@ pub fn build(b: *std.Build) void {
     const tree = b.addWriteFiles();
     _ = tree.addCopyFile(lib_x86.getEmittedBin(), "lib/x86_64/libzigui_android_app.so");
     _ = tree.addCopyFile(lib_arm.getEmittedBin(), "lib/arm64-v8a/libzigui_android_app.so");
+
+    // Compile the Java IME shim and dex it (the only Java in the app). javac emits
+    // .class into a scratch dir, d8 translates them to classes.dex in the output
+    // dir; it is bundled at the APK root (the manifest sets hasCode=true).
+    const dex_script =
+        "set -e; OUT=\"$(dirname \"$5\")\"; CL=\"$OUT/cls\"; rm -rf \"$CL\"; mkdir -p \"$CL\"; " ++
+        "\"$1\" -cp \"$2\" -d \"$CL\" \"$3\"; " ++
+        "\"$4\" --lib \"$2\" --min-api 26 --output \"$OUT\" $(find \"$CL\" -name '*.class')";
+    const dex = b.addSystemCommand(&.{ "sh", "-c", dex_script, "dex" });
+    dex.addArg(javac); // $1
+    dex.addArg(android_jar); // $2
+    dex.addFileArg(b.path("java/com/qoinly/zigui/androidapp/ZiguiActivity.java")); // $3
+    dex.addArg(d8); // $4
+    const classes_dex = dex.addOutputFileArg("classes.dex"); // $5
+    dex.setEnvironmentVariable("JAVA_HOME", java_home); // the d8 wrapper script needs java
 
     // aapt2 compiles the manifest to binary XML and produces the base APK
     // (manifest + resources.arsc, no libs yet).
@@ -52,12 +73,13 @@ pub fn build(b: *std.Build) void {
     // loader can mmap them (extractNativeLibs defaults false on modern target
     // SDKs). One shell step keeps the output a tracked LazyPath.
     const pack_script =
-        "set -e; cp \"$1\" \"$2\"; " ++
+        "set -e; cp \"$1\" \"$2\"; zip -X -q -j \"$2\" \"$4\"; " ++
         "cd \"$3\"; zip -0 -X -q \"$2\" $(find lib -type f)";
     const pack = b.addSystemCommand(&.{ "sh", "-c", pack_script, "package_apk" });
-    pack.addFileArg(base_apk);
-    const unsigned_apk = pack.addOutputFileArg("unsigned.apk");
-    pack.addDirectoryArg(tree.getDirectory());
+    pack.addFileArg(base_apk); // $1
+    const unsigned_apk = pack.addOutputFileArg("unsigned.apk"); // $2
+    pack.addDirectoryArg(tree.getDirectory()); // $3
+    pack.addFileArg(classes_dex); // $4 - classes.dex added at the APK root
 
     // Page-align the stored libs (zipalign -p), then sign with the debug key.
     const align_cmd = b.addSystemCommand(&.{ zipalign, "-p", "-f", "4" });
@@ -74,10 +96,9 @@ pub fn build(b: *std.Build) void {
     });
     const app_apk = sign.addOutputFileArg("app.apk");
     sign.addFileArg(aligned_apk);
-    if (env(b, "JAVA_HOME")) |java_home| {
-        const path = b.fmt("{s}/bin:{s}", .{ java_home, env(b, "PATH") orelse "" });
-        sign.setEnvironmentVariable("PATH", path);
-    }
+    // apksigner needs `java` on PATH, not just JAVA_HOME.
+    const sign_path = b.fmt("{s}/bin:{s}", .{ java_home, env(b, "PATH") orelse "" });
+    sign.setEnvironmentVariable("PATH", sign_path);
 
     const install_apk = b.addInstallBinFile(app_apk, "zigui-android-app.apk");
     b.getInstallStep().dependOn(&install_apk.step);
@@ -85,7 +106,7 @@ pub fn build(b: *std.Build) void {
     // `zig build run`: install onto a connected device/emulator and launch.
     const adb_install = b.addSystemCommand(&.{ adb, "install", "-r" });
     adb_install.addFileArg(app_apk);
-    const activity = "com.qoinly.zigui.androidapp/android.app.NativeActivity";
+    const activity = "com.qoinly.zigui.androidapp/.ZiguiActivity";
     const adb_start = b.addSystemCommand(&.{ adb, "shell", "am", "start", "-n", activity });
     adb_start.step.dependOn(&adb_install.step);
     const run_step = b.step("run", "Install and launch the APK on a device/emulator");
