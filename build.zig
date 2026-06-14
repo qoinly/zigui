@@ -194,6 +194,8 @@ pub const AndroidApkOptions = struct {
     min_api: u32 = 26,
     // Dex zigui's accessibility service + compile its default config resource.
     include_accessibility: bool = false,
+    // Dex zigui's notification-listener service.
+    include_notification_listener: bool = false,
 };
 
 pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
@@ -242,6 +244,12 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
         _ = java_tree.addCopyFile(
             zigui_files.path(b.fmt("{s}/ZiguiAccessibilityService.java", .{java_dir})),
             "io/qoinly/zigui/ZiguiAccessibilityService.java",
+        );
+    }
+    if (opts.include_notification_listener) {
+        _ = java_tree.addCopyFile(
+            zigui_files.path(b.fmt("{s}/ZiguiNotificationListenerService.java", .{java_dir})),
+            "io/qoinly/zigui/ZiguiNotificationListenerService.java",
         );
     }
 

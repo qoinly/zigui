@@ -31,6 +31,10 @@ const Counter = struct {
     // it fills, so copy it out for the page to show).
     a11y_read: [256]u8 = undefined,
     a11y_read_len: usize = 0,
+    // The last notification the listener caught, kept across frames (take() borrows
+    // the buffer it fills).
+    notif: [256]u8 = undefined,
+    notif_len: usize = 0,
 };
 
 const CAMERA = "android.permission.CAMERA";
@@ -160,6 +164,20 @@ fn do_a11y_read(c: *Counter) void {
     }
 }
 
+fn open_notif(c: *Counter) void {
+    _ = c;
+    nav.push("notif", "Notif Listener");
+}
+fn do_notif_enable(c: *Counter) void {
+    _ = c;
+    zigui.napi.notification_listener.request_enable();
+}
+// Post a notification so the enabled listener catches it (a self-contained loop).
+fn do_notif_post(c: *Counter) void {
+    _ = c;
+    zigui.napi.notifications.post("zigui", "hello from the listener demo");
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
     try app.run(&state, .{ .body = render });
@@ -186,6 +204,9 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     if (zigui.napi.biometric.result()) |outcome| { // the prompt finished: keep its verdict
         counter.auth_done = outcome == .success;
     }
+    if (zigui.napi.notification_listener.take(&counter.notif)) |n| { // a notification arrived
+        counter.notif_len = n.len;
+    }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
     // two live toggles below.
@@ -202,6 +223,8 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         native_page(f, counter)
     else if (std.mem.eql(u8, route, "a11y"))
         a11y_page(f, counter)
+    else if (std.mem.eql(u8, route, "notif"))
+        notif_page(f, counter)
     else
         home_page(f, counter);
 
@@ -248,6 +271,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Show AHB frame", .{ .on_click = zigui.on(Counter, open_frame) }),
         zigui.button("Native APIs", .{ .on_click = zigui.on(Counter, open_native) }),
         zigui.button("Accessibility", .{ .on_click = zigui.on(Counter, open_a11y) }),
+        zigui.button("Notif listener", .{ .on_click = zigui.on(Counter, open_notif) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -331,6 +355,25 @@ fn a11y_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Inject swipe", .{ .on_click = zigui.on(Counter, do_a11y_swipe) }),
         zigui.button("Read screen", .{ .on_click = zigui.on(Counter, do_a11y_read) }),
         zigui.text(read_note, .{ .size = 12 }),
+    });
+}
+
+// The notification-listener surface. Enable opens notification-access settings; once
+// on, zigui's shipped listener forwards every posted notification to native, and
+// "Post test notif" makes the app notify itself so the catch shows up in "Latest".
+fn notif_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    _ = f;
+    const on = zigui.napi.notification_listener.enabled();
+    const status = if (on) "Listener: enabled" else "Listener: disabled";
+    const caught = counter.notif[0..counter.notif_len];
+    const latest = if (counter.notif_len > 0) caught else "(none caught yet)";
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Notification listener.", .{ .size = 20 }),
+        zigui.text(status, .{ .size = 16 }),
+        zigui.button("Enable listener", .{ .on_click = zigui.on(Counter, do_notif_enable) }),
+        zigui.button("Post test notif", .{ .on_click = zigui.on(Counter, do_notif_post) }),
+        zigui.text("Latest:", .{ .size = 14 }),
+        zigui.text(latest, .{ .size = 12 }),
     });
 }
 
