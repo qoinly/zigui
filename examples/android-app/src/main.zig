@@ -7,14 +7,20 @@
 // framework owns the loop), so the state must outlive main() - a container-scoped
 // var, not a stack local. No defer app.deinit() for the same reason: the loop
 // keeps running after main() returns.
+const std = @import("std");
 const zigui = @import("zigui");
 
 const Counter = struct {
     clicks: u32 = 0,
     focus: u32 = 0, // id of the focused text field, 0 = none
+    // The last result a detail page returned, copied out of the stack on the frame
+    // the pop delivered it (take_result yields it once, the slice is borrowed).
+    last_result: [64]u8 = undefined,
+    last_result_len: usize = 0,
 };
 
 var state: Counter = .{};
+var nav: zigui.NavStack = .{};
 var list_scroll: zigui.ScrollState = .{};
 var field: zigui.TextField = .{};
 
@@ -23,6 +29,19 @@ fn focus_field(c: *Counter) void {
 }
 fn blur_fields(c: *Counter) void {
     c.focus = 0;
+}
+
+// startActivity with extras: push the detail page carrying a payload it reads back.
+fn open_detail(c: *Counter) void {
+    _ = c;
+    nav.push_with("detail", "Details", "hello from home");
+}
+
+// setResult + finish: stage a result, then pop so the home page receives it.
+fn save_and_back(c: *Counter) void {
+    _ = c;
+    nav.set_result("saved at 42");
+    nav.pop();
 }
 
 pub fn main() !void {
@@ -38,6 +57,27 @@ const MAX_DOTS = 8;
 const LIST_ROWS = 16;
 
 fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    if (nav.depth == 0) nav.go("home", "Home"); // seed the root once
+    zigui.handle_back(&nav); // Esc / Android Back / chevron -> pop
+    if (nav.take_result()) |r| { // a detail page returned a result: keep it
+        const k = @min(r.len, counter.last_result.len);
+        @memcpy(counter.last_result[0..k], r[0..k]);
+        counter.last_result_len = k;
+    }
+
+    const route = nav.current();
+    const page = if (std.mem.eql(u8, route, "detail"))
+        detail_page(f)
+    else
+        home_page(f, counter);
+
+    return zigui.col(.{}, &.{
+        zigui.app_bar(nav.current_title(), .{ .show_back = nav.depth > 1 }),
+        page,
+    });
+}
+
+fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const n = @min(counter.clicks, MAX_DOTS);
     var dots: []const *zigui.Node = &.{};
     if (f.arena.alloc(*zigui.Node, n)) |slice| {
@@ -57,9 +97,19 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     } else |_| {}
 
     // A click that misses the field blurs the shared editor (hides the keyboard).
-    return zigui.col(.{ .pad = .lg, .gap = .md, .on_click = zigui.on(Counter, blur_fields) }, &.{
+    const page = zigui.Config{
+        .pad = .lg,
+        .gap = .md,
+        .grow = 1,
+        .on_click = zigui.on(Counter, blur_fields),
+    };
+    const returned = counter.last_result[0..counter.last_result_len];
+    const note = if (counter.last_result_len > 0) returned else "(no result yet)";
+    return zigui.col(page, &.{
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
+        zigui.button("Open details", .{ .on_click = zigui.on(Counter, open_detail) }),
+        zigui.text(note, .{ .size = 16 }),
         zigui.text_input(&field, .{
             .placeholder = "Tap to type",
             .focused = counter.focus == 1,
@@ -68,6 +118,19 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         }),
         zigui.row(.{ .gap = .sm }, dots),
         zigui.scroll(&list_scroll, .{ .grow = 1 }, zigui.col(.{ .gap = .sm }, rows)),
+    });
+}
+
+// The pushed page reads the payload it was opened with (current_args) and can stage
+// a result for home; the chevron / Back / Esc pop back (Save returns the result).
+fn detail_page(f: *zigui.Frame) *zigui.Node {
+    _ = f;
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Detail page.", .{ .size = 28 }),
+        zigui.text("Got args:", .{ .size = 14 }),
+        zigui.text(nav.current_args(), .{ .size = 16 }),
+        zigui.button("Save & back", .{ .on_click = zigui.on(Counter, save_and_back) }),
+        zigui.text("(or Back to return with no result)", .{ .size = 14 }),
     });
 }
 
@@ -94,4 +157,15 @@ export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnText(
 ) callconv(.c) void {
     _ = this;
     zigui.android_on_native_text(env, text, caret);
+}
+
+// ZiguiActivity.onBackPressed -> here: pop the route stack (jboolean = whether the
+// press was consumed; the Java side backgrounds the app when it was not).
+export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnBack(
+    env: *anyopaque,
+    this: *anyopaque,
+) callconv(.c) u8 {
+    _ = env;
+    _ = this;
+    return @intFromBool(zigui.android_on_native_back());
 }
