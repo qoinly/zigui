@@ -314,8 +314,8 @@ fn device_status(f: *zigui.Frame) []const u8 {
 
 // The accessibility-service control surface. Enable opens system settings (a service
 // is user-enabled, never programmatic); once on, the global actions + the injected
-// swipe + the screen-read all run through the bound service. Cross-app injection (into
-// a foreign app) is driven by the service's broadcast trigger - see the .java.
+// swipe + the screen-read all run through zigui's shipped bound service. The inject
+// hits whatever is foreground - here, the app's own scroll list.
 fn a11y_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     _ = f;
     const on = zigui.napi.accessibility.enabled();
@@ -363,55 +363,9 @@ fn on_click(counter: *Counter) void {
 
 // The NativeActivity entry export emits only when the compilation root keeps it
 // reachable; a comptime reference to zigui.App pulls the backend (and its
-// exported ANativeActivity_onCreate) into the .so. A runtime use inside main()
-// alone does not, so the framework would otherwise fail to find the entry symbol.
+// exported ANativeActivity_onCreate, plus the JNI bridge symbols the shipped
+// io.qoinly.zigui.ZiguiActivity resolves against) into the .so. A runtime use
+// inside main() alone does not, so the framework would otherwise miss the entry.
 comptime {
     _ = zigui.App;
-}
-
-// The JNI native method ZiguiActivity.nativeOnText resolves to this exported
-// symbol (the name encodes this app's package/class). It just forwards the edited
-// text to zigui's IME bridge, keeping the package name out of the library.
-export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnText(
-    env: *anyopaque,
-    this: *anyopaque,
-    text: ?*anyopaque,
-    caret: i32,
-) callconv(.c) void {
-    _ = this;
-    zigui.android_on_native_text(env, text, caret);
-}
-
-// ZiguiActivity.onBackPressed -> here: pop the route stack (jboolean = whether the
-// press was consumed; the Java side backgrounds the app when it was not).
-export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnBack(
-    env: *anyopaque,
-    this: *anyopaque,
-) callconv(.c) u8 {
-    _ = env;
-    _ = this;
-    return @intFromBool(zigui.android_on_native_back());
-}
-
-// ZiguiActivity.onActivityResult -> here: forward the picked file's text to zigui,
-// which surfaces it through take_picked_file.
-export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnFile(
-    env: *anyopaque,
-    this: *anyopaque,
-    content: ?*anyopaque,
-) callconv(.c) void {
-    _ = this;
-    zigui.android_on_native_file(env, content);
-}
-
-// ZiguiActivity's BiometricPrompt callback -> here: forward the terminal outcome
-// (1 succeeded, 2 failed) to zigui, which surfaces it through biometric.result.
-export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnBiometric(
-    env: *anyopaque,
-    this: *anyopaque,
-    result: i32,
-) callconv(.c) void {
-    _ = env;
-    _ = this;
-    zigui.android_on_native_biometric(result);
 }

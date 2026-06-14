@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Capabilities the system grants this service: gesture injection
-     (canPerformGestures) plus reading the foreground window content
-     (canRetrieveWindowContent + flagRetrieveInteractiveWindows). -->
+<!-- zigui's default accessibility-service config. Capabilities the system grants:
+     gesture injection (canPerformGestures) plus reading the foreground window
+     content (canRetrieveWindowContent + flagRetrieveInteractiveWindows). An app
+     that needs a tighter set ships its own xml and points the manifest at it. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"

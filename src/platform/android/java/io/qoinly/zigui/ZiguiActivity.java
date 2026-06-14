@@ -1,9 +1,11 @@
-package com.qoinly.zigui.androidapp;
+package io.qoinly.zigui;
 
 import android.app.NativeActivity;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
@@ -21,25 +23,20 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
-// A thin shim over NativeActivity. The superclass still loads the native library
-// (android.app.lib_name) and runs the exported ANativeActivity_onCreate, so all
-// rendering and touch stay native. This subclass exists only to host a hidden,
-// focusable EditText that owns an InputConnection - the one thing a pure
-// NativeActivity lacks, and the only way the soft keyboard (IME) can deliver text
-// without parsing key events. The EditText is the editing source of truth; every
-// change is mirrored to native (nativeOnText) for the kit to draw.
+// zigui's shipped activity shell. A thin shim over NativeActivity: the superclass
+// still loads the native library and runs the exported ANativeActivity_onCreate, so
+// all rendering and touch stay native. This subclass exists only for the things a
+// pure NativeActivity lacks - a hidden EditText that owns the IME, the back funnel,
+// the document-picker result, the BiometricPrompt, and the accessibility delegators.
+// Every framework callback is mirrored to native; the shell forwards, never decides.
+// It is package-agnostic (loads whichever .so the manifest's android.app.lib_name
+// names), so any app can declare it in its manifest and write zero Java.
 public class ZiguiActivity extends NativeActivity {
-    // NativeActivity dlopens the library for its own native code, but JNI native
-    // methods (nativeOnText) resolve only against libraries the ClassLoader
-    // loaded - so load it here too, otherwise nativeOnText is "not found".
-    static {
-        System.loadLibrary("zigui_android_app");
-    }
-
     private EditText edit;
 
     @Override
     protected void onCreate(Bundle state) {
+        loadAppLibrary();
         super.onCreate(state);
         edit = new EditText(this);
         edit.setFocusable(true);
@@ -71,6 +68,24 @@ public class ZiguiActivity extends NativeActivity {
                         }
                     }
                 });
+        }
+    }
+
+    // The JNI native methods below resolve only against libraries the ClassLoader
+    // loaded; NativeActivity's own dlopen does not register with it. So load the same
+    // .so the manifest's android.app.lib_name names - read from this activity's
+    // meta-data rather than hardcoded, so the shell works for any app's library.
+    private void loadAppLibrary() {
+        try {
+            ActivityInfo ai = getPackageManager().getActivityInfo(
+                getComponentName(), PackageManager.GET_META_DATA);
+            String lib = ai.metaData != null
+                ? ai.metaData.getString("android.app.lib_name") : null;
+            if (lib != null) {
+                System.loadLibrary(lib);
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            // leave it to NativeActivity; the JNI natives may then be unresolved
         }
     }
 
@@ -113,7 +128,7 @@ public class ZiguiActivity extends NativeActivity {
     }
 
     // The document picker (native pick_file -> startActivityForResult) returns here.
-    // Matches native_apis FILE_REQUEST_CODE; read the chosen file's text off the
+    // Matches the picker's FILE_REQUEST_CODE; read the chosen file's text off the
     // content URI and hand it to native, which exposes it through take_picked_file.
     private static final int FILE_REQUEST_CODE = 0x5A16;
 

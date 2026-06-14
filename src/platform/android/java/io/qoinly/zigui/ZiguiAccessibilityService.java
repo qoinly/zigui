@@ -1,48 +1,26 @@
-package com.qoinly.zigui.androidapp;
+package io.qoinly.zigui;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
-import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Path;
 import android.graphics.Rect;
-import android.os.Build;
-import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
-// The remote-control surface: a system-bound AccessibilityService that injects
-// gestures (dispatchGesture) and reads the foreground node tree. The native side
-// never names this class - ZiguiActivity delegates to the static instance, keeping
-// the package out of the library (the showKeyboard pattern). The service holds no
-// state beyond the singleton; every call no-ops when it is not connected.
+// zigui's shipped accessibility service: a system-bound AccessibilityService that
+// injects gestures (dispatchGesture) and reads the foreground node tree. The native
+// side never names this class - ZiguiActivity delegates to the static instance,
+// keeping the package out of the library. It holds no state beyond the singleton and
+// reacts to no live events; every method no-ops when it is not connected. The shell
+// forwards/exposes primitives, it does not decide - an app's event-driven logic
+// belongs in its own code, not here.
 public class ZiguiAccessibilityService extends AccessibilityService {
     private static ZiguiAccessibilityService sInstance;
-
-    // A cross-app demo trigger: while a foreign app is foreground this process has no
-    // tappable zigui surface, so `adb shell am broadcast -a <DEMO_ACTION>` injects a
-    // swipe into whatever is on screen and logs its node tree - the remote-command
-    // shape a controller (Remora) would drive. Not part of the library.
-    private static final String DEMO_ACTION = "com.qoinly.zigui.androidapp.A11Y_DEMO";
-    private final BroadcastReceiver demoReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            injectSwipe(160, 470, 160, 180, 250);
-            Log.i("zigui-a11y", "read foreground:\n" + readScreen());
-        }
-    };
 
     @Override
     public void onServiceConnected() {
         sInstance = this;
-        IntentFilter filter = new IntentFilter(DEMO_ACTION);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(demoReceiver, filter, Context.RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(demoReceiver, filter);
-        }
     }
 
     @Override
@@ -50,16 +28,9 @@ public class ZiguiAccessibilityService extends AccessibilityService {
         if (sInstance == this) {
             sInstance = null;
         }
-        try {
-            unregisterReceiver(demoReceiver);
-        } catch (IllegalArgumentException e) {
-            // already unregistered
-        }
         return super.onUnbind(intent);
     }
 
-    // Required overrides; this service drives output and pulls content on demand, so
-    // it reacts to no live events.
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {}
 

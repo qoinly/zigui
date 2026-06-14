@@ -166,6 +166,201 @@ fn add_example(
     example_step.dependOn(&example_run.step);
 }
 
+// ---- Android packaging helper (consumer build-time API) ----
+// A consumer's build.zig reaches this via `@import("zigui")` and calls androidApk
+// once: it cross-compiles the native .so for both device ABIs, dexes zigui's shipped
+// Java shell (the activity, plus the accessibility service when asked), and packages
+// a signed, installable APK - so the app writes zero Java. SDK/NDK/JDK paths come
+// from the environment; the app supplies a manifest that points its launch activity
+// at io.qoinly.zigui.ZiguiActivity and sets android.app.lib_name to `name`.
+pub const AndroidApkOptions = struct {
+    // The output library + APK base name; the manifest's android.app.lib_name.
+    name: []const u8,
+    // The app's root Zig source (imports the "zigui" module).
+    source: std.Build.LazyPath,
+    // The app's AndroidManifest.xml.
+    manifest: std.Build.LazyPath,
+    // The app's package / applicationId, for `zig build run`'s am start.
+    package_name: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    // The launch activity component (fully qualified); defaults to the shipped shell.
+    activity: []const u8 = "io.qoinly.zigui.ZiguiActivity",
+    // The installed APK file name under zig-out/bin.
+    out_name: []const u8 = "app.apk",
+    // SDK knobs (match the example defaults).
+    ndk_version: []const u8 = "29.0.14206865",
+    build_tools: []const u8 = "36.0.0",
+    api: u32 = 36,
+    min_api: u32 = 26,
+    // Dex zigui's accessibility service + compile its default config resource.
+    include_accessibility: bool = false,
+};
+
+pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
+    const sdk = android_env(b, "ANDROID_HOME") orelse {
+        std.debug.print("zigui.androidApk: set ANDROID_HOME to the Android SDK root\n", .{});
+        return;
+    };
+    const java_home = android_env(b, "JAVA_HOME") orelse {
+        std.debug.print("zigui.androidApk: set JAVA_HOME (javac/apksigner need java)\n", .{});
+        return;
+    };
+    const ndk = android_env(b, "ANDROID_NDK_HOME") orelse
+        b.fmt("{s}/ndk/{s}", .{ sdk, opts.ndk_version });
+    const sysroot = b.fmt("{s}/toolchains/llvm/prebuilt/linux-x86_64/sysroot", .{ndk});
+    const build_tools = b.fmt("{s}/build-tools/{s}", .{ sdk, opts.build_tools });
+    const android_jar = b.fmt("{s}/platforms/android-{d}/android.jar", .{ sdk, opts.api });
+    const keystore = android_env(b, "ANDROID_DEBUG_KEYSTORE") orelse
+        b.fmt("{s}/debug.keystore", .{sdk});
+    const aapt2 = b.fmt("{s}/aapt2", .{build_tools});
+    const zipalign = b.fmt("{s}/zipalign", .{build_tools});
+    const apksigner = b.fmt("{s}/apksigner", .{build_tools});
+    const d8 = b.fmt("{s}/d8", .{build_tools});
+    const adb = b.fmt("{s}/platform-tools/adb", .{sdk});
+    const javac = b.fmt("{s}/bin/javac", .{java_home});
+
+    // One .so per device ABI, assembled into the lib/<abi>/lib<name>.so tree.
+    const lib_x86 = android_lib(b, opts, sysroot, "x86_64-linux-android", .x86_64);
+    const lib_arm = android_lib(b, opts, sysroot, "aarch64-linux-android", .aarch64);
+    const tree = b.addWriteFiles();
+    _ = tree.addCopyFile(lib_x86.getEmittedBin(), b.fmt("lib/x86_64/lib{s}.so", .{opts.name}));
+    _ = tree.addCopyFile(lib_arm.getEmittedBin(), b.fmt("lib/arm64-v8a/lib{s}.so", .{opts.name}));
+
+    // zigui's shipped Java, staged into a package-tree dir so javac compiles whatever
+    // is present (activity always; the service only when accessibility is on).
+    const zigui_files = b.dependency("zigui", .{
+        .target = b.graph.host,
+        .optimize = opts.optimize,
+    });
+    const java_dir = "src/platform/android/java/io/qoinly/zigui";
+    const java_tree = b.addWriteFiles();
+    _ = java_tree.addCopyFile(
+        zigui_files.path(b.fmt("{s}/ZiguiActivity.java", .{java_dir})),
+        "io/qoinly/zigui/ZiguiActivity.java",
+    );
+    if (opts.include_accessibility) {
+        _ = java_tree.addCopyFile(
+            zigui_files.path(b.fmt("{s}/ZiguiAccessibilityService.java", .{java_dir})),
+            "io/qoinly/zigui/ZiguiAccessibilityService.java",
+        );
+    }
+
+    // javac every staged source -> d8 -> classes.dex at the APK root.
+    const dex_script =
+        "set -e; OUT=\"$(dirname \"$4\")\"; CL=\"$OUT/cls\"; rm -rf \"$CL\"; mkdir -p \"$CL\"; " ++
+        "\"$1\" -cp \"$2\" -d \"$CL\" $(find \"$5\" -name '*.java'); " ++
+        "\"$3\" --lib \"$2\" --min-api 26 --output \"$OUT\" $(find \"$CL\" -name '*.class')";
+    const dex = b.addSystemCommand(&.{ "sh", "-c", dex_script, "dex" });
+    dex.addArg(javac); // $1
+    dex.addArg(android_jar); // $2
+    dex.addArg(d8); // $3
+    const classes_dex = dex.addOutputFileArg("classes.dex"); // $4
+    dex.addDirectoryArg(java_tree.getDirectory()); // $5
+    dex.setEnvironmentVariable("JAVA_HOME", java_home);
+
+    // aapt2 links the manifest (+ the accessibility config resource when on) into the
+    // base APK (binary XML + resources.arsc, no libs yet).
+    const link = b.addSystemCommand(&.{ aapt2, "link", "-I", android_jar, "--manifest" });
+    link.addFileArg(opts.manifest);
+    link.addArg("-o");
+    const base_apk = link.addOutputFileArg("base.apk");
+    if (opts.include_accessibility) {
+        const compile_res = b.addSystemCommand(&.{ aapt2, "compile", "--dir" });
+        compile_res.addDirectoryArg(zigui_files.path("src/platform/android/res"));
+        compile_res.addArg("-o");
+        const res_zip = compile_res.addOutputFileArg("res.zip");
+        link.addFileArg(res_zip);
+    }
+
+    // Copy the base APK, then add classes.dex + the .so libs STORED (uncompressed) so
+    // the loader can mmap them (extractNativeLibs defaults false on modern targets).
+    const pack_script =
+        "set -e; cp \"$1\" \"$2\"; zip -X -q -j \"$2\" \"$4\"; " ++
+        "cd \"$3\"; zip -0 -X -q \"$2\" $(find lib -type f)";
+    const pack = b.addSystemCommand(&.{ "sh", "-c", pack_script, "package_apk" });
+    pack.addFileArg(base_apk); // $1
+    const unsigned_apk = pack.addOutputFileArg("unsigned.apk"); // $2
+    pack.addDirectoryArg(tree.getDirectory()); // $3
+    pack.addFileArg(classes_dex); // $4
+
+    // Page-align the stored libs, then sign with the debug key.
+    const align_cmd = b.addSystemCommand(&.{ zipalign, "-p", "-f", "4" });
+    align_cmd.addFileArg(unsigned_apk);
+    const aligned_apk = align_cmd.addOutputFileArg("aligned.apk");
+
+    const sign = b.addSystemCommand(&.{
+        apksigner,        "sign",
+        "--ks-pass",      "pass:android",
+        "--ks-key-alias", "androiddebugkey",
+        "--key-pass",     "pass:android",
+        "--ks",           keystore,
+        "--out",
+    });
+    const app_apk = sign.addOutputFileArg("app.apk");
+    sign.addFileArg(aligned_apk);
+    // apksigner needs `java` on PATH, not just JAVA_HOME.
+    const sign_path = b.fmt("{s}/bin:{s}", .{ java_home, android_env(b, "PATH") orelse "" });
+    sign.setEnvironmentVariable("PATH", sign_path);
+
+    const install_apk = b.addInstallBinFile(app_apk, opts.out_name);
+    b.getInstallStep().dependOn(&install_apk.step);
+
+    // `zig build run`: install onto a connected device/emulator and launch.
+    const adb_install = b.addSystemCommand(&.{ adb, "install", "-r" });
+    adb_install.addFileArg(app_apk);
+    const component = b.fmt("{s}/{s}", .{ opts.package_name, opts.activity });
+    const adb_start = b.addSystemCommand(&.{ adb, "shell", "am", "start", "-n", component });
+    adb_start.step.dependOn(&adb_install.step);
+    const run_step = b.step("run", "Install and launch the APK on a device/emulator");
+    run_step.dependOn(&adb_start.step);
+}
+
+// One dynamic .so for `triple`/`arch`, linking the app source against zigui through
+// the NDK sysroot (a libc file points Zig at bionic).
+fn android_lib(
+    b: *std.Build,
+    opts: AndroidApkOptions,
+    sysroot: []const u8,
+    triple: []const u8,
+    arch: std.Target.Cpu.Arch,
+) *std.Build.Step.Compile {
+    const lib_dir = b.fmt("{s}/usr/lib/{s}/{d}", .{ sysroot, triple, opts.min_api });
+    const libc = b.addWriteFiles().add(b.fmt("libc-{s}.txt", .{triple}), b.fmt(
+        \\include_dir={s}/usr/include
+        \\sys_include_dir={s}/usr/include
+        \\crt_dir={s}
+        \\msvc_lib_dir=
+        \\kernel32_lib_dir=
+        \\gcc_dir=
+        \\
+    , .{ sysroot, sysroot, lib_dir }));
+
+    const target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .android });
+    const zigui_dep = b.dependency("zigui", .{ .target = target, .optimize = opts.optimize });
+    const zigui = zigui_dep.module("zigui");
+    const lib = b.addLibrary(.{
+        .name = opts.name,
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = opts.source,
+            .target = target,
+            .optimize = opts.optimize,
+            .imports = &.{.{ .name = "zigui", .module = zigui }},
+        }),
+    });
+    lib.setLibCFile(libc);
+    lib.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
+    lib.root_module.linkSystemLibrary("android", .{});
+    lib.root_module.linkSystemLibrary("log", .{});
+    lib.root_module.linkSystemLibrary("jnigraphics", .{});
+    lib.root_module.link_libc = true;
+    return lib;
+}
+
+fn android_env(b: *std.Build, name: []const u8) ?[]const u8 {
+    return b.graph.environ_map.get(name);
+}
+
 fn add_icongen(b: *std.Build) void {
     const icongen_root = b.createModule(.{
         .root_source_file = b.path("tools/icongen.zig"),

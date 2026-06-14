@@ -13,6 +13,13 @@ const android_shell = @import("custom_shell.zig");
 const input = @import("input.zig");
 const jni = @import("jni.zig");
 
+// The JNI symbols the shipped ZiguiActivity's native methods resolve against. They
+// live in the library; this reference (reached whenever an app pulls in App) keeps
+// them in the .so. Android-only, since app.zig is the android backend.
+comptime {
+    _ = @import("jni_exports.zig");
+}
+
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 pub const Error = error{InitFailed};
 
