@@ -10,6 +10,7 @@
 const std = @import("std");
 const native = @import("native.zig");
 const android_shell = @import("custom_shell.zig");
+const input = @import("input.zig");
 
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 pub const Error = error{InitFailed};
@@ -75,6 +76,8 @@ pub export fn ANativeActivity_onCreate(
     _ = saved_state_size;
     activity.callbacks.onNativeWindowCreated = on_window_created;
     activity.callbacks.onNativeWindowDestroyed = on_window_destroyed;
+    activity.callbacks.onInputQueueCreated = on_input_queue_created;
+    activity.callbacks.onInputQueueDestroyed = on_input_queue_destroyed;
     // Run the app's main() now: it calls App.init/run, which register the
     // surface delegate and return at once. The window callbacks above then fire.
     run_root_main();
@@ -124,6 +127,20 @@ fn on_window_destroyed(activity: *Activity, window: *Window) callconv(.c) void {
 
 fn notify_lost() void {
     if (g_delegate) |d| d.on_lost(d.ctx);
+}
+
+// The framework passes the AInputQueue erased as *anyopaque in this slot; the
+// input layer attaches it to the thread looper and drains touch from there.
+fn on_input_queue_created(activity: *Activity, queue: *anyopaque) callconv(.c) void {
+    _ = activity;
+    std.debug.assert(@intFromPtr(queue) != 0); // the framework owns this queue ptr
+    input.on_queue_created(@ptrCast(queue));
+}
+
+fn on_input_queue_destroyed(activity: *Activity, queue: *anyopaque) callconv(.c) void {
+    _ = activity;
+    std.debug.assert(@intFromPtr(queue) != 0);
+    input.on_queue_destroyed(@ptrCast(queue));
 }
 
 // Minimal NDK logging (liblog) so a failed bring-up shows in logcat instead of a

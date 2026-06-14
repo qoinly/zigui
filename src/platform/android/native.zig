@@ -60,6 +60,49 @@ pub const ANativeActivity = extern struct {
     obb_path: ?[*:0]const u8,
 };
 
+// Input (android/input.h) plus the thread looper (android/looper.h). The
+// framework hands an AInputQueue via onInputQueueCreated; attaching it to the
+// main thread's ALooper with a callback drains touch/key events as they arrive,
+// on the same thread the paint loop runs on (no cross-thread state).
+pub const AInputQueue = opaque {};
+pub const AInputEvent = opaque {};
+pub const ALooper = opaque {};
+
+pub const LooperCallback =
+    *const fn (fd: c_int, events: c_int, data: ?*anyopaque) callconv(.c) c_int;
+
+pub extern fn ALooper_forThread() ?*ALooper;
+pub extern fn AInputQueue_attachLooper(
+    *AInputQueue,
+    *ALooper,
+    ident: c_int,
+    callback: LooperCallback,
+    data: ?*anyopaque,
+) void;
+pub extern fn AInputQueue_detachLooper(*AInputQueue) void;
+pub extern fn AInputQueue_getEvent(*AInputQueue, event: **AInputEvent) i32;
+pub extern fn AInputQueue_preDispatchEvent(*AInputQueue, *AInputEvent) i32;
+pub extern fn AInputQueue_finishEvent(*AInputQueue, *AInputEvent, handled: c_int) void;
+
+pub extern fn AInputEvent_getType(*const AInputEvent) i32;
+pub extern fn AMotionEvent_getAction(*const AInputEvent) i32;
+pub extern fn AMotionEvent_getX(*const AInputEvent, pointer_index: usize) f32;
+pub extern fn AMotionEvent_getY(*const AInputEvent, pointer_index: usize) f32;
+pub extern fn AKeyEvent_getAction(*const AInputEvent) i32;
+pub extern fn AKeyEvent_getKeyCode(*const AInputEvent) i32;
+
+pub const AINPUT_EVENT_TYPE_KEY: i32 = 1;
+pub const AINPUT_EVENT_TYPE_MOTION: i32 = 2;
+// The action is packed with the pointer index in the high bits; mask to the kind.
+pub const AMOTION_EVENT_ACTION_MASK: i32 = 0xff;
+pub const AMOTION_EVENT_ACTION_DOWN: i32 = 0;
+pub const AMOTION_EVENT_ACTION_UP: i32 = 1;
+pub const AMOTION_EVENT_ACTION_MOVE: i32 = 2;
+pub const AMOTION_EVENT_ACTION_CANCEL: i32 = 3;
+pub const AKEY_EVENT_ACTION_DOWN: i32 = 0;
+pub const AKEY_EVENT_ACTION_UP: i32 = 1;
+pub const AKEYCODE_BACK: i32 = 4;
+
 pub const MAX_WINDOWS: u32 = 1; // one fullscreen surface per Activity
 
 pub const AndroidWindow = struct {

@@ -37,12 +37,28 @@ pub const ContentSize = shell_types.ContentSize;
 // surface is created, cleared when it is destroyed.
 var g_window: ?*native.AndroidWindow = null;
 
+// The paint loop registers a MouseDispatch (ctx = the PaintContext); the input
+// layer reads it back to route touch as pointer events. Cleared on surface loss
+// so a stale PaintContext is never dispatched into.
+var g_dispatch: ?MouseDispatch = null;
+
 pub fn set_window(window: *native.AndroidWindow) void {
     g_window = window;
 }
 
 pub fn clear_window() void {
     g_window = null;
+    g_dispatch = null;
+}
+
+pub fn mouse_dispatch() ?MouseDispatch {
+    return g_dispatch;
+}
+
+pub fn surface_scale() i32 {
+    const w = g_window orelse return 1;
+    std.debug.assert(w.scale >= 1);
+    return w.scale;
 }
 
 pub const CustomShellHandle = struct {
@@ -125,10 +141,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     };
 }
 
-// The fullscreen surface has no pointer, hit-test, or synchronous paint-now
-// source; the paint loop registers these unconditionally, so accept and drop them.
+// Touch is routed through this dispatch (the input layer reads it back via
+// mouse_dispatch); the other registrations have no Android source, so the paint
+// loop registers them unconditionally and they are accepted and dropped.
 pub fn register_mouse_dispatch(d: MouseDispatch) void {
-    _ = d;
+    g_dispatch = d;
 }
 
 pub fn register_raw_dispatch(d: RawDispatch) void {
