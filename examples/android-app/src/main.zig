@@ -20,12 +20,23 @@ pub fn main() !void {
     try app.run(&state, .{ .body = render });
 }
 
+// A tap adds a dot, capped so the row never overflows the surface. With no font
+// the label does not render, so the dot row is the visible proof a touch reached
+// the kit.
+const MAX_DOTS = 8;
+
 fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
-    _ = f;
-    _ = counter;
+    const n = @min(counter.clicks, MAX_DOTS);
+    var dots: []const *zigui.Node = &.{};
+    if (f.arena.alloc(*zigui.Node, n)) |slice| {
+        const box = zigui.Config{ .width = 28, .height = 28, .radius = 8, .bg = f.theme.primary };
+        for (slice) |*dot| dot.* = zigui.col(box, &.{});
+        dots = slice;
+    } else |_| {}
     return zigui.col(.{ .pad = .lg, .gap = .md }, &.{
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
+        zigui.row(.{ .gap = .sm }, dots),
     });
 }
 
