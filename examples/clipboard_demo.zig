@@ -25,12 +25,12 @@ pub fn main() !void {
 
 fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     _ = f;
-    if (zigui.clipboard_changed()) {
+    if (zigui.napi.clipboard.changed()) {
         app.ext_changes += 1;
-        app.text_len = zigui.clipboard_text(&app.text_buf).len;
+        app.text_len = zigui.napi.clipboard.read(&app.text_buf).len;
     }
     if (app.want_write) {
-        zigui.set_clipboard_text("zigui wrote this");
+        zigui.napi.clipboard.write("zigui wrote this");
         app.want_write = false;
     }
     zigui.animate(); // poll the clipboard every frame

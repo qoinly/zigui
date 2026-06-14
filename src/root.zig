@@ -33,7 +33,7 @@ else {};
 // both erased. The pick is started by pick_file and read once by take_picked_file.
 // Package-agnostic for the same reason as the text sink. Void off Android.
 pub const android_on_native_file = if (builtin.abi.isAndroid())
-    @import("platform/android/native_apis.zig").on_native_file
+    @import("platform/android/napi/picker.zig").on_native_file
 else {};
 
 const color = @import("color.zig");
@@ -96,6 +96,11 @@ pub fn animate() void {
 }
 pub const render_tree = node.render;
 pub const render_tree_at = node.render_at;
+
+// Native platform APIs (vibrate, share, notifications, the device pickers, ...).
+// A namespace, not flat wrappers, so each call is analyzed lazily: an API a target
+// lacks is a compile error only where a caller actually uses it (see napi/root.zig).
+pub const napi = @import("napi/root.zig");
 
 pub const theme = @import("theme.zig");
 pub const Spacing = theme.Spacing;
@@ -179,21 +184,6 @@ pub fn input_events() []const InputEvent {
     return frame_ctx.get().paint.raw_inputs();
 }
 
-// Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
-// returns true once each time something outside this app changes the clipboard (our
-// own set_clipboard_text writes are not reported), so a remote-control loop can
-// forward it. The clipboard is one per app (every window shares it), and the poll
-// is edge-triggered, so call clipboard_changed once a frame from a single window.
-pub fn clipboard_text(buf: []u8) []const u8 {
-    return custom_shell.pasteboard_read_into(buf);
-}
-pub fn set_clipboard_text(s: []const u8) void {
-    custom_shell.pasteboard_write_string(s);
-}
-pub fn clipboard_changed() bool {
-    return custom_shell.clipboard_changed_external();
-}
-
 // Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
 // window; display_bounds(i) gives monitor i's frame in points so the app can size a
 // stream or place a window per screen.
@@ -224,59 +214,6 @@ pub fn display_bounds(index: u32) BoundsF {
     return custom_shell.display_bounds(index);
 }
 
-// Mobile window properties (Android; no-ops where the system has no equivalent).
-// keep_awake holds the display on (a stream wants this); status_bar_icons tints
-// the status-bar glyphs to stay legible over the app background; immersive hides
-// the system bars (status + nav), which a swipe brings back. Call once a frame -
-// the backend only hops into the OS when the value actually changes.
-pub fn keep_awake(enable: bool) void {
-    custom_shell.set_keep_awake(enable);
-}
-pub const StatusBarIcons = enum { light, dark };
-pub fn status_bar_icons(which: StatusBarIcons) void {
-    custom_shell.set_status_bar_dark_icons(which == .dark);
-}
-pub fn immersive(enable: bool) void {
-    custom_shell.set_immersive(enable);
-}
-
-// Mobile platform services (Android; no-ops where the system has no equivalent).
-// vibrate buzzes for ms milliseconds; open_url hands a url to the browser; share
-// raises the system share sheet for text; notify posts a notification (Android 13+
-// asks for the POST_NOTIFICATIONS grant on the first call, posts once granted).
-pub fn vibrate(ms: i64) void {
-    custom_shell.vibrate(ms);
-}
-pub fn open_url(url: []const u8) void {
-    custom_shell.open_url(url);
-}
-pub fn share_text(content: []const u8) void {
-    custom_shell.share_text(content);
-}
-pub fn notify(title: []const u8, body: []const u8) void {
-    custom_shell.notify(title, body);
-}
-
-// Runtime permissions (Android). permission_granted polls whether one is held;
-// request_permission raises the system dialog. In immediate mode poll
-// permission_granted each frame, requesting while it is false - no result
-// callback. Off Android there are none, so granted reads true and request no-ops.
-pub fn permission_granted(name: []const u8) bool {
-    return custom_shell.permission_granted(name);
-}
-pub fn request_permission(name: []const u8) void {
-    custom_shell.request_permission(name);
-}
-
-// The system document picker (Android). pick_file opens it; the chosen file's text
-// arrives a few frames later, read once by take_picked_file (null until then). Off
-// Android there is no picker, so the poll never yields.
-pub fn pick_file() void {
-    custom_shell.pick_file();
-}
-pub fn take_picked_file(buf: []u8) ?[]const u8 {
-    return custom_shell.take_picked_file(buf);
-}
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;

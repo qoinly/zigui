@@ -30,11 +30,11 @@ const CAMERA = "android.permission.CAMERA";
 
 fn do_pick_file(c: *Counter) void {
     _ = c;
-    zigui.pick_file();
+    zigui.napi.picker.open_file();
 }
 fn do_request_camera(c: *Counter) void {
     _ = c;
-    if (!zigui.permission_granted(CAMERA)) zigui.request_permission(CAMERA);
+    if (!zigui.napi.permissions.granted(CAMERA)) zigui.napi.permissions.request(CAMERA);
 }
 
 fn toggle_awake(c: *Counter) void {
@@ -83,24 +83,24 @@ fn open_native(c: *Counter) void {
 
 fn do_vibrate(c: *Counter) void {
     _ = c;
-    zigui.vibrate(40);
+    zigui.napi.haptics.vibrate(40);
 }
 fn do_open_url(c: *Counter) void {
     _ = c;
-    zigui.open_url("https://ziglang.org");
+    zigui.napi.links.open_url("https://ziglang.org");
 }
 fn do_share(c: *Counter) void {
     _ = c;
-    zigui.share_text("shared from zigui");
+    zigui.napi.links.share_text("shared from zigui");
 }
 fn do_notify(c: *Counter) void {
     _ = c;
-    zigui.notify("zigui", "hello from the native api demo");
+    zigui.napi.notifications.post("zigui", "hello from the native api demo");
 }
 // Round-trips the clipboard: write, then read it back into the result buffer.
 fn do_clipboard(c: *Counter) void {
-    zigui.set_clipboard_text("copied by zigui");
-    const got = zigui.clipboard_text(&c.last_result);
+    zigui.napi.clipboard.write("copied by zigui");
+    const got = zigui.napi.clipboard.read(&c.last_result);
     c.last_result_len = got.len;
 }
 
@@ -124,15 +124,15 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         @memcpy(counter.last_result[0..k], r[0..k]);
         counter.last_result_len = k;
     }
-    if (zigui.take_picked_file(&counter.file_preview)) |picked| { // a pick came back: keep it
+    if (zigui.napi.picker.take_file(&counter.file_preview)) |picked| { // a pick came back: keep it
         counter.file_preview_len = picked.len;
     }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
     // two live toggles below.
-    zigui.status_bar_icons(.light);
-    zigui.keep_awake(counter.awake);
-    zigui.immersive(counter.immersive);
+    zigui.napi.display.status_bar_icons(.light);
+    zigui.napi.display.keep_awake(counter.awake);
+    zigui.napi.display.immersive(counter.immersive);
 
     const route = nav.current();
     const page = if (std.mem.eql(u8, route, "detail"))
@@ -208,7 +208,8 @@ fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const note = if (counter.last_result_len > 0) clip else "(clipboard empty)";
     const file = counter.file_preview[0..counter.file_preview_len];
     const file_note = if (counter.file_preview_len > 0) file else "(no file picked)";
-    const cam = if (zigui.permission_granted(CAMERA)) "Camera: granted" else "Camera: not granted";
+    const has_cam = zigui.napi.permissions.granted(CAMERA);
+    const cam = if (has_cam) "Camera: granted" else "Camera: not granted";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Native APIs.", .{ .size = 20 }),
         zigui.button("Vibrate", .{ .on_click = zigui.on(Counter, do_vibrate) }),

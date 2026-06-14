@@ -17,8 +17,7 @@ const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 const jni = @import("jni.zig");
 const ime = @import("ime.zig");
-const window_props = @import("window_props.zig");
-const native_apis = @import("native_apis.zig");
+const clipboard = @import("napi/clipboard.zig");
 
 pub const KeyMods = shell_types.KeyMods;
 pub const KeyCode = shell_types.KeyCode;
@@ -315,11 +314,11 @@ pub fn text_field_secure() bool {
 }
 
 pub fn pasteboard_read_into(buf: []u8) []const u8 {
-    return native_apis.clipboard_read(buf);
+    return clipboard.read(buf);
 }
 
 pub fn pasteboard_write_string(text: []const u8) void {
-    native_apis.clipboard_write(text);
+    clipboard.write(text);
 }
 
 pub fn clipboard_changed_external() bool {
@@ -352,51 +351,3 @@ pub fn display_bounds(index: u32) geometry.BoundsF {
 
 // Server-side autorepeat does not apply; there is no client repeat timer to tick.
 pub fn tick_key_repeat() void {}
-
-// Runtime window properties (keep-screen-on, status-bar icon tint, immersive);
-// the JNI lives in window_props, the facade reaches it through these.
-pub fn set_keep_awake(on: bool) void {
-    window_props.set_keep_awake(on);
-}
-
-pub fn set_status_bar_dark_icons(dark: bool) void {
-    window_props.set_status_bar_dark_icons(dark);
-}
-
-pub fn set_immersive(on: bool) void {
-    window_props.set_immersive(on);
-}
-
-// Platform services; the JNI lives in native_apis, the facade reaches it
-// through these.
-pub fn vibrate(ms: i64) void {
-    native_apis.vibrate(ms);
-}
-
-pub fn open_url(url: []const u8) void {
-    native_apis.open_url(url);
-}
-
-pub fn share_text(text: []const u8) void {
-    native_apis.share_text(text);
-}
-
-pub fn notify(title: []const u8, text: []const u8) void {
-    native_apis.notify(title, text);
-}
-
-pub fn permission_granted(name: []const u8) bool {
-    return native_apis.permission_granted(name);
-}
-
-pub fn request_permission(name: []const u8) void {
-    native_apis.request_permission(name);
-}
-
-pub fn pick_file() void {
-    native_apis.pick_file();
-}
-
-pub fn take_picked_file(buf: []u8) ?[]const u8 {
-    return native_apis.take_picked_file(buf);
-}

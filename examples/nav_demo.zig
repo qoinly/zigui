@@ -35,7 +35,7 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
         @memcpy(app.last_result[0..n], r[0..n]);
         app.last_result_len = n;
     }
-    zigui.keep_awake(app.awake); // re-asserted each frame; the backend dedupes
+    zigui.napi.display.keep_awake(app.awake); // re-asserted each frame; the backend dedupes
 
     const route = nav.current();
     const page = if (std.mem.eql(u8, route, "detail"))
