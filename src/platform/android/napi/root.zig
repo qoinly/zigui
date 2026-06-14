@@ -8,3 +8,4 @@ pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
 pub const device = @import("device.zig");
 pub const biometric = @import("biometric.zig");
+pub const accessibility = @import("accessibility.zig");

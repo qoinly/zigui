@@ -27,6 +27,10 @@ const Counter = struct {
     // yields it once, like the route result).
     file_preview: [256]u8 = undefined,
     file_preview_len: usize = 0,
+    // The last accessibility screen-read, kept across frames (read() borrows the buffer
+    // it fills, so copy it out for the page to show).
+    a11y_read: [256]u8 = undefined,
+    a11y_read_len: usize = 0,
 };
 
 const CAMERA = "android.permission.CAMERA";
@@ -128,6 +132,34 @@ fn do_biometric(c: *Counter) void {
     zigui.napi.biometric.authenticate("Sign in", "Confirm it's you");
 }
 
+fn open_a11y(c: *Counter) void {
+    _ = c;
+    nav.push("a11y", "Accessibility");
+}
+fn do_a11y_enable(c: *Counter) void {
+    _ = c;
+    zigui.napi.accessibility.request_enable();
+}
+fn do_a11y_back(c: *Counter) void {
+    _ = c;
+    zigui.napi.accessibility.global_action(.back);
+}
+fn do_a11y_home(c: *Counter) void {
+    _ = c;
+    zigui.napi.accessibility.global_action(.home);
+}
+// Inject a swipe-up into the foreground (here, the app's own scroll list).
+fn do_a11y_swipe(c: *Counter) void {
+    _ = c;
+    zigui.napi.accessibility.swipe(160, 470, 160, 180, 250);
+}
+// Read the foreground node tree into the page's buffer.
+fn do_a11y_read(c: *Counter) void {
+    if (zigui.napi.accessibility.read(&c.a11y_read)) |tree| {
+        c.a11y_read_len = tree.len;
+    }
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
     try app.run(&state, .{ .body = render });
@@ -168,6 +200,8 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         frame_page(f)
     else if (std.mem.eql(u8, route, "native"))
         native_page(f, counter)
+    else if (std.mem.eql(u8, route, "a11y"))
+        a11y_page(f, counter)
     else
         home_page(f, counter);
 
@@ -213,6 +247,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Open details", .{ .on_click = zigui.on(Counter, open_detail) }),
         zigui.button("Show AHB frame", .{ .on_click = zigui.on(Counter, open_frame) }),
         zigui.button("Native APIs", .{ .on_click = zigui.on(Counter, open_native) }),
+        zigui.button("Accessibility", .{ .on_click = zigui.on(Counter, open_a11y) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -275,6 +310,28 @@ fn device_status(f: *zigui.Frame) []const u8 {
     };
     const out = std.fmt.bufPrint(buf, "Battery: {d}%{s}  Net: {s}", .{ level, charge, net });
     return out catch "Battery/Net: n/a";
+}
+
+// The accessibility-service control surface. Enable opens system settings (a service
+// is user-enabled, never programmatic); once on, the global actions + the injected
+// swipe + the screen-read all run through the bound service. Cross-app injection (into
+// a foreign app) is driven by the service's broadcast trigger - see the .java.
+fn a11y_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    _ = f;
+    const on = zigui.napi.accessibility.enabled();
+    const status = if (on) "Service: enabled" else "Service: disabled";
+    const tree = counter.a11y_read[0..counter.a11y_read_len];
+    const read_note = if (counter.a11y_read_len > 0) tree else "(no read yet)";
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Accessibility.", .{ .size = 20 }),
+        zigui.text(status, .{ .size = 16 }),
+        zigui.button("Enable service", .{ .on_click = zigui.on(Counter, do_a11y_enable) }),
+        zigui.button("Back action", .{ .on_click = zigui.on(Counter, do_a11y_back) }),
+        zigui.button("Home action", .{ .on_click = zigui.on(Counter, do_a11y_home) }),
+        zigui.button("Inject swipe", .{ .on_click = zigui.on(Counter, do_a11y_swipe) }),
+        zigui.button("Read screen", .{ .on_click = zigui.on(Counter, do_a11y_read) }),
+        zigui.text(read_note, .{ .size = 12 }),
+    });
 }
 
 // The zero-copy frame page: a synthesized YUV AHardwareBuffer imported with no
