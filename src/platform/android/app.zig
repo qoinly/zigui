@@ -11,6 +11,7 @@ const std = @import("std");
 const native = @import("native.zig");
 const android_shell = @import("custom_shell.zig");
 const input = @import("input.zig");
+const jni = @import("jni.zig");
 
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 pub const Error = error{InitFailed};
@@ -18,6 +19,10 @@ pub const Error = error{InitFailed};
 // One fullscreen surface per Activity; app_runtime.zig and the renderer both
 // read this storage, so it lives here (the shell holds a pointer to it).
 var g_window: native.AndroidWindow = .{};
+
+// Kept so the insets can be re-read from JNI (it needs the activity's env+object)
+// when the layout changes.
+var g_activity: ?*native.ANativeActivity = null;
 
 // The high-level App registers this to receive surface lifecycle events; the
 // framework callbacks below fan into it.
@@ -78,6 +83,8 @@ pub export fn ANativeActivity_onCreate(
     activity.callbacks.onNativeWindowDestroyed = on_window_destroyed;
     activity.callbacks.onInputQueueCreated = on_input_queue_created;
     activity.callbacks.onInputQueueDestroyed = on_input_queue_destroyed;
+    activity.callbacks.onContentRectChanged = on_content_rect_changed;
+    g_activity = activity;
     // Run the app's main() now: it calls App.init/run, which register the
     // surface delegate and return at once. The window callbacks above then fire.
     run_root_main();
@@ -114,6 +121,7 @@ fn on_window_created(activity: *Activity, window: *Window) callconv(.c) void {
     g_window = .{ .in_use = true, .native = window };
     g_window.sync_extent();
     android_shell.set_window(&g_window);
+    refresh_insets(); // best-effort; onContentRectChanged refreshes once laid out
     if (g_delegate) |d| d.on_ready(d.ctx, &g_window);
 }
 
@@ -127,6 +135,21 @@ fn on_window_destroyed(activity: *Activity, window: *Window) callconv(.c) void {
 
 fn notify_lost() void {
     if (g_delegate) |d| d.on_lost(d.ctx);
+}
+
+// The content rect changes on rotation / bar show-hide; re-read the insets then.
+fn on_content_rect_changed(activity: *Activity, rect: *const native.ARect) callconv(.c) void {
+    _ = activity;
+    _ = rect;
+    refresh_insets();
+}
+
+// Pull the system-bar insets from JNI into the shell. A null read (view not laid
+// out, or pre-API-30) leaves the last-known insets, so an early call never snaps
+// content to zero.
+fn refresh_insets() void {
+    const a = g_activity orelse return;
+    if (jni.safe_insets(a.env, a.clazz)) |insets| android_shell.set_insets(insets);
 }
 
 // The framework passes the AInputQueue erased as *anyopaque in this slot; the

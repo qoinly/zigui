@@ -450,6 +450,9 @@ pub const PaintContext = struct {
             // uses native traffic lights repositioned by the platform layer.
             if (builtin.os.tag != .macos) self.draw_caption_buttons(pane_w, top);
         }
+        // Safe-area insets carve the body in from the surface edges (the mobile
+        // system bars); zero on desktop, so the body math below is unchanged there.
+        const insets = custom_shell.safe_area_insets();
         return .{
             .builder = .{
                 .prims = &self.prims,
@@ -464,8 +467,11 @@ pub const PaintContext = struct {
             .width = pane_w,
             .height = pane_h,
             .body = .{
-                .origin = .{ .x = 0, .y = top },
-                .size = .{ .width = pane_w, .height = pane_h - top },
+                .origin = .{ .x = insets.left, .y = top + insets.top },
+                .size = .{
+                    .width = pane_w - insets.left - insets.right,
+                    .height = pane_h - top - insets.top - insets.bottom,
+                },
             },
             // Windows reserves the right cluster for the window-control buttons so
             // consumer titlebar content does not draw under them.
