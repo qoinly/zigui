@@ -2,6 +2,8 @@ package com.qoinly.zigui.androidapp;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
@@ -12,6 +14,9 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 // A thin shim over NativeActivity. The superclass still loads the native library
 // (android.app.lib_name) and runs the exported ANativeActivity_onCreate, so all
@@ -104,7 +109,39 @@ public class ZiguiActivity extends NativeActivity {
         }
     }
 
+    // The document picker (native pick_file -> startActivityForResult) returns here.
+    // Matches native_apis FILE_REQUEST_CODE; read the chosen file's text off the
+    // content URI and hand it to native, which exposes it through take_picked_file.
+    private static final int FILE_REQUEST_CODE = 0x5A16;
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req != FILE_REQUEST_CODE || res != RESULT_OK || data == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        if (uri == null) {
+            return;
+        }
+        String content;
+        try (InputStream is = getContentResolver().openInputStream(uri)) {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] tmp = new byte[4096];
+            int n;
+            while ((n = is.read(tmp)) != -1) {
+                bos.write(tmp, 0, n);
+            }
+            content = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return;
+        }
+        nativeOnFile(content);
+    }
+
     private native void nativeOnText(String text, int caret);
 
     private native boolean nativeOnBack();
+
+    private native void nativeOnFile(String content);
 }

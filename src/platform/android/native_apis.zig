@@ -192,8 +192,8 @@ pub fn notify(title: []const u8, text: []const u8) void {
     const c = ctx() orelse return;
     const env = c.env;
     const t = env.*;
-    if (!post_granted(env, c.activity)) {
-        request_post_notifications(env, c.activity);
+    if (!granted_jni(env, c.activity, POST_NOTIFICATIONS)) {
+        request_jni(env, c.activity, POST_NOTIFICATIONS);
         return;
     }
     const mgr = system_service(env, c.activity, "notification") orelse return;
@@ -315,9 +315,26 @@ fn framework_info_icon(env: JNIEnv) jni.jint {
 
 const POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
 
-// Context.checkSelfPermission == PERMISSION_GRANTED (0). Pre-API-23 has no such
-// method (permissions are install-time), so a missing method reads as granted.
-fn post_granted(env: JNIEnv, activity: jni.jobject) bool {
+// Whether a runtime permission is granted now (Context.checkSelfPermission == 0).
+// An immediate-mode app polls this each frame instead of awaiting a result
+// callback. No system here off Android, so callers there see everything granted.
+pub fn permission_granted(name: []const u8) bool {
+    std.debug.assert(name.len > 0);
+    const c = ctx() orelse return false;
+    return granted_jni(c.env, c.activity, name);
+}
+
+// Raises the system grant dialog for a permission; the answer is read back through
+// permission_granted on a later frame, not awaited here.
+pub fn request_permission(name: []const u8) void {
+    std.debug.assert(name.len > 0);
+    const c = ctx() orelse return;
+    request_jni(c.env, c.activity, name);
+}
+
+// Pre-API-23 has no checkSelfPermission (permissions are install-time), so a
+// missing method reads as granted.
+fn granted_jni(env: JNIEnv, activity: jni.jobject, name: []const u8) bool {
     const t = env.*;
     const act_cls = t.GetObjectClass(env, activity) orelse return false;
     defer t.DeleteLocalRef(env, act_cls);
@@ -327,19 +344,19 @@ fn post_granted(env: JNIEnv, activity: jni.jobject) bool {
         "checkSelfPermission",
         "(Ljava/lang/String;)I",
     ) orelse return true;
-    const perm = jstr(env, POST_NOTIFICATIONS) orelse return false;
+    const perm = jstr(env, name) orelse return false;
     defer t.DeleteLocalRef(env, perm);
     var a = [_]jni.jvalue{.{ .l = perm }};
     return t.CallIntMethodA(env, activity, check, &a) == 0; // 0 = PERMISSION_GRANTED
 }
 
-// Activity.requestPermissions(new String[]{POST_NOTIFICATIONS}, 0) - raises the
-// system grant dialog; the result is handled by Android, not awaited here.
-fn request_post_notifications(env: JNIEnv, activity: jni.jobject) void {
+// Activity.requestPermissions(new String[]{name}, 0) - raises the system grant
+// dialog; the result is handled by Android, not awaited here.
+fn request_jni(env: JNIEnv, activity: jni.jobject, name: []const u8) void {
     const t = env.*;
     const str_cls = t.FindClass(env, "java/lang/String") orelse return;
     defer t.DeleteLocalRef(env, str_cls);
-    const perm = jstr(env, POST_NOTIFICATIONS) orelse return;
+    const perm = jstr(env, name) orelse return;
     defer t.DeleteLocalRef(env, perm);
     const arr = t.NewObjectArray(env, 1, str_cls, perm) orelse return; // element 0 = perm
     defer t.DeleteLocalRef(env, arr);
@@ -445,5 +462,96 @@ pub fn clipboard_read(buf: []u8) []const u8 {
     const span = std.mem.span(chars);
     const n = @min(span.len, buf.len);
     @memcpy(buf[0..n], span[0..n]);
+    return buf[0..n];
+}
+
+// The request id startActivityForResult tags the pick with; the app's
+// onActivityResult must echo it back so this is the only result it reads.
+pub const FILE_REQUEST_CODE: jni.jint = 0x5A16;
+
+// The picked file's text content, awaiting the app's one take_picked_file. A whole
+// file is large, so this caps the preview rather than allocating per pick.
+const FILE_MAX: usize = 4096;
+var g_file_buf: [FILE_MAX]u8 = undefined;
+var g_file_len: usize = 0;
+var g_file_valid: bool = false;
+
+// Launches the system document picker (ACTION_OPEN_DOCUMENT). The chosen file's
+// text arrives later through on_native_file via the activity's onActivityResult.
+pub fn pick_file() void {
+    const c = ctx() orelse return;
+    const env = c.env;
+    const t = env.*;
+    const intent_cls = t.FindClass(env, "android/content/Intent") orelse return;
+    defer t.DeleteLocalRef(env, intent_cls);
+    const ctor = t.GetMethodID(env, intent_cls, "<init>", "(Ljava/lang/String;)V") orelse return;
+    const action = jstr(env, "android.intent.action.OPEN_DOCUMENT") orelse return;
+    defer t.DeleteLocalRef(env, action);
+    var aa = [_]jni.jvalue{.{ .l = action }};
+    const intent = t.NewObjectA(env, intent_cls, ctor, &aa) orelse return;
+    defer t.DeleteLocalRef(env, intent);
+
+    const add_cat = t.GetMethodID(
+        env,
+        intent_cls,
+        "addCategory",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+    ) orelse return;
+    const cat = jstr(env, "android.intent.category.OPENABLE") orelse return;
+    defer t.DeleteLocalRef(env, cat);
+    var cata = [_]jni.jvalue{.{ .l = cat }};
+    if (t.CallObjectMethodA(env, intent, add_cat, &cata)) |r| t.DeleteLocalRef(env, r);
+
+    const set_type = t.GetMethodID(
+        env,
+        intent_cls,
+        "setType",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+    ) orelse return;
+    const mime = jstr(env, "*/*") orelse return;
+    defer t.DeleteLocalRef(env, mime);
+    var ta = [_]jni.jvalue{.{ .l = mime }};
+    if (t.CallObjectMethodA(env, intent, set_type, &ta)) |r| t.DeleteLocalRef(env, r);
+
+    const act_cls = t.GetObjectClass(env, c.activity) orelse return;
+    defer t.DeleteLocalRef(env, act_cls);
+    const start = t.GetMethodID(
+        env,
+        act_cls,
+        "startActivityForResult",
+        "(Landroid/content/Intent;I)V",
+    ) orelse return;
+    var sa = [_]jni.jvalue{ .{ .l = intent }, .{ .i = FILE_REQUEST_CODE } };
+    t.CallVoidMethodA(env, c.activity, start, &sa);
+}
+
+// The app's ZiguiActivity.onActivityResult forwards the picked file's text here
+// (the erased env + Java String), the IME-sink shape. It becomes the next
+// take_picked_file return.
+pub fn on_native_file(env_ptr: *anyopaque, content: ?*anyopaque) void {
+    const env: JNIEnv = @ptrCast(@alignCast(env_ptr));
+    const ref = content orelse return;
+    const t = env.*;
+    const chars = t.GetStringUTFChars(env, ref, null) orelse return;
+    defer t.ReleaseStringUTFChars(env, ref, chars);
+    const span = std.mem.span(chars);
+    g_file_len = @min(span.len, FILE_MAX);
+    // A byte-count truncation could split a UTF-8 codepoint; back off to its start.
+    while (g_file_len > 0 and g_file_len < span.len and (span[g_file_len] & 0xc0) == 0x80) {
+        g_file_len -= 1;
+    }
+    @memcpy(g_file_buf[0..g_file_len], span[0..g_file_len]);
+    g_file_valid = true;
+    std.debug.assert(g_file_len <= FILE_MAX);
+}
+
+// The app reads a just-picked file once (consume-once, the navigator take_result
+// shape); null when nothing was picked since the last read.
+pub fn take_picked_file(buf: []u8) ?[]const u8 {
+    if (!g_file_valid) return null;
+    std.debug.assert(g_file_len <= g_file_buf.len);
+    g_file_valid = false;
+    const n = @min(g_file_len, buf.len);
+    @memcpy(buf[0..n], g_file_buf[0..n]);
     return buf[0..n];
 }

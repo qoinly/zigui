@@ -20,7 +20,22 @@ const Counter = struct {
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
     last_result_len: usize = 0,
+    // A preview of the picked document's text, kept across frames (take_picked_file
+    // yields it once, like the route result).
+    file_preview: [256]u8 = undefined,
+    file_preview_len: usize = 0,
 };
+
+const CAMERA = "android.permission.CAMERA";
+
+fn do_pick_file(c: *Counter) void {
+    _ = c;
+    zigui.pick_file();
+}
+fn do_request_camera(c: *Counter) void {
+    _ = c;
+    if (!zigui.permission_granted(CAMERA)) zigui.request_permission(CAMERA);
+}
 
 fn toggle_awake(c: *Counter) void {
     c.awake = !c.awake;
@@ -109,6 +124,9 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         @memcpy(counter.last_result[0..k], r[0..k]);
         counter.last_result_len = k;
     }
+    if (zigui.take_picked_file(&counter.file_preview)) |picked| { // a pick came back: keep it
+        counter.file_preview_len = picked.len;
+    }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
     // two live toggles below.
@@ -182,11 +200,15 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     });
 }
 
-// The native services, each one tap. Clipboard round-trips into the note.
+// The native services, each one tap. Clipboard round-trips into the note; the
+// picked file's text and the camera-permission state show their result inline.
 fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     _ = f;
     const clip = counter.last_result[0..counter.last_result_len];
     const note = if (counter.last_result_len > 0) clip else "(clipboard empty)";
+    const file = counter.file_preview[0..counter.file_preview_len];
+    const file_note = if (counter.file_preview_len > 0) file else "(no file picked)";
+    const cam = if (zigui.permission_granted(CAMERA)) "Camera: granted" else "Camera: not granted";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Native APIs.", .{ .size = 20 }),
         zigui.button("Vibrate", .{ .on_click = zigui.on(Counter, do_vibrate) }),
@@ -195,6 +217,10 @@ fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Notify", .{ .on_click = zigui.on(Counter, do_notify) }),
         zigui.button("Copy + paste", .{ .on_click = zigui.on(Counter, do_clipboard) }),
         zigui.text(note, .{ .size = 16 }),
+        zigui.button("Request camera", .{ .on_click = zigui.on(Counter, do_request_camera) }),
+        zigui.text(cam, .{ .size = 16 }),
+        zigui.button("Pick file", .{ .on_click = zigui.on(Counter, do_pick_file) }),
+        zigui.text(file_note, .{ .size = 14 }),
     });
 }
 
@@ -255,4 +281,15 @@ export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnBack(
     _ = env;
     _ = this;
     return @intFromBool(zigui.android_on_native_back());
+}
+
+// ZiguiActivity.onActivityResult -> here: forward the picked file's text to zigui,
+// which surfaces it through take_picked_file.
+export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnFile(
+    env: *anyopaque,
+    this: *anyopaque,
+    content: ?*anyopaque,
+) callconv(.c) void {
+    _ = this;
+    zigui.android_on_native_file(env, content);
 }
