@@ -102,13 +102,11 @@ pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
     if (builtin.abi.isAndroid()) impl.register_back(cb, ctx);
 }
 
-// Runtime window properties. Only Android exposes these (keep-screen-on via a
-// window flag, the status-bar icon tint and immersive via the insets controller);
-// desktop windows have no system bars and manage idle sleep elsewhere, so these
-// are no-ops there.
-pub fn set_keep_awake(on: bool) void {
-    if (builtin.abi.isAndroid()) impl.set_keep_awake(on);
-}
+// keep-screen-on is real on every backend: a window flag on Android, an idle-sleep
+// inhibitor on each desktop (IOPMAssertion / SetThreadExecutionState / the
+// ScreenSaver dbus interface). The status-bar tint and immersive have no desktop
+// equivalent, so those stay Android-only and no-op elsewhere.
+pub const set_keep_awake = impl.set_keep_awake;
 pub fn set_status_bar_dark_icons(dark: bool) void {
     if (builtin.abi.isAndroid()) impl.set_status_bar_dark_icons(dark);
 }
