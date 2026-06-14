@@ -7,3 +7,4 @@ pub const picker = @import("picker.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
 pub const device = @import("device.zig");
+pub const biometric = @import("biometric.zig");
