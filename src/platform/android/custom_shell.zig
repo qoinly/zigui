@@ -384,3 +384,19 @@ pub fn share_text(text: []const u8) void {
 pub fn notify(title: []const u8, text: []const u8) void {
     native_apis.notify(title, text);
 }
+
+pub fn permission_granted(name: []const u8) bool {
+    return native_apis.permission_granted(name);
+}
+
+pub fn request_permission(name: []const u8) void {
+    native_apis.request_permission(name);
+}
+
+pub fn pick_file() void {
+    native_apis.pick_file();
+}
+
+pub fn take_picked_file(buf: []u8) ?[]const u8 {
+    return native_apis.take_picked_file(buf);
+}

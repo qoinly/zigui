@@ -131,6 +131,26 @@ pub fn notify(title: []const u8, text: []const u8) void {
     if (builtin.abi.isAndroid()) impl.notify(title, text);
 }
 
+// Runtime permissions exist only on Android; the desktops grant at install, so a
+// query there reads as granted and a request is a no-op.
+pub fn permission_granted(name: []const u8) bool {
+    if (builtin.abi.isAndroid()) return impl.permission_granted(name);
+    return true;
+}
+pub fn request_permission(name: []const u8) void {
+    if (builtin.abi.isAndroid()) impl.request_permission(name);
+}
+
+// The system document picker (Android). Off Android there is no such activity, so
+// the launch is a no-op and the result poll never yields a file.
+pub fn pick_file() void {
+    if (builtin.abi.isAndroid()) impl.pick_file();
+}
+pub fn take_picked_file(buf: []u8) ?[]const u8 {
+    if (builtin.abi.isAndroid()) return impl.take_picked_file(buf);
+    return null;
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {

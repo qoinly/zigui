@@ -28,6 +28,14 @@ pub const android_on_native_back = if (builtin.abi.isAndroid())
     @import("platform/android/custom_shell.zig").dispatch_back
 else {};
 
+// The file sink an Android app's ZiguiActivity.nativeOnFile (the package-named JNI
+// export the app owns) forwards the picked document's text to: env + the String,
+// both erased. The pick is started by pick_file and read once by take_picked_file.
+// Package-agnostic for the same reason as the text sink. Void off Android.
+pub const android_on_native_file = if (builtin.abi.isAndroid())
+    @import("platform/android/native_apis.zig").on_native_file
+else {};
+
 const color = @import("color.zig");
 const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");
@@ -247,6 +255,27 @@ pub fn share_text(content: []const u8) void {
 }
 pub fn notify(title: []const u8, body: []const u8) void {
     custom_shell.notify(title, body);
+}
+
+// Runtime permissions (Android). permission_granted polls whether one is held;
+// request_permission raises the system dialog. In immediate mode poll
+// permission_granted each frame, requesting while it is false - no result
+// callback. Off Android there are none, so granted reads true and request no-ops.
+pub fn permission_granted(name: []const u8) bool {
+    return custom_shell.permission_granted(name);
+}
+pub fn request_permission(name: []const u8) void {
+    custom_shell.request_permission(name);
+}
+
+// The system document picker (Android). pick_file opens it; the chosen file's text
+// arrives a few frames later, read once by take_picked_file (null until then). Off
+// Android there is no picker, so the poll never yields.
+pub fn pick_file() void {
+    custom_shell.pick_file();
+}
+pub fn take_picked_file(buf: []u8) ?[]const u8 {
+    return custom_shell.take_picked_file(buf);
 }
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
