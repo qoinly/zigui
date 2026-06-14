@@ -92,6 +92,14 @@ pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
     return null;
 }
 
+// Safe-area insets (points) the paint loop carves off the body. Only the Android
+// surface is edge-to-edge under the system bars; desktop windows exclude their
+// chrome already, so the insets are zero and the body math is unchanged.
+pub fn safe_area_insets() @import("geometry.zig").Insets {
+    if (builtin.abi.isAndroid()) return impl.safe_area_insets();
+    return .{};
+}
+
 // Caption slots indexed from the right edge (slot 0 = rightmost). Linux
 // follows the desktop's button-layout; Windows keeps its fixed trio.
 pub const CaptionSlots = struct { kinds: [3]CaptionButton, count: u8 };
