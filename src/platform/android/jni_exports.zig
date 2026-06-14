@@ -9,6 +9,7 @@ const ime = @import("ime.zig");
 const custom_shell = @import("custom_shell.zig");
 const picker = @import("napi/picker.zig");
 const biometric = @import("napi/biometric.zig");
+const notification_listener = @import("napi/notification_listener.zig");
 
 // ZiguiActivity's hidden EditText pushes every edit here (the erased env + String).
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnText(
@@ -51,4 +52,17 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBiometric(
     _ = env;
     _ = this;
     biometric.on_native_biometric(result);
+}
+
+// The shipped notification listener forwards each posted notification's package,
+// title, and text here.
+export fn Java_io_qoinly_zigui_ZiguiNotificationListenerService_nativeOnNotification(
+    env: *anyopaque,
+    this: *anyopaque,
+    pkg: ?*anyopaque,
+    title: ?*anyopaque,
+    text: ?*anyopaque,
+) callconv(.c) void {
+    _ = this;
+    notification_listener.on_native_notification(env, pkg, title, text);
 }
