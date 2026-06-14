@@ -39,6 +39,31 @@ pub fn post(title: []const u8, text: []const u8) void {
     t.CallVoidMethodA(env, mgr, notify_m, &na);
 }
 
+// Toast.makeText(context, text, LENGTH_SHORT).show() - a transient overlay message,
+// not a shade notification, so it needs no channel or permission.
+pub fn toast(text: []const u8) void {
+    std.debug.assert(text.len > 0);
+    const c = util.ctx() orelse return;
+    const env = c.env;
+    const t = env.*;
+    const cls = t.FindClass(env, "android/widget/Toast") orelse return;
+    defer t.DeleteLocalRef(env, cls);
+    const make = t.GetStaticMethodID(
+        env,
+        cls,
+        "makeText",
+        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;",
+    ) orelse return;
+    const text_str = util.jstr(env, text) orelse return;
+    defer t.DeleteLocalRef(env, text_str);
+    // the trailing 0 is Toast.LENGTH_SHORT
+    var a = [_]jni.jvalue{ .{ .l = c.activity }, .{ .l = text_str }, .{ .i = 0 } };
+    const obj = t.CallStaticObjectMethodA(env, cls, make, &a) orelse return;
+    defer t.DeleteLocalRef(env, obj);
+    const show = t.GetMethodID(env, cls, "show", "()V") orelse return;
+    t.CallVoidMethodA(env, obj, show, null);
+}
+
 // new NotificationChannel(id, id, IMPORTANCE_DEFAULT) -> createNotificationChannel.
 // Re-creating an existing channel is a no-op, so this runs safely each post.
 fn create_channel(env: JNIEnv, mgr: jni.jobject, mgr_cls: jni.jobject, id: jni.jobject) bool {

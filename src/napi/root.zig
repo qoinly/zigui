@@ -11,3 +11,4 @@ pub const permissions = @import("permissions.zig");
 pub const picker = @import("picker.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
+pub const device = @import("device.zig");
