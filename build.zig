@@ -78,6 +78,7 @@ fn link_macos(zigui: *std.Build.Module) void {
     zigui.linkFramework("CoreVideo", .{});
     zigui.linkFramework("CoreText", .{});
     zigui.linkFramework("CoreGraphics", .{});
+    zigui.linkFramework("IOKit", .{}); // IOPMAssertion (keep-awake)
     zigui.link_libc = true;
 }
 

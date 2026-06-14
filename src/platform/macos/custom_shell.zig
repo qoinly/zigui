@@ -396,6 +396,52 @@ pub fn apply_cursor(kind: CursorKind) void {
     if (ns_cursor(kind)) |c| objc.msg_send(void, c, "set", .{});
 }
 
+const CFStringRef = ?*anyopaque;
+const kCFStringEncodingUTF8: u32 = 0x08000100;
+const kIOPMAssertionLevelOn: u32 = 255;
+extern "CoreFoundation" fn CFStringCreateWithCString(
+    alloc: ?*anyopaque,
+    cstr: [*:0]const u8,
+    encoding: u32,
+) CFStringRef;
+extern "CoreFoundation" fn CFRelease(cf: ?*anyopaque) void;
+extern "IOKit" fn IOPMAssertionCreateWithName(
+    assertion_type: CFStringRef,
+    level: u32,
+    name: CFStringRef,
+    id: *u32,
+) i32;
+extern "IOKit" fn IOPMAssertionRelease(id: u32) i32;
+
+// Hold a power-management assertion that prevents the idle display sleep (a stream
+// wants this); release it on the way back. 0 = none held, so a re-asserted call is
+// one create/release per change.
+var g_assertion: u32 = 0;
+pub fn set_keep_awake(on: bool) void {
+    if ((g_assertion != 0) == on) return;
+    if (on) {
+        const kind = CFStringCreateWithCString(
+            null,
+            "PreventUserIdleDisplaySleep",
+            kCFStringEncodingUTF8,
+        ) orelse return;
+        defer CFRelease(kind);
+        const name = CFStringCreateWithCString(
+            null,
+            "zigui keep awake",
+            kCFStringEncodingUTF8,
+        ) orelse return;
+        defer CFRelease(name);
+        var id: u32 = 0;
+        if (IOPMAssertionCreateWithName(kind, kIOPMAssertionLevelOn, name, &id) == 0) {
+            g_assertion = id; // kIOReturnSuccess == 0
+        }
+    } else {
+        _ = IOPMAssertionRelease(g_assertion);
+        g_assertion = 0;
+    }
+}
+
 // AppKit re-asserts the cursor as the mouse moves over the tracking area; keep
 // it on the requested one.
 fn custom_body_cursor_update_imp(_: Id, _: Sel, _: Id) callconv(.c) void {
