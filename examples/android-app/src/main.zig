@@ -11,10 +11,19 @@ const zigui = @import("zigui");
 
 const Counter = struct {
     clicks: u32 = 0,
+    focus: u32 = 0, // id of the focused text field, 0 = none
 };
 
 var state: Counter = .{};
 var list_scroll: zigui.ScrollState = .{};
+var field: zigui.TextField = .{};
+
+fn focus_field(c: *Counter) void {
+    c.focus = 1;
+}
+fn blur_fields(c: *Counter) void {
+    c.focus = 0;
+}
 
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
@@ -47,9 +56,16 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         rows = slice;
     } else |_| {}
 
-    return zigui.col(.{ .pad = .lg, .gap = .md }, &.{
+    // A click that misses the field blurs the shared editor (hides the keyboard).
+    return zigui.col(.{ .pad = .lg, .gap = .md, .on_click = zigui.on(Counter, blur_fields) }, &.{
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
+        zigui.text_input(&field, .{
+            .placeholder = "Tap to type",
+            .focused = counter.focus == 1,
+            .id = 1,
+            .on_focus = zigui.on(Counter, focus_field),
+        }),
         zigui.row(.{ .gap = .sm }, dots),
         zigui.scroll(&list_scroll, .{ .grow = 1 }, zigui.col(.{ .gap = .sm }, rows)),
     });
@@ -65,4 +81,17 @@ fn on_click(counter: *Counter) void {
 // alone does not, so the framework would otherwise fail to find the entry symbol.
 comptime {
     _ = zigui.App;
+}
+
+// The JNI native method ZiguiActivity.nativeOnText resolves to this exported
+// symbol (the name encodes this app's package/class). It just forwards the edited
+// text to zigui's IME bridge, keeping the package name out of the library.
+export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnText(
+    env: *anyopaque,
+    this: *anyopaque,
+    text: ?*anyopaque,
+    caret: i32,
+) callconv(.c) void {
+    _ = this;
+    zigui.android_on_native_text(env, text, caret);
 }

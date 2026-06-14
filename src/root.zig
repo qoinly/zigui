@@ -11,6 +11,14 @@ comptime {
     }
 }
 
+// The IME text sink an Android app's ZiguiActivity.nativeOnText (a package-named
+// JNI export the app owns) forwards to: env + the edited String (both erased) +
+// the caret. Package-agnostic so zigui carries no app's package name. Void off
+// Android, where there is no such bridge.
+pub const android_on_native_text = if (builtin.abi.isAndroid())
+    @import("platform/android/ime.zig").on_native_text
+else {};
+
 const color = @import("color.zig");
 const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");

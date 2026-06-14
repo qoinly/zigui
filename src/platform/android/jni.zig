@@ -54,6 +54,9 @@ const GetIntFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jint;
 const GetFloatFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) f32;
 // GetStaticObjectField.
 const GetObjFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jobject;
+// Reads a jstring as modified-UTF8 (the isCopy out-param is passed null).
+const GetStrUTFFn = *const fn (JNIEnv, jobject, ?*u8) callconv(.c) ?[*:0]const u8;
+const RelStrUTFFn = *const fn (JNIEnv, jobject, [*:0]const u8) callconv(.c) void;
 
 // Slot offsets are from jni.h's JNINativeInterface_; the padding-run lengths are
 // the gaps (in pointer-sized slots) between the entries we use.
@@ -94,19 +97,29 @@ pub const JNINativeInterface = extern struct {
     GetStaticObjectField: GetObjFieldFn, // 145
     _r15: [21]?*const anyopaque, // 146..166
     NewStringUTF: StrToObjFn, // 167
+    _r16: [1]?*const anyopaque, // 168: GetStringUTFLength
+    GetStringUTFChars: GetStrUTFFn, // 169
+    ReleaseStringUTFChars: RelStrUTFFn, // 170
 };
 
-// The activity's JNIEnv, stored by app.zig on the main thread (where the
-// lifecycle callbacks and the paint loop run). The text system reads it back to
-// render glyphs through android.graphics on that same thread.
+// The activity's JNIEnv + object, stored by app.zig on the main thread (where the
+// lifecycle callbacks and the paint loop run). The text system reads the env to
+// render glyphs through android.graphics; the IME shim calls methods on the
+// activity object - both on that same thread.
 var g_env: ?JNIEnv = null;
+var g_activity: jobject = null;
 
-pub fn set_thread(env_ptr: ?*anyopaque) void {
+pub fn set_thread(env_ptr: ?*anyopaque, activity_obj: jobject) void {
     g_env = if (env_ptr) |p| @ptrCast(@alignCast(p)) else null;
+    g_activity = activity_obj;
 }
 
 pub fn thread_env() ?JNIEnv {
     return g_env;
+}
+
+pub fn thread_activity() jobject {
+    return g_activity;
 }
 
 // libjnigraphics (a public NDK library): locks a Bitmap's pixels for direct

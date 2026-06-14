@@ -16,6 +16,7 @@ const shell_types = @import("../linux/shell_types.zig");
 const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 const jni = @import("jni.zig");
+const ime = @import("ime.zig");
 
 pub const KeyMods = shell_types.KeyMods;
 pub const KeyCode = shell_types.KeyCode;
@@ -230,8 +231,14 @@ pub fn current_shift_down() bool {
     return false;
 }
 
-// No soft-keyboard (IME) bridge, so no field is editable: show returns false (the
-// kit then skips its caret/value poll) and the value reads return empty.
+// The id of the field currently driving the IME, so a newly focused field
+// reseeds the editor and raises the keyboard exactly once (show_text_field is
+// called every frame while a field is focused).
+var g_field_id: u32 = 0;
+
+// The Java EditText owns the editing; the kit draws the value/caret it pushes back
+// (text_field_native_paint is false here). On a newly focused field, seed the
+// editor with the widget's value and raise the keyboard.
 pub fn show_text_field(
     handle: CustomShellHandle,
     x: f32,
@@ -250,29 +257,37 @@ pub fn show_text_field(
     _ = y;
     _ = w;
     _ = h;
-    _ = initial;
     _ = font_size;
     _ = color;
     _ = secure;
     _ = numeric;
-    _ = id;
-    return false;
+    std.debug.assert(id != 0);
+    if (id != g_field_id) {
+        g_field_id = id;
+        ime.show_keyboard(initial);
+    }
+    return true;
 }
 
 pub fn hide_text_field(handle: CustomShellHandle) void {
     _ = handle;
+    if (g_field_id != 0) {
+        g_field_id = 0;
+        ime.hide_keyboard();
+    }
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {
-    return buf[0..0];
+    return ime.value(buf);
 }
 
 pub fn text_field_caret() usize {
-    return 0;
+    return ime.caret();
 }
 
 pub fn text_field_selection() [2]usize {
-    return .{ 0, 0 };
+    const c = ime.caret();
+    return .{ c, c };
 }
 
 pub fn text_field_secure() bool {
