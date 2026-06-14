@@ -9,6 +9,7 @@
 // keeps running after main() returns.
 const std = @import("std");
 const zigui = @import("zigui");
+const ahb = @import("ahb.zig");
 
 const Counter = struct {
     clicks: u32 = 0,
@@ -53,6 +54,12 @@ fn save_and_back(c: *Counter) void {
     nav.pop();
 }
 
+// Push the zero-copy frame page (an AHardwareBuffer imported with no copy).
+fn open_frame(c: *Counter) void {
+    _ = c;
+    nav.push("frame", "Frame");
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
     try app.run(&state, .{ .body = render });
@@ -83,6 +90,8 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const route = nav.current();
     const page = if (std.mem.eql(u8, route, "detail"))
         detail_page(f)
+    else if (std.mem.eql(u8, route, "frame"))
+        frame_page(f)
     else
         home_page(f, counter);
 
@@ -126,6 +135,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
         zigui.button("Open details", .{ .on_click = zigui.on(Counter, open_detail) }),
+        zigui.button("Show AHB frame", .{ .on_click = zigui.on(Counter, open_frame) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -137,6 +147,16 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         }),
         zigui.row(.{ .gap = .sm }, dots),
         zigui.scroll(&list_scroll, .{ .grow = 1 }, zigui.col(.{ .gap = .sm }, rows)),
+    });
+}
+
+// The zero-copy frame page: a synthesized YUV AHardwareBuffer imported with no
+// copy and sampled through the renderer's ycbcr pipeline.
+fn frame_page(f: *zigui.Frame) *zigui.Node {
+    _ = f;
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("AHardwareBuffer (zero-copy NV12).", .{ .size = 20 }),
+        ahb.frame_node(),
     });
 }
 
