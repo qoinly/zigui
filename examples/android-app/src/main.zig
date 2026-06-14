@@ -16,6 +16,8 @@ const Counter = struct {
     focus: u32 = 0, // id of the focused text field, 0 = none
     awake: bool = false, // FLAG_KEEP_SCREEN_ON while true
     immersive: bool = false, // system bars hidden while true
+    bright: bool = false, // screen forced to full brightness while true
+    orient: zigui.napi.display.Orientation = .auto, // current orientation lock
     // The last result a detail page returned, copied out of the stack on the frame
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
@@ -102,6 +104,23 @@ fn do_clipboard(c: *Counter) void {
     zigui.napi.clipboard.write("copied by zigui");
     const got = zigui.napi.clipboard.read(&c.last_result);
     c.last_result_len = got.len;
+}
+fn do_toast(c: *Counter) void {
+    _ = c;
+    zigui.napi.notifications.toast("toast from zigui");
+}
+// Cycle auto -> portrait -> landscape -> auto, applied next frame.
+fn cycle_orientation(c: *Counter) void {
+    c.orient = switch (c.orient) {
+        .auto => .portrait,
+        .portrait => .landscape,
+        else => .auto,
+    };
+    zigui.napi.display.orientation(c.orient);
+}
+fn toggle_brightness(c: *Counter) void {
+    c.bright = !c.bright;
+    zigui.napi.display.brightness(if (c.bright) 1.0 else -1.0); // -1 = system default
 }
 
 pub fn main() !void {
@@ -203,7 +222,6 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
 // The native services, each one tap. Clipboard round-trips into the note; the
 // picked file's text and the camera-permission state show their result inline.
 fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
-    _ = f;
     const clip = counter.last_result[0..counter.last_result_len];
     const note = if (counter.last_result_len > 0) clip else "(clipboard empty)";
     const file = counter.file_preview[0..counter.file_preview_len];
@@ -216,13 +234,33 @@ fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Open URL", .{ .on_click = zigui.on(Counter, do_open_url) }),
         zigui.button("Share text", .{ .on_click = zigui.on(Counter, do_share) }),
         zigui.button("Notify", .{ .on_click = zigui.on(Counter, do_notify) }),
+        zigui.button("Toast", .{ .on_click = zigui.on(Counter, do_toast) }),
         zigui.button("Copy + paste", .{ .on_click = zigui.on(Counter, do_clipboard) }),
         zigui.text(note, .{ .size = 16 }),
+        zigui.button("Rotate", .{ .on_click = zigui.on(Counter, cycle_orientation) }),
+        zigui.button("Brightness", .{ .on_click = zigui.on(Counter, toggle_brightness) }),
+        zigui.text(device_status(f), .{ .size = 16 }),
         zigui.button("Request camera", .{ .on_click = zigui.on(Counter, do_request_camera) }),
         zigui.text(cam, .{ .size = 16 }),
         zigui.button("Pick file", .{ .on_click = zigui.on(Counter, do_pick_file) }),
         zigui.text(file_note, .{ .size = 14 }),
     });
+}
+
+// Battery + connectivity, polled each frame and formatted into the arena (which the
+// node borrows for the frame). A format failure falls back to a static label.
+fn device_status(f: *zigui.Frame) []const u8 {
+    const buf = f.arena.alloc(u8, 64) catch return "Battery/Net: n/a";
+    const level = zigui.napi.device.battery_level();
+    const charge = if (zigui.napi.device.charging()) "+" else "";
+    const net = switch (zigui.napi.device.network()) {
+        .none => "offline",
+        .wifi => "wifi",
+        .cellular => "cellular",
+        .other => "other",
+    };
+    const out = std.fmt.bufPrint(buf, "Battery: {d}%{s}  Net: {s}", .{ level, charge, net });
+    return out catch "Battery/Net: n/a";
 }
 
 // The zero-copy frame page: a synthesized YUV AHardwareBuffer imported with no
