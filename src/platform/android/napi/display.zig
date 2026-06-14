@@ -132,3 +132,48 @@ pub fn immersive(on: bool) void {
     t.CallVoidMethodA(env, ctl, m, &args);
     g_immersive = on;
 }
+
+// Activity.setRequestedOrientation(code); the facade maps Orientation -> the
+// ActivityInfo.SCREEN_ORIENTATION_* code.
+pub fn set_orientation(code: jni.jint) void {
+    const env = jni.thread_env() orelse return;
+    const activity = jni.thread_activity() orelse return;
+    const t = env.*;
+    t.ExceptionClear(env);
+    const cls = t.GetObjectClass(env, activity) orelse return;
+    defer t.DeleteLocalRef(env, cls);
+    const m = t.GetMethodID(env, cls, "setRequestedOrientation", "(I)V") orelse return;
+    var a = [_]jni.jvalue{.{ .i = code }};
+    t.CallVoidMethodA(env, activity, m, &a);
+}
+
+// WindowManager.LayoutParams.screenBrightness in [0,1] (a negative resets to the
+// system default), applied via getAttributes -> set the float field -> setAttributes.
+pub fn set_brightness(level: f32) void {
+    const w = window() orelse return;
+    const env = w.env;
+    const t = env.*;
+    defer t.DeleteLocalRef(env, w.obj);
+    const win_cls = t.GetObjectClass(env, w.obj) orelse return;
+    defer t.DeleteLocalRef(env, win_cls);
+    const get_attrs = t.GetMethodID(
+        env,
+        win_cls,
+        "getAttributes",
+        "()Landroid/view/WindowManager$LayoutParams;",
+    ) orelse return;
+    const lp = t.CallObjectMethodA(env, w.obj, get_attrs, null) orelse return;
+    defer t.DeleteLocalRef(env, lp);
+    const lp_cls = t.GetObjectClass(env, lp) orelse return;
+    defer t.DeleteLocalRef(env, lp_cls);
+    const fid = t.GetFieldID(env, lp_cls, "screenBrightness", "F") orelse return;
+    t.SetFloatField(env, lp, fid, level);
+    const set_attrs = t.GetMethodID(
+        env,
+        win_cls,
+        "setAttributes",
+        "(Landroid/view/WindowManager$LayoutParams;)V",
+    ) orelse return;
+    var a = [_]jni.jvalue{.{ .l = lp }};
+    t.CallVoidMethodA(env, w.obj, set_attrs, &a);
+}

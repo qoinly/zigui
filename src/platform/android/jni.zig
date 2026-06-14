@@ -50,8 +50,10 @@ const CallObjectAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) c
 const CallFloatAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) f32;
 const CallVoidAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) void;
 const CallIntAFn = *const fn (JNIEnv, jclass, jmethodID, ?[*]const jvalue) callconv(.c) jint;
+const CallBoolAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) u8;
 const GetIntFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jint;
 const GetFloatFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) f32;
+const SetFloatFieldFn = *const fn (JNIEnv, jobject, jfieldID, f32) callconv(.c) void;
 // GetStaticObjectField.
 const GetObjFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jobject;
 // Reads a jstring as modified-UTF8 (the isCopy out-param is passed null).
@@ -79,7 +81,9 @@ pub const JNINativeInterface = extern struct {
     GetMethodID: LookupFn, // 33
     _r5: [2]?*const anyopaque, // 34..35
     CallObjectMethodA: CallObjectAFn, // 36
-    _r6: [14]?*const anyopaque, // 37..50
+    _r6: [2]?*const anyopaque, // 37..38
+    CallBooleanMethodA: CallBoolAFn, // 39
+    _r6c: [11]?*const anyopaque, // 40..50
     CallIntMethodA: CallIntAFn, // 51
     _r6b: [5]?*const anyopaque, // 52..56
     CallFloatMethodA: CallFloatAFn, // 57
@@ -91,7 +95,9 @@ pub const JNINativeInterface = extern struct {
     GetIntField: GetIntFieldFn, // 100
     _r10: [1]?*const anyopaque, // 101
     GetFloatField: GetFloatFieldFn, // 102
-    _r11: [10]?*const anyopaque, // 103..112
+    _r11: [8]?*const anyopaque, // 103..110
+    SetFloatField: SetFloatFieldFn, // 111
+    _r11b: [1]?*const anyopaque, // 112
     GetStaticMethodID: LookupFn, // 113
     _r12: [2]?*const anyopaque, // 114..115
     CallStaticObjectMethodA: CallObjectAFn, // 116
