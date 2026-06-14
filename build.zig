@@ -129,6 +129,11 @@ fn add_examples(
         .source = "examples/multiwindow_demo.zig",
         .description = "Build + run the multi-window demo",
     });
+    add_example(b, zigui, target, optimize, .{
+        .name = "nav-demo",
+        .source = "examples/nav_demo.zig",
+        .description = "Build + run the navigator (route stack + app-bar) demo",
+    });
 }
 
 const Example = struct {
