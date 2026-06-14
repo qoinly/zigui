@@ -2,10 +2,13 @@ package com.qoinly.zigui.androidapp;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
@@ -139,9 +142,47 @@ public class ZiguiActivity extends NativeActivity {
         nativeOnFile(content);
     }
 
+    // native authenticate() calls here: build and show a BiometricPrompt on the UI
+    // thread, then bridge only the two terminal outcomes (succeeded / error, which
+    // covers a user cancel and a lockout) back to native as 1 / 2. A transient
+    // onAuthenticationFailed (a non-matching finger) leaves the prompt up, so it is
+    // not bridged. BiometricPrompt is API 28+; older devices report a failure.
+    public void authenticateBiometric(final String title, final String subtitle) {
+        if (Build.VERSION.SDK_INT < 28) {
+            nativeOnBiometric(2);
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            public void run() {
+                BiometricPrompt prompt = new BiometricPrompt.Builder(ZiguiActivity.this)
+                    .setTitle(title)
+                    .setSubtitle(subtitle)
+                    .setNegativeButton("Cancel", getMainExecutor(),
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface dialog, int which) {}
+                        })
+                    .build();
+                prompt.authenticate(new CancellationSignal(), getMainExecutor(),
+                    new BiometricPrompt.AuthenticationCallback() {
+                        @Override
+                        public void onAuthenticationSucceeded(
+                                BiometricPrompt.AuthenticationResult result) {
+                            nativeOnBiometric(1);
+                        }
+                        @Override
+                        public void onAuthenticationError(int code, CharSequence msg) {
+                            nativeOnBiometric(2);
+                        }
+                    });
+            }
+        });
+    }
+
     private native void nativeOnText(String text, int caret);
 
     private native boolean nativeOnBack();
 
     private native void nativeOnFile(String content);
+
+    private native void nativeOnBiometric(int result);
 }

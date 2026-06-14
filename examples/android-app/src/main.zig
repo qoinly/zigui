@@ -18,6 +18,7 @@ const Counter = struct {
     immersive: bool = false, // system bars hidden while true
     bright: bool = false, // screen forced to full brightness while true
     orient: zigui.napi.display.Orientation = .auto, // current orientation lock
+    auth_done: ?bool = null, // last biometric outcome: null none, true ok, false failed
     // The last result a detail page returned, copied out of the stack on the frame
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
@@ -122,6 +123,10 @@ fn toggle_brightness(c: *Counter) void {
     c.bright = !c.bright;
     zigui.napi.display.brightness(if (c.bright) 1.0 else -1.0); // -1 = system default
 }
+fn do_biometric(c: *Counter) void {
+    _ = c;
+    zigui.napi.biometric.authenticate("Sign in", "Confirm it's you");
+}
 
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
@@ -145,6 +150,9 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     }
     if (zigui.napi.picker.take_file(&counter.file_preview)) |picked| { // a pick came back: keep it
         counter.file_preview_len = picked.len;
+    }
+    if (zigui.napi.biometric.result()) |outcome| { // the prompt finished: keep its verdict
+        counter.auth_done = outcome == .success;
     }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
@@ -228,6 +236,10 @@ fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const file_note = if (counter.file_preview_len > 0) file else "(no file picked)";
     const has_cam = zigui.napi.permissions.granted(CAMERA);
     const cam = if (has_cam) "Camera: granted" else "Camera: not granted";
+    const auth = if (counter.auth_done) |ok|
+        (if (ok) "Auth: success" else "Auth: failed")
+    else
+        "Auth: (none)";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Native APIs.", .{ .size = 20 }),
         zigui.button("Vibrate", .{ .on_click = zigui.on(Counter, do_vibrate) }),
@@ -240,6 +252,8 @@ fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Rotate", .{ .on_click = zigui.on(Counter, cycle_orientation) }),
         zigui.button("Brightness", .{ .on_click = zigui.on(Counter, toggle_brightness) }),
         zigui.text(device_status(f), .{ .size = 16 }),
+        zigui.button("Authenticate", .{ .on_click = zigui.on(Counter, do_biometric) }),
+        zigui.text(auth, .{ .size = 16 }),
         zigui.button("Request camera", .{ .on_click = zigui.on(Counter, do_request_camera) }),
         zigui.text(cam, .{ .size = 16 }),
         zigui.button("Pick file", .{ .on_click = zigui.on(Counter, do_pick_file) }),
@@ -331,4 +345,16 @@ export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnFile(
 ) callconv(.c) void {
     _ = this;
     zigui.android_on_native_file(env, content);
+}
+
+// ZiguiActivity's BiometricPrompt callback -> here: forward the terminal outcome
+// (1 succeeded, 2 failed) to zigui, which surfaces it through biometric.result.
+export fn Java_com_qoinly_zigui_androidapp_ZiguiActivity_nativeOnBiometric(
+    env: *anyopaque,
+    this: *anyopaque,
+    result: i32,
+) callconv(.c) void {
+    _ = env;
+    _ = this;
+    zigui.android_on_native_biometric(result);
 }
