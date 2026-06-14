@@ -60,6 +60,35 @@ fn open_frame(c: *Counter) void {
     nav.push("frame", "Frame");
 }
 
+// Push the native-API page.
+fn open_native(c: *Counter) void {
+    _ = c;
+    nav.push("native", "Native APIs");
+}
+
+fn do_vibrate(c: *Counter) void {
+    _ = c;
+    zigui.vibrate(40);
+}
+fn do_open_url(c: *Counter) void {
+    _ = c;
+    zigui.open_url("https://ziglang.org");
+}
+fn do_share(c: *Counter) void {
+    _ = c;
+    zigui.share_text("shared from zigui");
+}
+fn do_notify(c: *Counter) void {
+    _ = c;
+    zigui.notify("zigui", "hello from the native api demo");
+}
+// Round-trips the clipboard: write, then read it back into the result buffer.
+fn do_clipboard(c: *Counter) void {
+    zigui.set_clipboard_text("copied by zigui");
+    const got = zigui.clipboard_text(&c.last_result);
+    c.last_result_len = got.len;
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
     try app.run(&state, .{ .body = render });
@@ -92,6 +121,8 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         detail_page(f)
     else if (std.mem.eql(u8, route, "frame"))
         frame_page(f)
+    else if (std.mem.eql(u8, route, "native"))
+        native_page(f, counter)
     else
         home_page(f, counter);
 
@@ -136,6 +167,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
         zigui.button("Open details", .{ .on_click = zigui.on(Counter, open_detail) }),
         zigui.button("Show AHB frame", .{ .on_click = zigui.on(Counter, open_frame) }),
+        zigui.button("Native APIs", .{ .on_click = zigui.on(Counter, open_native) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -147,6 +179,22 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         }),
         zigui.row(.{ .gap = .sm }, dots),
         zigui.scroll(&list_scroll, .{ .grow = 1 }, zigui.col(.{ .gap = .sm }, rows)),
+    });
+}
+
+// The native services, each one tap. Clipboard round-trips into the note.
+fn native_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    _ = f;
+    const clip = counter.last_result[0..counter.last_result_len];
+    const note = if (counter.last_result_len > 0) clip else "(clipboard empty)";
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Native APIs.", .{ .size = 20 }),
+        zigui.button("Vibrate", .{ .on_click = zigui.on(Counter, do_vibrate) }),
+        zigui.button("Open URL", .{ .on_click = zigui.on(Counter, do_open_url) }),
+        zigui.button("Share text", .{ .on_click = zigui.on(Counter, do_share) }),
+        zigui.button("Notify", .{ .on_click = zigui.on(Counter, do_notify) }),
+        zigui.button("Copy + paste", .{ .on_click = zigui.on(Counter, do_clipboard) }),
+        zigui.text(note, .{ .size = 16 }),
     });
 }
 
