@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.qoinly.zigui.androidapp">
+    package="io.qoinly.zigui.androidapp">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
 
@@ -12,7 +12,7 @@
 
     <application android:label="zigui android">
         <activity
-            android:name=".ZiguiActivity"
+            android:name="io.qoinly.zigui.ZiguiActivity"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize">
             <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />
@@ -23,7 +23,7 @@
         </activity>
 
         <service
-            android:name=".ZiguiAccessibilityService"
+            android:name="io.qoinly.zigui.ZiguiAccessibilityService"
             android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -31,7 +31,7 @@
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
+                android:resource="@xml/zigui_accessibility_config" />
         </service>
     </application>
 </manifest>
