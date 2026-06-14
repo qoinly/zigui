@@ -5,10 +5,12 @@
 //
 // A single touch maps onto the pointer dispatch the paint loop already registered
 // (custom_shell.mouse_dispatch): down -> on_down (which hit-tests and fires the
-// click, the desktop press semantics), move -> on_drag, up/cancel -> on_up then
-// on_exit (touch has no hover, so clear the inside state the down set). Event
-// coordinates are surface pixels; divide by the surface scale to reach points.
-// Multi-touch, hover, right-click, and the wheel have no touch analogue.
+// click, the desktop press semantics), up/cancel -> on_up then on_exit (touch has
+// no hover, so clear the inside state the down set). A move routes through the
+// separate touch-move handler instead, which scrolls the region under the finger
+// or drags a press-captured control. Event coordinates are surface pixels; divide
+// by the surface scale to reach points. Multi-touch, hover, right-click, and the
+// wheel have no touch analogue.
 
 const std = @import("std");
 const native = @import("native.zig");
@@ -58,7 +60,10 @@ fn dispatch(event: *native.AInputEvent) bool {
     const y = native.AMotionEvent_getY(event, 0) / scale;
     switch (native.AMotionEvent_getAction(event) & native.AMOTION_EVENT_ACTION_MASK) {
         native.AMOTION_EVENT_ACTION_DOWN => d.on_down(d.ctx, x, y),
-        native.AMOTION_EVENT_ACTION_MOVE => d.on_drag(d.ctx, x, y),
+        // Unlike the desktop on_drag, a touch move arbitrates scroll vs captured drag.
+        native.AMOTION_EVENT_ACTION_MOVE => {
+            if (custom_shell.touch_move()) |tm| tm.cb(tm.ctx, x, y);
+        },
         native.AMOTION_EVENT_ACTION_UP, native.AMOTION_EVENT_ACTION_CANCEL => {
             d.on_up(d.ctx);
             d.on_exit(d.ctx); // no hover on touch: clear the inside state down set

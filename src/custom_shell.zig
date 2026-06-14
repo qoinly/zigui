@@ -85,6 +85,14 @@ pub fn register_paint_now(cb: RedrawFn) void {
     if (builtin.os.tag != .macos) impl.register_paint_now(cb);
 }
 
+// Touch routes a finger drag through a single handler that scrolls the region
+// under it (or drags a captured control). Only the Android backend has a touch
+// source; the desktop backends use the wheel + drag separately and ignore this.
+pub const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
+pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
+    if (builtin.abi.isAndroid()) impl.register_touch_move(cb, ctx);
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
