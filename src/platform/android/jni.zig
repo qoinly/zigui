@@ -37,40 +37,92 @@ pub const jvalue = extern union {
 pub const JNIEnv = *const *const JNINativeInterface;
 
 // The table-entry signatures used (A-variant calls take a jvalue array, never C
-// varargs). GetMethodID / GetStaticMethodID / GetFieldID share one shape.
-const FindClassFn = *const fn (JNIEnv, [*:0]const u8) callconv(.c) jclass;
-const ExceptionClearFn = *const fn (JNIEnv) callconv(.c) void;
-const DeleteLocalRefFn = *const fn (JNIEnv, jobject) callconv(.c) void;
-const GetObjectClassFn = *const fn (JNIEnv, jobject) callconv(.c) jclass;
+// varargs). GetMethodID / GetStaticMethodID / GetFieldID share LookupFn; the
+// jclass/jobject distinction is erased to ?*anyopaque, so e.g. NewObjectA and
+// CallStaticObjectMethodA reuse CallObjectAFn.
+// FindClass, NewStringUTF.
+const StrToObjFn = *const fn (JNIEnv, [*:0]const u8) callconv(.c) jobject;
+const VoidFn = *const fn (JNIEnv) callconv(.c) void; // ExceptionClear
+const RefFn = *const fn (JNIEnv, jobject) callconv(.c) void; // Delete{Local,Global}Ref
+const ObjToObjFn = *const fn (JNIEnv, jobject) callconv(.c) jobject; // GetObjectClass, NewGlobalRef
 const LookupFn = *const fn (JNIEnv, jclass, [*:0]const u8, [*:0]const u8) callconv(.c) ?*anyopaque;
 const CallObjectAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) jobject;
+const CallFloatAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) f32;
+const CallVoidAFn = *const fn (JNIEnv, jobject, jmethodID, ?[*]const jvalue) callconv(.c) void;
+const CallIntAFn = *const fn (JNIEnv, jclass, jmethodID, ?[*]const jvalue) callconv(.c) jint;
 const GetIntFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jint;
-const CallStaticIntAFn = *const fn (JNIEnv, jclass, jmethodID, ?[*]const jvalue) callconv(.c) jint;
+const GetFloatFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) f32;
+// GetStaticObjectField.
+const GetObjFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jobject;
 
 // Slot offsets are from jni.h's JNINativeInterface_; the padding-run lengths are
 // the gaps (in pointer-sized slots) between the entries we use.
 pub const JNINativeInterface = extern struct {
     _r0: [6]?*const anyopaque, // 0..5: reserved + GetVersion + DefineClass
-    FindClass: FindClassFn, // 6
+    FindClass: StrToObjFn, // 6
     _r1: [10]?*const anyopaque, // 7..16
-    ExceptionClear: ExceptionClearFn, // 17
-    _r2: [5]?*const anyopaque, // 18..22
-    DeleteLocalRef: DeleteLocalRefFn, // 23
-    _r3: [7]?*const anyopaque, // 24..30
-    GetObjectClass: GetObjectClassFn, // 31
+    ExceptionClear: VoidFn, // 17
+    _r2: [3]?*const anyopaque, // 18..20
+    NewGlobalRef: ObjToObjFn, // 21
+    DeleteGlobalRef: RefFn, // 22
+    DeleteLocalRef: RefFn, // 23
+    _r3: [6]?*const anyopaque, // 24..29
+    NewObjectA: CallObjectAFn, // 30
+    GetObjectClass: ObjToObjFn, // 31
     _r4: [1]?*const anyopaque, // 32
     GetMethodID: LookupFn, // 33
     _r5: [2]?*const anyopaque, // 34..35
     CallObjectMethodA: CallObjectAFn, // 36
-    _r6: [57]?*const anyopaque, // 37..93
+    _r6: [20]?*const anyopaque, // 37..56
+    CallFloatMethodA: CallFloatAFn, // 57
+    _r7: [5]?*const anyopaque, // 58..62
+    CallVoidMethodA: CallVoidAFn, // 63
+    _r8: [30]?*const anyopaque, // 64..93
     GetFieldID: LookupFn, // 94
-    _r7: [5]?*const anyopaque, // 95..99
+    _r9: [5]?*const anyopaque, // 95..99
     GetIntField: GetIntFieldFn, // 100
-    _r8: [12]?*const anyopaque, // 101..112
+    _r10: [1]?*const anyopaque, // 101
+    GetFloatField: GetFloatFieldFn, // 102
+    _r11: [10]?*const anyopaque, // 103..112
     GetStaticMethodID: LookupFn, // 113
-    _r9: [17]?*const anyopaque, // 114..130
-    CallStaticIntMethodA: CallStaticIntAFn, // 131
+    _r12: [2]?*const anyopaque, // 114..115
+    CallStaticObjectMethodA: CallObjectAFn, // 116
+    _r13: [14]?*const anyopaque, // 117..130
+    CallStaticIntMethodA: CallIntAFn, // 131
+    _r14: [12]?*const anyopaque, // 132..143
+    GetStaticFieldID: LookupFn, // 144
+    GetStaticObjectField: GetObjFieldFn, // 145
+    _r15: [21]?*const anyopaque, // 146..166
+    NewStringUTF: StrToObjFn, // 167
 };
+
+// The activity's JNIEnv, stored by app.zig on the main thread (where the
+// lifecycle callbacks and the paint loop run). The text system reads it back to
+// render glyphs through android.graphics on that same thread.
+var g_env: ?JNIEnv = null;
+
+pub fn set_thread(env_ptr: ?*anyopaque) void {
+    g_env = if (env_ptr) |p| @ptrCast(@alignCast(p)) else null;
+}
+
+pub fn thread_env() ?JNIEnv {
+    return g_env;
+}
+
+// libjnigraphics (a public NDK library): locks a Bitmap's pixels for direct
+// native read. ALPHA_8 bitmaps give one coverage byte per pixel, rows padded to
+// `stride`.
+pub const ANDROID_BITMAP_FORMAT_A_8: i32 = 8;
+pub const AndroidBitmapInfo = extern struct {
+    width: u32 = 0,
+    height: u32 = 0,
+    stride: u32 = 0,
+    format: i32 = 0,
+    flags: u32 = 0,
+};
+pub extern fn AndroidBitmap_getInfo(JNIEnv, jobject, *AndroidBitmapInfo) c_int;
+pub extern fn AndroidBitmap_lockPixels(JNIEnv, jobject, *?*anyopaque) c_int;
+pub extern fn AndroidBitmap_unlockPixels(JNIEnv, jobject) c_int;
 
 pub const Insets = struct { left: i32 = 0, top: i32 = 0, right: i32 = 0, bottom: i32 = 0 };
 
