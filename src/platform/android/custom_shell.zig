@@ -17,6 +17,7 @@ const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 const jni = @import("jni.zig");
 const ime = @import("ime.zig");
+const window_props = @import("window_props.zig");
 
 pub const KeyMods = shell_types.KeyMods;
 pub const KeyCode = shell_types.KeyCode;
@@ -350,3 +351,17 @@ pub fn display_bounds(index: u32) geometry.BoundsF {
 
 // Server-side autorepeat does not apply; there is no client repeat timer to tick.
 pub fn tick_key_repeat() void {}
+
+// Runtime window properties (keep-screen-on, status-bar icon tint, immersive);
+// the JNI lives in window_props, the facade reaches it through these.
+pub fn set_keep_awake(on: bool) void {
+    window_props.set_keep_awake(on);
+}
+
+pub fn set_status_bar_dark_icons(dark: bool) void {
+    window_props.set_status_bar_dark_icons(dark);
+}
+
+pub fn set_immersive(on: bool) void {
+    window_props.set_immersive(on);
+}

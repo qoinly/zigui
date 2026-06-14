@@ -102,6 +102,20 @@ pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
     if (builtin.abi.isAndroid()) impl.register_back(cb, ctx);
 }
 
+// Runtime window properties. Only Android exposes these (keep-screen-on via a
+// window flag, the status-bar icon tint and immersive via the insets controller);
+// desktop windows have no system bars and manage idle sleep elsewhere, so these
+// are no-ops there.
+pub fn set_keep_awake(on: bool) void {
+    if (builtin.abi.isAndroid()) impl.set_keep_awake(on);
+}
+pub fn set_status_bar_dark_icons(dark: bool) void {
+    if (builtin.abi.isAndroid()) impl.set_status_bar_dark_icons(dark);
+}
+pub fn set_immersive(on: bool) void {
+    if (builtin.abi.isAndroid()) impl.set_immersive(on);
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
