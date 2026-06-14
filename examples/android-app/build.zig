@@ -47,12 +47,13 @@ pub fn build(b: *std.Build) void {
     _ = tree.addCopyFile(lib_x86.getEmittedBin(), "lib/x86_64/libzigui_android_app.so");
     _ = tree.addCopyFile(lib_arm.getEmittedBin(), "lib/arm64-v8a/libzigui_android_app.so");
 
-    // Compile the Java IME shim and dex it (the only Java in the app). javac emits
-    // .class into a scratch dir, d8 translates them to classes.dex in the output
-    // dir; it is bundled at the APK root (the manifest sets hasCode=true).
+    // Compile the Java shim and dex it (the only Java in the app: the activity plus
+    // the accessibility service). javac emits .class for both sources into a scratch
+    // dir, d8 translates every class to classes.dex in the output dir; it is bundled
+    // at the APK root (the manifest sets hasCode=true).
     const dex_script =
         "set -e; OUT=\"$(dirname \"$5\")\"; CL=\"$OUT/cls\"; rm -rf \"$CL\"; mkdir -p \"$CL\"; " ++
-        "\"$1\" -cp \"$2\" -d \"$CL\" \"$3\"; " ++
+        "\"$1\" -cp \"$2\" -d \"$CL\" \"$3\" \"$6\"; " ++
         "\"$4\" --lib \"$2\" --min-api 26 --output \"$OUT\" $(find \"$CL\" -name '*.class')";
     const dex = b.addSystemCommand(&.{ "sh", "-c", dex_script, "dex" });
     dex.addArg(javac); // $1
@@ -60,14 +61,22 @@ pub fn build(b: *std.Build) void {
     dex.addFileArg(b.path("java/com/qoinly/zigui/androidapp/ZiguiActivity.java")); // $3
     dex.addArg(d8); // $4
     const classes_dex = dex.addOutputFileArg("classes.dex"); // $5
+    dex.addFileArg(b.path("java/com/qoinly/zigui/androidapp/ZiguiAccessibilityService.java")); // $6
     dex.setEnvironmentVariable("JAVA_HOME", java_home); // the d8 wrapper script needs java
 
-    // aapt2 compiles the manifest to binary XML and produces the base APK
-    // (manifest + resources.arsc, no libs yet).
+    // Compile the app resources (the accessibility-service config xml) to a flat zip.
+    const compile_res = b.addSystemCommand(&.{ aapt2, "compile", "--dir" });
+    compile_res.addDirectoryArg(b.path("res"));
+    compile_res.addArg("-o");
+    const res_zip = compile_res.addOutputFileArg("res.zip");
+
+    // aapt2 links the manifest + compiled resources into the base APK (binary XML +
+    // resources.arsc, no libs yet), resolving @xml/accessibility_service_config.
     const link = b.addSystemCommand(&.{ aapt2, "link", "-I", android_jar, "--manifest" });
     link.addFileArg(b.path("AndroidManifest.xml"));
     link.addArg("-o");
     const base_apk = link.addOutputFileArg("base.apk");
+    link.addFileArg(res_zip);
 
     // Copy the base APK and add the .so libs STORED (uncompressed) so the
     // loader can mmap them (extractNativeLibs defaults false on modern target

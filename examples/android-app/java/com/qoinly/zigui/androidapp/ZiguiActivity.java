@@ -178,6 +178,29 @@ public class ZiguiActivity extends NativeActivity {
         });
     }
 
+    // Accessibility bridge: native reaches the system-bound service through these
+    // delegators, so the library names only the activity (the showKeyboard pattern),
+    // never the service's package.
+    public boolean a11yEnabled() {
+        return ZiguiAccessibilityService.isEnabled();
+    }
+
+    public void a11yTap(float x, float y) {
+        ZiguiAccessibilityService.injectTap(x, y);
+    }
+
+    public void a11ySwipe(float x1, float y1, float x2, float y2, int durationMs) {
+        ZiguiAccessibilityService.injectSwipe(x1, y1, x2, y2, durationMs);
+    }
+
+    public void a11yGlobalAction(int action) {
+        ZiguiAccessibilityService.globalAction(action);
+    }
+
+    public String a11yReadScreen() {
+        return ZiguiAccessibilityService.readScreen();
+    }
+
     private native void nativeOnText(String text, int caret);
 
     private native boolean nativeOnBack();
