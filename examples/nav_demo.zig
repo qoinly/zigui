@@ -11,7 +11,12 @@ const App = struct {
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
     last_result_len: usize = 0,
+    awake: bool = false, // keep_awake inhibits the desktop's idle sleep while true
 };
+
+fn toggle_awake(app: *App) void {
+    app.awake = !app.awake;
+}
 
 var nav: zigui.NavStack = .{};
 
@@ -30,6 +35,7 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
         @memcpy(app.last_result[0..n], r[0..n]);
         app.last_result_len = n;
     }
+    zigui.keep_awake(app.awake); // re-asserted each frame; the backend dedupes
 
     const route = nav.current();
     const page = if (std.mem.eql(u8, route, "detail"))
@@ -47,8 +53,10 @@ fn home_page(f: *zigui.Frame, app: *App) *zigui.Node {
     _ = f;
     const returned = app.last_result[0..app.last_result_len];
     const note = if (app.last_result_len > 0) returned else "(no result yet)";
+    const awake_label = if (app.awake) "Keep awake: ON" else "Keep awake: off";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Home page.", .{ .size = 28 }),
+        zigui.button(awake_label, .{ .on_click = zigui.on(App, toggle_awake) }),
         zigui.button("Open details", .{ .on_click = zigui.on(App, open_detail) }),
         zigui.text("Returned from detail:", .{ .size = 14 }),
         zigui.text(note, .{ .size = 16 }),
