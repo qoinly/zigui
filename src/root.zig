@@ -11,38 +11,10 @@ comptime {
     }
 }
 
-// The IME text sink an Android app's ZiguiActivity.nativeOnText (a package-named
-// JNI export the app owns) forwards to: env + the edited String (both erased) +
-// the caret. Package-agnostic so zigui carries no app's package name. Void off
-// Android, where there is no such bridge.
-pub const android_on_native_text = if (builtin.abi.isAndroid())
-    @import("platform/android/ime.zig").on_native_text
-else {};
-
-// The Back sink an Android app's ZiguiActivity.nativeOnBack (the package-named JNI
-// export the app owns) forwards to. Pops the route stack via the registered back
-// handler and reports whether it consumed the press; the Java side backgrounds the
-// app when it did not. Package-agnostic for the same reason as the text sink. Void
-// off Android.
-pub const android_on_native_back = if (builtin.abi.isAndroid())
-    @import("platform/android/custom_shell.zig").dispatch_back
-else {};
-
-// The file sink an Android app's ZiguiActivity.nativeOnFile (the package-named JNI
-// export the app owns) forwards the picked document's text to: env + the String,
-// both erased. The pick is started by pick_file and read once by take_picked_file.
-// Package-agnostic for the same reason as the text sink. Void off Android.
-pub const android_on_native_file = if (builtin.abi.isAndroid())
-    @import("platform/android/napi/picker.zig").on_native_file
-else {};
-
-// The biometric sink an Android app's ZiguiActivity.nativeOnBiometric (the package-
-// named JNI export the app owns) forwards the prompt's terminal outcome to (1
-// succeeded, 2 failed). Package-agnostic for the same reason as the text sink. Void
-// off Android.
-pub const android_on_native_biometric = if (builtin.abi.isAndroid())
-    @import("platform/android/napi/biometric.zig").on_native_biometric
-else {};
+// The JNI bridge symbols the shipped io.qoinly.zigui.ZiguiActivity's native methods
+// resolve against live in src/platform/android/jni_exports.zig and forward straight
+// to the internal sinks (ime, custom_shell, picker, biometric) - the app writes no
+// JNI glue, so there is no package-named sink to re-export here.
 
 const color = @import("color.zig");
 const node = @import("node.zig");
