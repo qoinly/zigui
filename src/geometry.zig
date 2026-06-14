@@ -204,6 +204,11 @@ pub const PointF = Point(f32);
 pub const SizeF = Size(f32);
 pub const BoundsF = Bounds(f32);
 
+// Safe-area insets (points) carved off each edge of the drawable - the system
+// bars / cutout on a mobile surface. Zero on desktop, where the window already
+// excludes its chrome.
+pub const Insets = struct { left: f32 = 0, top: f32 = 0, right: f32 = 0, bottom: f32 = 0 };
+
 // Space a layout offers a component's measure(); null on an axis = unconstrained
 // (return the intrinsic extent there). A component honours a constraint only if
 // it flexes on that axis (e.g. text wrapping to width); fixed components ignore it.

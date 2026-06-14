@@ -15,6 +15,7 @@ const native = @import("native.zig");
 const shell_types = @import("../linux/shell_types.zig");
 const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
+const jni = @import("jni.zig");
 
 pub const KeyMods = shell_types.KeyMods;
 pub const KeyCode = shell_types.KeyCode;
@@ -42,6 +43,10 @@ var g_window: ?*native.AndroidWindow = null;
 // so a stale PaintContext is never dispatched into.
 var g_dispatch: ?MouseDispatch = null;
 
+// System-bar insets in pixels, refreshed from JNI on layout changes; the paint
+// loop reads them back in points via safe_area_insets().
+var g_insets_px: jni.Insets = .{};
+
 pub fn set_window(window: *native.AndroidWindow) void {
     g_window = window;
 }
@@ -59,6 +64,21 @@ pub fn surface_scale() i32 {
     const w = g_window orelse return 1;
     std.debug.assert(w.scale >= 1);
     return w.scale;
+}
+
+pub fn set_insets(insets: jni.Insets) void {
+    g_insets_px = insets;
+}
+
+pub fn safe_area_insets() geometry.Insets {
+    const scale: f32 = @floatFromInt(surface_scale());
+    std.debug.assert(scale >= 1);
+    return .{
+        .left = @as(f32, @floatFromInt(g_insets_px.left)) / scale,
+        .top = @as(f32, @floatFromInt(g_insets_px.top)) / scale,
+        .right = @as(f32, @floatFromInt(g_insets_px.right)) / scale,
+        .bottom = @as(f32, @floatFromInt(g_insets_px.bottom)) / scale,
+    };
 }
 
 pub const CustomShellHandle = struct {
