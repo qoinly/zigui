@@ -52,7 +52,15 @@ fn drain(fd: c_int, events: c_int, data: ?*anyopaque) callconv(.c) c_int {
 }
 
 fn dispatch(event: *native.AInputEvent) bool {
-    if (native.AInputEvent_getType(event) != native.AINPUT_EVENT_TYPE_MOTION) return false;
+    const etype = native.AInputEvent_getType(event);
+    if (etype == native.AINPUT_EVENT_TYPE_KEY) {
+        // The only key we own is Back, and only when a route is pushed (the
+        // handler returns false at the root so the OS backgrounds the app).
+        const is_back = native.AKeyEvent_getKeyCode(event) == native.AKEYCODE_BACK and
+            native.AKeyEvent_getAction(event) == native.AKEY_EVENT_ACTION_DOWN;
+        return is_back and custom_shell.dispatch_back();
+    }
+    if (etype != native.AINPUT_EVENT_TYPE_MOTION) return false;
     const d = custom_shell.mouse_dispatch() orelse return false;
     const scale: f32 = @floatFromInt(custom_shell.surface_scale());
     std.debug.assert(scale >= 1);

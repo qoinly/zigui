@@ -93,6 +93,15 @@ pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
     if (builtin.abi.isAndroid()) impl.register_touch_move(cb, ctx);
 }
 
+// The platform Back button: only Android has one. The handler returns whether it
+// consumed the press (a route was popped); the backend backgrounds the app when
+// it returns false. Desktop Esc flows through the key queue instead, so this is a
+// no-op there.
+pub const BackFn = *const fn (ctx: *anyopaque) bool;
+pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
+    if (builtin.abi.isAndroid()) impl.register_back(cb, ctx);
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {

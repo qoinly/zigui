@@ -19,6 +19,15 @@ pub const android_on_native_text = if (builtin.abi.isAndroid())
     @import("platform/android/ime.zig").on_native_text
 else {};
 
+// The Back sink an Android app's ZiguiActivity.nativeOnBack (the package-named JNI
+// export the app owns) forwards to. Pops the route stack via the registered back
+// handler and reports whether it consumed the press; the Java side backgrounds the
+// app when it did not. Package-agnostic for the same reason as the text sink. Void
+// off Android.
+pub const android_on_native_back = if (builtin.abi.isAndroid())
+    @import("platform/android/custom_shell.zig").dispatch_back
+else {};
+
 const color = @import("color.zig");
 const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");
@@ -431,6 +440,29 @@ pub fn tabbar(o: kit_nodes.Tabbar) *node.Node {
 pub const TabbarOpts = kit_nodes.Tabbar;
 pub const TabItem = kit.tabbar.TabItem;
 pub const TabBarState = kit.tabbar.TabBarState;
+
+// Page-route navigation (cross-platform, Flutter-feel). The route stack is plain
+// app state; the app owns the route->view dispatch. NavStack.push/pop/go drive
+// it; app_bar draws the flat themed bar with an auto back-chevron; handle_back
+// pops on Esc / the Android Back button (and publishes the depth so Android Back
+// backgrounds the app at the root instead of popping).
+pub const NavStack = kit.navigator.NavStack;
+
+pub fn app_bar(title: []const u8, o: kit_nodes.AppBar) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    return kit_nodes.app_bar(fc.arena, fc.theme, title, oo);
+}
+pub const AppBarOpts = kit_nodes.AppBar;
+
+// Call once a frame from the body that hosts the navigator: pops the stack on a
+// back request (Esc / Android Back / the app-bar chevron) and publishes the depth.
+pub fn handle_back(stack: *NavStack) void {
+    const fc = frame_ctx.get();
+    fc.paint.nav_depth = @intCast(stack.depth);
+    if (fc.paint.take_back()) stack.pop();
+}
 
 // The open dropdown menu: put it in the overlay region. Anchored to the trigger's
 // rect_out, dismisses on an outside click.
