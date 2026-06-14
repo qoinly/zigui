@@ -215,6 +215,22 @@ pub fn display_count() u32 {
 pub fn display_bounds(index: u32) BoundsF {
     return custom_shell.display_bounds(index);
 }
+
+// Mobile window properties (Android; no-ops where the system has no equivalent).
+// keep_awake holds the display on (a stream wants this); status_bar_icons tints
+// the status-bar glyphs to stay legible over the app background; immersive hides
+// the system bars (status + nav), which a swipe brings back. Call once a frame -
+// the backend only hops into the OS when the value actually changes.
+pub fn keep_awake(enable: bool) void {
+    custom_shell.set_keep_awake(enable);
+}
+pub const StatusBarIcons = enum { light, dark };
+pub fn status_bar_icons(which: StatusBarIcons) void {
+    custom_shell.set_status_bar_dark_icons(which == .dark);
+}
+pub fn immersive(enable: bool) void {
+    custom_shell.set_immersive(enable);
+}
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;

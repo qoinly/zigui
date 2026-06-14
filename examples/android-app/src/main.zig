@@ -13,11 +13,20 @@ const zigui = @import("zigui");
 const Counter = struct {
     clicks: u32 = 0,
     focus: u32 = 0, // id of the focused text field, 0 = none
+    awake: bool = false, // FLAG_KEEP_SCREEN_ON while true
+    immersive: bool = false, // system bars hidden while true
     // The last result a detail page returned, copied out of the stack on the frame
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
     last_result_len: usize = 0,
 };
+
+fn toggle_awake(c: *Counter) void {
+    c.awake = !c.awake;
+}
+fn toggle_immersive(c: *Counter) void {
+    c.immersive = !c.immersive;
+}
 
 var state: Counter = .{};
 var nav: zigui.NavStack = .{};
@@ -64,6 +73,12 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         @memcpy(counter.last_result[0..k], r[0..k]);
         counter.last_result_len = k;
     }
+    // Window properties, re-asserted every frame (the backend hops into the OS
+    // only on a change): light status-bar icons over this dark theme, plus the
+    // two live toggles below.
+    zigui.status_bar_icons(.light);
+    zigui.keep_awake(counter.awake);
+    zigui.immersive(counter.immersive);
 
     const route = nav.current();
     const page = if (std.mem.eql(u8, route, "detail"))
@@ -105,10 +120,14 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     };
     const returned = counter.last_result[0..counter.last_result_len];
     const note = if (counter.last_result_len > 0) returned else "(no result yet)";
+    const awake_label = if (counter.awake) "Keep awake: ON" else "Keep awake: off";
+    const imm_label = if (counter.immersive) "Immersive: ON" else "Immersive: off";
     return zigui.col(page, &.{
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
         zigui.button("Open details", .{ .on_click = zigui.on(Counter, open_detail) }),
+        zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
+        zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
         zigui.text_input(&field, .{
             .placeholder = "Tap to type",
