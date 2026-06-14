@@ -54,6 +54,12 @@ const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
 const TouchMove = struct { cb: TouchMoveFn, ctx: *anyopaque };
 var g_touch: ?TouchMove = null;
 
+// The back handler the paint loop registers; the input layer calls it on a Back
+// key. Returns whether the press was consumed (a route popped). Cleared on loss.
+const BackFn = *const fn (ctx: *anyopaque) bool;
+const Back = struct { cb: BackFn, ctx: *anyopaque };
+var g_back: ?Back = null;
+
 pub fn set_window(window: *native.AndroidWindow) void {
     g_window = window;
 }
@@ -62,6 +68,18 @@ pub fn clear_window() void {
     g_window = null;
     g_dispatch = null;
     g_touch = null;
+    g_back = null;
+}
+
+pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
+    g_back = .{ .cb = cb, .ctx = ctx };
+}
+
+// Routes a Back press to the handler; returns whether it was consumed (else the
+// caller lets the OS background the app).
+pub fn dispatch_back() bool {
+    const b = g_back orelse return false;
+    return b.cb(b.ctx);
 }
 
 pub fn mouse_dispatch() ?MouseDispatch {

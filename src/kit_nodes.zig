@@ -38,6 +38,7 @@ const menu_kit = @import("kit/menu.zig");
 const resizable_kit = @import("kit/resizable.zig");
 const toast_kit = @import("kit/toast.zig");
 const tooltip_kit = @import("kit/tooltip.zig");
+const navigator_kit = @import("kit/navigator.zig");
 const popover_kit = @import("kit/popover.zig");
 const sheet_kit = @import("kit/sheet.zig");
 const label_render = @import("render/label.zig");
@@ -111,6 +112,41 @@ const ButtonSpec = struct {
         }
     }
 };
+
+pub const AppBar = struct {
+    show_back: bool = false,
+    paint: ?*custom_paint.PaintContext = null,
+};
+
+const AppBarSpec = struct {
+    theme: *const Theme,
+    title: []const u8,
+    o: AppBar,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, navigator_kit.BAR_H);
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *AppBarSpec = @ptrCast(@alignCast(ctx));
+        if (r.size.width <= 0) return;
+        try navigator_kit.app_bar(
+            b,
+            r.origin.x,
+            r.origin.y,
+            r.size.width,
+            self.title,
+            self.theme,
+            .{ .show_back = self.o.show_back, .paint = self.o.paint },
+        );
+    }
+};
+
+pub fn app_bar(a: A, theme: *const Theme, title: []const u8, o: AppBar) *Node {
+    const spec = a.create(AppBarSpec) catch @panic("node arena oom");
+    spec.* = .{ .theme = theme, .title = title, .o = o };
+    return node.leaf(a, AppBarSpec.measure, AppBarSpec.draw, spec);
+}
 
 pub fn button(a: A, theme: *const Theme, text: []const u8, o: Btn) *Node {
     const spec = a.create(ButtonSpec) catch @panic("node arena oom");

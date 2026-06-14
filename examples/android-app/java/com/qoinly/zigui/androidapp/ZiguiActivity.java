@@ -2,6 +2,7 @@ package com.qoinly.zigui.androidapp;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -9,6 +10,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 // A thin shim over NativeActivity. The superclass still loads the native library
 // (android.app.lib_name) and runs the exported ANativeActivity_onCreate, so all
@@ -43,6 +46,24 @@ public class ZiguiActivity extends NativeActivity {
                 nativeOnText(s.toString(), edit.getSelectionStart());
             }
         });
+        // Predictive back (the default for targetSdk 35+) retires onBackPressed: the
+        // legacy key no longer reaches the Activity, so back must come from the
+        // OnBackInvokedDispatcher instead. native pops the route stack; if it does
+        // not consume the press (the root), background the app like the system would.
+        // When the soft keyboard is up it owns a higher-priority callback and hides
+        // first, so this only fires once the keyboard is down. onBackPressed below
+        // still covers API < 33, where this dispatcher does not exist.
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                new OnBackInvokedCallback() {
+                    public void onBackInvoked() {
+                        if (!nativeOnBack()) {
+                            moveTaskToBack(true);
+                        }
+                    }
+                });
+        }
     }
 
     // Called from native when a text field gains focus: seed the editor with the
@@ -71,5 +92,19 @@ public class ZiguiActivity extends NativeActivity {
         });
     }
 
+    // The legacy back path, for API < 33 where the OnBackInvokedDispatcher above
+    // does not exist. native pops the route stack; an unconsumed press falls through
+    // to the default (background the app). A focused EditText makes the framework
+    // pre-dispatch the Back key to the IME, so a pure NativeActivity input queue
+    // never sees it - the Activity's own back handling is the reliable source.
+    @Override
+    public void onBackPressed() {
+        if (!nativeOnBack()) {
+            super.onBackPressed();
+        }
+    }
+
     private native void nativeOnText(String text, int caret);
+
+    private native boolean nativeOnBack();
 }
