@@ -241,7 +241,12 @@ pub const TextStyle = struct {
     };
 };
 
-const NativeText = switch (builtin.os.tag) {
+// Android (os.tag == .linux) cannot dlopen the private system freetype/harfbuzz,
+// so it rasterizes through android.graphics instead; the GPU atlas below is
+// backend-neutral and stays shared with Linux.
+const NativeText = if (builtin.abi.isAndroid())
+    @import("platform/android/text_system.zig").AndroidTextSystem
+else switch (builtin.os.tag) {
     .macos => @import("platform/macos/text_system.zig").MacTextSystem,
     .windows => @import("platform/windows/text_system.zig").WinTextSystem,
     .linux => @import("platform/linux/text_system.zig").LinuxTextSystem,

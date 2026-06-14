@@ -130,6 +130,7 @@ fn android_lib(
     lib.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
     lib.root_module.linkSystemLibrary("android", .{});
     lib.root_module.linkSystemLibrary("log", .{});
+    lib.root_module.linkSystemLibrary("jnigraphics", .{});
     lib.root_module.link_libc = true;
     return lib;
 }
