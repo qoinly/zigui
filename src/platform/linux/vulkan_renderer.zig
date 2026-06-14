@@ -116,7 +116,7 @@ const FramePush = extern struct {
     }
 };
 
-const SurfaceFormat = enum { bgra, nv12, shared_nv12, dmabuf_nv12 };
+const SurfaceFormat = enum { bgra, nv12, shared_nv12, dmabuf_nv12, ahb_nv12 };
 
 // "Shared" surfaces own no CPU pixels; the legacy field stays non-null so old
 // pointer-shape checks cannot trip over this format (the d3d11 convention).
@@ -354,6 +354,16 @@ pub const Renderer = struct {
     ycbcr_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
     ycbcr_pipeline: vk.Pipeline = vk.NULL_HANDLE,
     ycbcr_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
+    // AHardwareBuffer zero-copy import (the Android dmabuf analogue). Its ycbcr
+    // pipeline shares the fields above, but is built LAZILY on the first import:
+    // the buffer's pixel format (often an opaque external one) is unknown until a
+    // real buffer arrives, so the conversion is created from its reported props.
+    ahb_capable: bool = false,
+    ycbcr_ready: bool = false,
+    fn_ahb_props: ?vk.GetAndroidHardwareBufferPropertiesFn = null,
+    // The external format the lazy ycbcr set was built for (0 = a concrete
+    // VkFormat); a later buffer that reports a different one is unsupported here.
+    ahb_external_format: u64 = 0,
 
     // The buffer scale the current swapchain + surface state were built for.
     applied_scale: i32 = 1,
@@ -632,7 +642,11 @@ pub const Renderer = struct {
         // plain device serves everything except zero-copy import.
         if (self.instance_11 and self.ycbcr_feature_present()) {
             if (self.try_create_device(true)) {
-                self.dmabuf_capable = self.resolve_dmabuf_fns();
+                if (builtin.abi.isAndroid()) {
+                    self.ahb_capable = self.resolve_ahb_fns();
+                } else {
+                    self.dmabuf_capable = self.resolve_dmabuf_fns();
+                }
                 return self.finish_device_setup();
             }
         }
@@ -661,7 +675,15 @@ pub const Renderer = struct {
             .queue_priorities = &priorities,
         };
         const plain_exts = [_][*:0]const u8{"VK_KHR_swapchain"};
-        const dmabuf_exts = [_][*:0]const u8{
+        // The zero-copy extension set differs per platform: Android imports an
+        // AHardwareBuffer, Linux a dmabuf fd. Both ride the same ycbcr sampler.
+        const external_exts = if (builtin.abi.isAndroid()) [_][*:0]const u8{
+            "VK_KHR_swapchain",
+            "VK_ANDROID_external_memory_android_hardware_buffer",
+            "VK_EXT_queue_family_foreign",
+            "VK_KHR_external_memory",
+            "VK_KHR_sampler_ycbcr_conversion",
+        } else [_][*:0]const u8{
             "VK_KHR_swapchain",
             "VK_KHR_external_memory_fd",
             "VK_EXT_external_memory_dma_buf",
@@ -673,8 +695,8 @@ pub const Renderer = struct {
         var ycbcr = vk.PhysicalDeviceSamplerYcbcrConversionFeatures{
             .sampler_ycbcr_conversion = 1,
         };
-        const ext_names: [*]const [*:0]const u8 = if (with_dmabuf) &dmabuf_exts else &plain_exts;
-        const ext_count: u32 = if (with_dmabuf) dmabuf_exts.len else plain_exts.len;
+        const ext_names: [*]const [*:0]const u8 = if (with_dmabuf) &external_exts else &plain_exts;
+        const ext_count: u32 = if (with_dmabuf) external_exts.len else plain_exts.len;
         const info = vk.DeviceCreateInfo{
             .p_next = if (with_dmabuf) @as(?*const anyopaque, &ycbcr) else null,
             .queue_create_infos = @ptrCast(&queue_info),
@@ -698,6 +720,18 @@ pub const Renderer = struct {
         self.fn_create_ycbcr = @ptrCast(create);
         self.fn_destroy_ycbcr = @ptrCast(destroy);
         self.fn_memory_fd_props = @ptrCast(fd_props);
+        return true;
+    }
+
+    fn resolve_ahb_fns(self: *Renderer) bool {
+        const device = self.device.?;
+        const gdpa = self.ifns.vkGetDeviceProcAddr;
+        const create = gdpa(device, "vkCreateSamplerYcbcrConversion") orelse return false;
+        const destroy = gdpa(device, "vkDestroySamplerYcbcrConversion") orelse return false;
+        const ahb = gdpa(device, "vkGetAndroidHardwareBufferPropertiesANDROID") orelse return false;
+        self.fn_create_ycbcr = @ptrCast(create);
+        self.fn_destroy_ycbcr = @ptrCast(destroy);
+        self.fn_ahb_props = @ptrCast(ahb);
         return true;
     }
 
@@ -1239,20 +1273,26 @@ pub const Renderer = struct {
             frag_nv12,
             self.frame_pipeline_layout,
         );
-        if (self.dmabuf_capable) try self.build_ycbcr_pipeline(vert);
+        if (self.dmabuf_capable) {
+            const conv_info = vk.SamplerYcbcrConversionCreateInfo{};
+            try self.build_ycbcr_pipeline(vert, &conv_info);
+        }
     }
 
     // The dmabuf pipeline differs from the staging pair in one structural
     // way: ycbcr conversion lives in an IMMUTABLE sampler baked into the
     // descriptor layout (the spec forbids a mutable one), so it needs its
     // own DSL, layout, and descriptor sets - the push block stays shared.
-    fn build_ycbcr_pipeline(self: *Renderer, vert: vk.ShaderModule) Error!void {
-        std.debug.assert(self.dmabuf_capable);
+    fn build_ycbcr_pipeline(
+        self: *Renderer,
+        vert: vk.ShaderModule,
+        conv_info: *const vk.SamplerYcbcrConversionCreateInfo,
+    ) Error!void {
+        std.debug.assert(self.dmabuf_capable or self.ahb_capable);
         std.debug.assert(self.ycbcr_pipeline == vk.NULL_HANDLE);
         const device = self.device.?;
         const create_conversion = self.fn_create_ycbcr.?;
-        const conv_info = vk.SamplerYcbcrConversionCreateInfo{};
-        if (create_conversion(device, &conv_info, null, &self.ycbcr_conversion) != vk.SUCCESS)
+        if (create_conversion(device, conv_info, null, &self.ycbcr_conversion) != vk.SUCCESS)
             return error.PipelineCreateFailed;
         const conv_chain = vk.SamplerYcbcrConversionInfo{ .conversion = self.ycbcr_conversion };
         const sampler_info = vk.SamplerCreateInfo{ .p_next = &conv_chain };
@@ -2183,18 +2223,20 @@ pub const Renderer = struct {
             const luma_ptr: *const vk.ImageView = @ptrCast(@alignCast(raw));
             const luma_view = luma_ptr.*;
             if (luma_view == vk.NULL_HANDLE) continue;
-            // A dmabuf frame and a bgra frame both carry a null chroma, so
-            // the owning surface's format tag is the only honest router.
-            const is_dmabuf = frame_surface_of(luma_ptr).format == .dmabuf_nv12;
+            // A dmabuf/AHB frame and a bgra frame both carry a null chroma, so
+            // the owning surface's format tag is the only honest router. The
+            // single-view ycbcr formats share one pipeline.
+            const fmt = frame_surface_of(luma_ptr).format;
+            const is_ycbcr = fmt == .dmabuf_nv12 or fmt == .ahb_nv12;
             const nv12 = f.tex_cbcr != null;
-            const pipeline = if (is_dmabuf)
+            const pipeline = if (is_ycbcr)
                 self.ycbcr_pipeline
             else if (nv12)
                 self.frame_nv12_pipeline
             else
                 self.frame_pipeline;
             if (pipeline == vk.NULL_HANDLE) continue;
-            const layout = if (is_dmabuf)
+            const layout = if (is_ycbcr)
                 self.ycbcr_pipeline_layout
             else
                 self.frame_pipeline_layout;
@@ -2205,12 +2247,12 @@ pub const Renderer = struct {
             else
                 luma_view;
             std.debug.assert(frame_offset.* < MAX_FRAMES);
-            const dset = if (is_dmabuf)
+            const dset = if (is_ycbcr)
                 self.ycbcr_dsets[frame_offset.*]
             else
                 self.frame_dsets[frame_offset.*];
             frame_offset.* += 1;
-            if (is_dmabuf) {
+            if (is_ycbcr) {
                 self.write_ycbcr_dset(dset, luma_view);
             } else {
                 self.write_frame_dset(dset, luma_view, chroma_view);
@@ -2613,6 +2655,143 @@ pub const Renderer = struct {
         return true;
     }
 
+    pub fn ahb_supported(self: *const Renderer) bool {
+        return self.ahb_capable;
+    }
+
+    // Wraps a decoder's AHardwareBuffer as a sampled multiplanar image: no copy is
+    // made, the image aliases the buffer's memory for the surface's lifetime. The
+    // caller keeps its own AHardwareBuffer reference; this acquires none, so the
+    // buffer must outlive the surface. width/height are the luma extent in pixels.
+    pub fn create_ahb_nv12_surface(
+        self: *Renderer,
+        buffer: *anyopaque,
+        width: u32,
+        height: u32,
+    ) ?FrameSurface {
+        if (!self.ahb_capable) return null;
+        std.debug.assert(width > 0);
+        std.debug.assert(height > 0);
+        std.debug.assert(width <= MAX_FRAME_DIM);
+        std.debug.assert(height <= MAX_FRAME_DIM);
+        std.debug.assert(width % 2 == 0);
+        std.debug.assert(height % 2 == 0);
+        const device = self.device.?;
+        const ahb: *vk.AHardwareBuffer = @ptrCast(buffer);
+
+        // The driver dictates the import size, accepting memory types, and pixel
+        // format (a concrete VkFormat, or an opaque external one to sample raw).
+        var fmt_props = vk.AndroidHardwareBufferFormatPropertiesANDROID{};
+        var props = vk.AndroidHardwareBufferPropertiesANDROID{ .p_next = &fmt_props };
+        const get_props = self.fn_ahb_props.?;
+        if (get_props(device, ahb, &props) != vk.SUCCESS) return null;
+        if (!self.ensure_ahb_ycbcr(&fmt_props)) return null;
+        // One immutable ycbcr sampler per renderer: a buffer in a different
+        // external format would need a different one, which this does not carry.
+        std.debug.assert(fmt_props.external_format == self.ahb_external_format);
+
+        const is_external = fmt_props.external_format != 0;
+        const ext_format = vk.ExternalFormatANDROID{ .external_format = fmt_props.external_format };
+        const external_info = vk.ExternalMemoryImageCreateInfo{
+            .p_next = if (is_external) @as(?*const anyopaque, &ext_format) else null,
+            .handle_types = vk.EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT,
+        };
+        const image_info = vk.ImageCreateInfo{
+            .p_next = &external_info,
+            .format = fmt_props.format,
+            .extent = .{ .width = width, .height = height, .depth = 1 },
+            .tiling = vk.IMAGE_TILING_OPTIMAL,
+            .usage = vk.IMAGE_USAGE_SAMPLED_BIT,
+        };
+        var image: vk.Image = vk.NULL_HANDLE;
+        if (self.dfns.vkCreateImage(device, &image_info, null, &image) != vk.SUCCESS) return null;
+
+        const type_index = self.find_memory_type(props.memory_type_bits, 0) orelse {
+            self.dfns.vkDestroyImage(device, image, null);
+            return null;
+        };
+        // Importing an AHardwareBuffer requires a dedicated allocation bound to
+        // this exact image; the import chains onto it.
+        const import_info = vk.ImportAndroidHardwareBufferInfoANDROID{ .buffer = ahb };
+        const dedicated = vk.MemoryDedicatedAllocateInfo{ .p_next = &import_info, .image = image };
+        const alloc_info = vk.MemoryAllocateInfo{
+            .p_next = &dedicated,
+            .allocation_size = props.allocation_size,
+            .memory_type_index = type_index,
+        };
+        var memory: vk.DeviceMemory = vk.NULL_HANDLE;
+        if (self.dfns.vkAllocateMemory(device, &alloc_info, null, &memory) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            return null;
+        }
+        if (self.dfns.vkBindImageMemory(device, image, memory, 0) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+        const conv_chain = vk.SamplerYcbcrConversionInfo{ .conversion = self.ycbcr_conversion };
+        const view_info = vk.ImageViewCreateInfo{
+            .p_next = &conv_chain,
+            .image = image,
+            .format = fmt_props.format,
+        };
+        var view: vk.ImageView = vk.NULL_HANDLE;
+        if (self.dfns.vkCreateImageView(device, &view_info, null, &view) != vk.SUCCESS) {
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+        // The producer is no Vulkan queue: ownership moves from the FOREIGN
+        // family to ours and the layout to shader-read before any draw samples it.
+        if (!self.acquire_dmabuf_image(image)) {
+            self.dfns.vkDestroyImageView(device, view, null);
+            self.dfns.vkDestroyImage(device, image, null);
+            self.dfns.vkFreeMemory(device, memory, null);
+            return null;
+        }
+        var out = FrameSurface{
+            .format = .ahb_nv12,
+            .width = width,
+            .height = height,
+            .stride = width,
+            .pixels = @ptrCast(&shared_frame_pixel),
+            .chroma_stride = width,
+        };
+        out.state.renderer = self;
+        out.state.luma = .{ .image = image, .memory = memory, .view = view };
+        out.state.uploaded = true;
+        return out;
+    }
+
+    // Builds the renderer's one ycbcr conversion + pipeline from the first
+    // buffer's reported format (concrete or external), the dmabuf path's deferred
+    // twin: Android cannot bake a fixed format up front because the producer's
+    // layout is unknown until a real buffer arrives.
+    fn ensure_ahb_ycbcr(
+        self: *Renderer,
+        fmt_props: *const vk.AndroidHardwareBufferFormatPropertiesANDROID,
+    ) bool {
+        std.debug.assert(self.ahb_capable);
+        if (self.ycbcr_ready) return true;
+        var conv_info = vk.SamplerYcbcrConversionCreateInfo{
+            .format = fmt_props.format,
+            .ycbcr_model = fmt_props.suggested_ycbcr_model,
+            .ycbcr_range = fmt_props.suggested_ycbcr_range,
+            .components = fmt_props.sampler_ycbcr_conversion_components,
+            .x_chroma_offset = fmt_props.suggested_x_chroma_offset,
+            .y_chroma_offset = fmt_props.suggested_y_chroma_offset,
+        };
+        const ext_format = vk.ExternalFormatANDROID{ .external_format = fmt_props.external_format };
+        if (fmt_props.external_format != 0) conv_info.p_next = &ext_format;
+        const vert = self.make_shader_module(&frame_vert_spv) catch return false;
+        defer self.dfns.vkDestroyShaderModule(self.device.?, vert, null);
+        self.build_ycbcr_pipeline(vert, &conv_info) catch return false;
+        std.debug.assert(self.ycbcr_pipeline != vk.NULL_HANDLE); // built before any import samples it
+        self.ahb_external_format = fmt_props.external_format;
+        self.ycbcr_ready = true;
+        return true;
+    }
+
     // Copies the caller's NV12 planes through the surface's staging buffer into
     // its images. Call only while the surface is available(): with no ref held
     // by the mailbox or the GPU ring, nothing in flight samples the planes.
@@ -2658,6 +2837,7 @@ pub const Renderer = struct {
             .nv12 => self.import_nv12_surface(surface),
             .shared_nv12 => import_shared_nv12_surface(surface),
             .dmabuf_nv12 => import_dmabuf_surface(surface),
+            .ahb_nv12 => import_ahb_surface(surface),
         };
     }
 
@@ -2755,6 +2935,23 @@ pub const Renderer = struct {
         };
     }
 
+    // The AHardwareBuffer image, like the dmabuf one, presents both planes through
+    // a single ycbcr view; the encode routes it by the .ahb_nv12 tag.
+    fn import_ahb_surface(surface: *FrameSurface) ?Nv12Textures {
+        std.debug.assert(surface.format == .ahb_nv12);
+        std.debug.assert(surface.state.uploaded);
+        const old = surface.state.refs.fetchAdd(1, .acq_rel);
+        std.debug.assert(old >= 1);
+        return .{
+            .luma = @ptrCast(&surface.state.luma.view),
+            .chroma = null,
+            .cv_luma = @ptrCast(surface),
+            .cv_chroma = null,
+            .width = surface.width,
+            .height = surface.height,
+        };
+    }
+
     fn import_shared_nv12_surface(surface: *FrameSurface) ?Nv12Textures {
         std.debug.assert(surface.format == .shared_nv12);
         std.debug.assert(surface.width % 2 == 0);
@@ -2799,14 +2996,14 @@ pub const Renderer = struct {
                 h / 2,
                 vk.FORMAT_R8G8_UNORM,
             ),
-            // A dmabuf surface owns its imported image from creation and
-            // never stages.
-            .dmabuf_nv12 => unreachable,
+            // A dmabuf or AHardwareBuffer surface owns its imported image from
+            // creation and never stages.
+            .dmabuf_nv12, .ahb_nv12 => unreachable,
         };
         const staging_bytes: usize = switch (surface.format) {
             .bgra => @as(usize, w) * h * 4,
             .nv12, .shared_nv12 => @as(usize, w) * h * 3 / 2,
-            .dmabuf_nv12 => unreachable,
+            .dmabuf_nv12, .ahb_nv12 => unreachable,
         };
         if (!ok or !self.create_frame_staging(&surface.state, staging_bytes)) {
             destroy_frame_plane(self, &surface.state.luma);
