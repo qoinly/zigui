@@ -1,17 +1,12 @@
-// Window-level platform properties an app sets at runtime: keep-screen-on (the
-// one Remora needs while a stream is up), the status-bar icon tint, and immersive
-// (hide the system bars). All three live only on the Java window/controller, so
-// this reaches them through JNI on the activity - the safe_insets pattern in
-// jni.zig, package-agnostic so zigui carries no app Java. Calls run on the paint
-// thread, which for a NativeActivity IS the UI thread (the Choreographer posts the
-// render onto the same thread ANativeActivity_onCreate ran on), so the window
-// mutations are on the thread the framework requires.
-//
-// An immediate-mode app re-asserts these every frame, so each setter caches the
-// last applied value and hops into JNI only on a real change.
+// Window-level display properties: keep-screen-on, the status-bar icon tint, and
+// immersive (hide the system bars). All three live only on the Java window /
+// insets controller, reached through JNI on the activity (the safe_insets pattern).
+// Calls run on the paint thread, which for a NativeActivity IS the UI thread, so
+// the window mutations are on the thread the framework requires. Each setter caches
+// its last applied value and hops into JNI only on a real change.
 
 const std = @import("std");
-const jni = @import("jni.zig");
+const jni = @import("../jni.zig");
 
 // WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.
 const FLAG_KEEP_SCREEN_ON: jni.jint = 0x00000080;
@@ -22,8 +17,6 @@ const APPEARANCE_LIGHT_STATUS_BARS: jni.jint = 0x00000008;
 // back on an edge swipe, the standard immersive gesture.
 const BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE: jni.jint = 2;
 
-// Last applied value per property (null = never applied), so a per-frame call
-// costs one comparison and a JNI hop fires only when the value flips.
 var g_keep_awake: ?bool = null;
 var g_dark_icons: ?bool = null;
 var g_immersive: ?bool = null;
@@ -80,7 +73,7 @@ fn system_bars_mask(env: jni.JNIEnv) ?jni.jint {
 
 // FLAG_KEEP_SCREEN_ON: while on, the display never dims or sleeps. Window.addFlags
 // / clearFlags is API 1, so this is the one property that holds on every device.
-pub fn set_keep_awake(on: bool) void {
+pub fn keep_awake(on: bool) void {
     if (g_keep_awake) |prev| if (prev == on) return;
     const w = window() orelse return;
     const env = w.env;
@@ -97,7 +90,7 @@ pub fn set_keep_awake(on: bool) void {
 
 // The status-bar icon tint via setSystemBarsAppearance: dark icons set the
 // LIGHT_STATUS_BARS appearance bit, light icons clear it. No-op before API 30.
-pub fn set_status_bar_dark_icons(dark: bool) void {
+pub fn status_bar_dark_icons(dark: bool) void {
     if (g_dark_icons) |prev| if (prev == dark) return;
     const w = window() orelse return;
     const env = w.env;
@@ -116,7 +109,7 @@ pub fn set_status_bar_dark_icons(dark: bool) void {
 
 // Immersive: hide (on) or show (off) the system bars. Hiding first sets the
 // transient-by-swipe behavior so the bars stay reachable. No-op before API 30.
-pub fn set_immersive(on: bool) void {
+pub fn immersive(on: bool) void {
     if (g_immersive) |prev| if (prev == on) return;
     const w = window() orelse return;
     const env = w.env;

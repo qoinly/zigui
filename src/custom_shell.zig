@@ -102,53 +102,6 @@ pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
     if (builtin.abi.isAndroid()) impl.register_back(cb, ctx);
 }
 
-// keep-screen-on is real on every backend: a window flag on Android, an idle-sleep
-// inhibitor on each desktop (IOPMAssertion / SetThreadExecutionState / the
-// ScreenSaver dbus interface). The status-bar tint and immersive have no desktop
-// equivalent, so those stay Android-only and no-op elsewhere.
-pub const set_keep_awake = impl.set_keep_awake;
-pub fn set_status_bar_dark_icons(dark: bool) void {
-    if (builtin.abi.isAndroid()) impl.set_status_bar_dark_icons(dark);
-}
-pub fn set_immersive(on: bool) void {
-    if (builtin.abi.isAndroid()) impl.set_immersive(on);
-}
-
-// Platform services: only Android exposes these as a system call here, so
-// off Android they are no-ops rather than a wrong-platform action.
-pub fn vibrate(ms: i64) void {
-    if (builtin.abi.isAndroid()) impl.vibrate(ms);
-}
-pub fn open_url(url: []const u8) void {
-    if (builtin.abi.isAndroid()) impl.open_url(url);
-}
-pub fn share_text(text: []const u8) void {
-    if (builtin.abi.isAndroid()) impl.share_text(text);
-}
-pub fn notify(title: []const u8, text: []const u8) void {
-    if (builtin.abi.isAndroid()) impl.notify(title, text);
-}
-
-// Runtime permissions exist only on Android; the desktops grant at install, so a
-// query there reads as granted and a request is a no-op.
-pub fn permission_granted(name: []const u8) bool {
-    if (builtin.abi.isAndroid()) return impl.permission_granted(name);
-    return true;
-}
-pub fn request_permission(name: []const u8) void {
-    if (builtin.abi.isAndroid()) impl.request_permission(name);
-}
-
-// The system document picker (Android). Off Android there is no such activity, so
-// the launch is a no-op and the result poll never yields a file.
-pub fn pick_file() void {
-    if (builtin.abi.isAndroid()) impl.pick_file();
-}
-pub fn take_picked_file(buf: []u8) ?[]const u8 {
-    if (builtin.abi.isAndroid()) return impl.take_picked_file(buf);
-    return null;
-}
-
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
