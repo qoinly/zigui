@@ -382,6 +382,23 @@ pub const PaintContext = struct {
         self.renderer.request_redraw();
     }
 
+    // Touch has no separate wheel: a finger drag scrolls the region under it,
+    // UNLESS the press captured a draggable control (a slider rail), which then
+    // drags instead. The mouse backends keep wheel and drag as distinct inputs and
+    // never call this; only the touch backend routes a move through here.
+    pub fn on_touch_move(self: *PaintContext, x: f32, y: f32) void {
+        const dy = y - self.mouse_y; // delta before the position update
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        if (self.drag_cb) |cb| {
+            cb(self.drag_ctx, x, y);
+        } else {
+            self.on_scroll(0, dy); // feeds wheel_dy; the hovered scroll region consumes it
+        }
+        self.renderer.request_redraw();
+    }
+
     pub fn tick(self: *PaintContext) ?Frame {
         // A minimized window has a degenerate client; skip painting it entirely
         // (its tiny titlebar band would underflow widths and assert in the kit).
@@ -792,6 +809,11 @@ fn mouse_drag_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     paint.on_mouse_dragged(x, y);
 }
 
+fn touch_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_touch_move(x, y);
+}
+
 fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_right_mouse_down(x, y);
@@ -857,6 +879,7 @@ pub fn start_paint_loop(
         .ctx = @ptrCast(paint),
     });
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
+    custom_shell.register_touch_move(touch_move_thunk, @ptrCast(paint));
     custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),

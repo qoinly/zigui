@@ -47,6 +47,12 @@ var g_dispatch: ?MouseDispatch = null;
 // loop reads them back in points via safe_area_insets().
 var g_insets_px: jni.Insets = .{};
 
+// The touch-move handler the paint loop registers (cb + the PaintContext ctx);
+// the input layer routes a finger drag through it. Cleared on surface loss.
+const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
+const TouchMove = struct { cb: TouchMoveFn, ctx: *anyopaque };
+var g_touch: ?TouchMove = null;
+
 pub fn set_window(window: *native.AndroidWindow) void {
     g_window = window;
 }
@@ -54,10 +60,19 @@ pub fn set_window(window: *native.AndroidWindow) void {
 pub fn clear_window() void {
     g_window = null;
     g_dispatch = null;
+    g_touch = null;
 }
 
 pub fn mouse_dispatch() ?MouseDispatch {
     return g_dispatch;
+}
+
+pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
+    g_touch = .{ .cb = cb, .ctx = ctx };
+}
+
+pub fn touch_move() ?TouchMove {
+    return g_touch;
 }
 
 pub fn surface_scale() i32 {

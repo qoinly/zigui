@@ -14,6 +14,7 @@ const Counter = struct {
 };
 
 var state: Counter = .{};
+var list_scroll: zigui.ScrollState = .{};
 
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
@@ -24,6 +25,8 @@ pub fn main() !void {
 // the label does not render, so the dot row is the visible proof a touch reached
 // the kit.
 const MAX_DOTS = 8;
+// Enough rows to overflow the viewport so the list is scrollable by drag.
+const LIST_ROWS = 16;
 
 fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const n = @min(counter.clicks, MAX_DOTS);
@@ -33,10 +36,22 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         for (slice) |*dot| dot.* = zigui.col(box, &.{});
         dots = slice;
     } else |_| {}
+
+    // A tall list of alternating bars; dragging inside it scrolls (the bars shift).
+    var rows: []const *zigui.Node = &.{};
+    if (f.arena.alloc(*zigui.Node, LIST_ROWS)) |slice| {
+        for (slice, 0..) |*r, i| {
+            const c = if (i % 2 == 0) f.theme.primary else f.theme.border;
+            r.* = zigui.col(.{ .height = 44, .radius = 8, .bg = c }, &.{});
+        }
+        rows = slice;
+    } else |_| {}
+
     return zigui.col(.{ .pad = .lg, .gap = .md }, &.{
         zigui.text("Hello, Android.", .{ .size = 28 }),
         zigui.button("Tap me", .{ .on_click = zigui.on(Counter, on_click) }),
         zigui.row(.{ .gap = .sm }, dots),
+        zigui.scroll(&list_scroll, .{ .grow = 1 }, zigui.col(.{ .gap = .sm }, rows)),
     });
 }
 
