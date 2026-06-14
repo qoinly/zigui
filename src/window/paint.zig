@@ -134,6 +134,12 @@ pub const PaintContext = struct {
     // A focused text input sets this while showing the native editor; the runtime
     // hides the singleton editor on a frame where nobody claims it (blur / nav away).
     text_field_active: bool = false,
+    // Back navigation: the navigator publishes its stack depth each frame so the
+    // Android backend knows whether a Back press should pop (consume it) or
+    // background the app (depth 1). back_pressed is set by that backend on a Back
+    // it consumed; Esc on desktop arrives through the normal key queue instead.
+    nav_depth: u32 = 1,
+    back_pressed: bool = false,
     scale_factor: f32 = 2.0,
     last_pane_w: f32 = 0,
     last_pane_h: f32 = 0,
@@ -253,6 +259,18 @@ pub const PaintContext = struct {
 
     pub fn keys(self: *const PaintContext) []const custom_shell.KeyEvent {
         return self.key_events[0..self.key_len];
+    }
+
+    // Whether a back-navigation was requested this frame: Esc on desktop (through
+    // the key queue) or the platform Back button (the back_pressed flag, cleared
+    // here). The navigator calls it once per frame to pop the route stack.
+    pub fn take_back(self: *PaintContext) bool {
+        var requested = self.back_pressed;
+        self.back_pressed = false;
+        for (self.keys()) |ke| {
+            if (ke.code == .escape) requested = true;
+        }
+        return requested;
     }
 
     pub fn on_raw_event(self: *PaintContext, ev: input.InputEvent) void {
@@ -814,6 +832,16 @@ fn touch_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     paint.on_touch_move(x, y);
 }
 
+// The platform Back button (Android): consume it (and request a pop) only when a
+// route is pushed; at the root, return false so the OS backgrounds the app.
+fn back_thunk(ctx: *anyopaque) bool {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    if (paint.nav_depth <= 1) return false;
+    paint.back_pressed = true;
+    paint.request_redraw();
+    return true;
+}
+
 fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_right_mouse_down(x, y);
@@ -880,6 +908,7 @@ pub fn start_paint_loop(
     });
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
     custom_shell.register_touch_move(touch_move_thunk, @ptrCast(paint));
+    custom_shell.register_back(back_thunk, @ptrCast(paint));
     custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
