@@ -36,6 +36,14 @@ pub const android_on_native_file = if (builtin.abi.isAndroid())
     @import("platform/android/napi/picker.zig").on_native_file
 else {};
 
+// The biometric sink an Android app's ZiguiActivity.nativeOnBiometric (the package-
+// named JNI export the app owns) forwards the prompt's terminal outcome to (1
+// succeeded, 2 failed). Package-agnostic for the same reason as the text sink. Void
+// off Android.
+pub const android_on_native_biometric = if (builtin.abi.isAndroid())
+    @import("platform/android/napi/biometric.zig").on_native_biometric
+else {};
+
 const color = @import("color.zig");
 const node = @import("node.zig");
 const kit_nodes = @import("kit_nodes.zig");
