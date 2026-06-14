@@ -57,6 +57,9 @@ const GetObjFieldFn = *const fn (JNIEnv, jobject, jfieldID) callconv(.c) jobject
 // Reads a jstring as modified-UTF8 (the isCopy out-param is passed null).
 const GetStrUTFFn = *const fn (JNIEnv, jobject, ?*u8) callconv(.c) ?[*:0]const u8;
 const RelStrUTFFn = *const fn (JNIEnv, jobject, [*:0]const u8) callconv(.c) void;
+// A String[] for requestPermissions: allocate, then set each element.
+const NewObjectArrayFn = *const fn (JNIEnv, jint, jclass, jobject) callconv(.c) jobject;
+const SetObjectArrayElementFn = *const fn (JNIEnv, jobject, jint, jobject) callconv(.c) void;
 
 // Slot offsets are from jni.h's JNINativeInterface_; the padding-run lengths are
 // the gaps (in pointer-sized slots) between the entries we use.
@@ -76,7 +79,9 @@ pub const JNINativeInterface = extern struct {
     GetMethodID: LookupFn, // 33
     _r5: [2]?*const anyopaque, // 34..35
     CallObjectMethodA: CallObjectAFn, // 36
-    _r6: [20]?*const anyopaque, // 37..56
+    _r6: [14]?*const anyopaque, // 37..50
+    CallIntMethodA: CallIntAFn, // 51
+    _r6b: [5]?*const anyopaque, // 52..56
     CallFloatMethodA: CallFloatAFn, // 57
     _r7: [5]?*const anyopaque, // 58..62
     CallVoidMethodA: CallVoidAFn, // 63
@@ -95,11 +100,17 @@ pub const JNINativeInterface = extern struct {
     _r14: [12]?*const anyopaque, // 132..143
     GetStaticFieldID: LookupFn, // 144
     GetStaticObjectField: GetObjFieldFn, // 145
-    _r15: [21]?*const anyopaque, // 146..166
+    _r15: [4]?*const anyopaque, // 146..149
+    GetStaticIntField: GetIntFieldFn, // 150
+    _r15b: [16]?*const anyopaque, // 151..166
     NewStringUTF: StrToObjFn, // 167
     _r16: [1]?*const anyopaque, // 168: GetStringUTFLength
     GetStringUTFChars: GetStrUTFFn, // 169
     ReleaseStringUTFChars: RelStrUTFFn, // 170
+    _r17: [1]?*const anyopaque, // 171: GetArrayLength
+    NewObjectArray: NewObjectArrayFn, // 172
+    _r18: [1]?*const anyopaque, // 173: GetObjectArrayElement
+    SetObjectArrayElement: SetObjectArrayElementFn, // 174
 };
 
 // The activity's JNIEnv + object, stored by app.zig on the main thread (where the

@@ -116,6 +116,21 @@ pub fn set_immersive(on: bool) void {
     if (builtin.abi.isAndroid()) impl.set_immersive(on);
 }
 
+// Platform services: only Android exposes these as a system call here, so
+// off Android they are no-ops rather than a wrong-platform action.
+pub fn vibrate(ms: i64) void {
+    if (builtin.abi.isAndroid()) impl.vibrate(ms);
+}
+pub fn open_url(url: []const u8) void {
+    if (builtin.abi.isAndroid()) impl.open_url(url);
+}
+pub fn share_text(text: []const u8) void {
+    if (builtin.abi.isAndroid()) impl.share_text(text);
+}
+pub fn notify(title: []const u8, text: []const u8) void {
+    if (builtin.abi.isAndroid()) impl.notify(title, text);
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {

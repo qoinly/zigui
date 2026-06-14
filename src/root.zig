@@ -231,6 +231,23 @@ pub fn status_bar_icons(which: StatusBarIcons) void {
 pub fn immersive(enable: bool) void {
     custom_shell.set_immersive(enable);
 }
+
+// Mobile platform services (Android; no-ops where the system has no equivalent).
+// vibrate buzzes for ms milliseconds; open_url hands a url to the browser; share
+// raises the system share sheet for text; notify posts a notification (Android 13+
+// asks for the POST_NOTIFICATIONS grant on the first call, posts once granted).
+pub fn vibrate(ms: i64) void {
+    custom_shell.vibrate(ms);
+}
+pub fn open_url(url: []const u8) void {
+    custom_shell.open_url(url);
+}
+pub fn share_text(content: []const u8) void {
+    custom_shell.share_text(content);
+}
+pub fn notify(title: []const u8, body: []const u8) void {
+    custom_shell.notify(title, body);
+}
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;
