@@ -6,6 +6,15 @@ const impl = p.domain("accessibility");
 
 pub const GlobalAction = enum { back, home, recents };
 
+// AccessibilityEvent.TYPE_* bits to subscribe to (a subset of the common ones).
+pub const Event = enum(i32) {
+    view_clicked = 0x1,
+    view_focused = 0x8,
+    window_state_changed = 0x20,
+    notification_state_changed = 0x40,
+    window_content_changed = 0x800,
+};
+
 // Whether the accessibility service is connected. Inject and read do nothing until it is.
 pub fn enabled() bool {
     if (@hasDecl(impl, "enabled")) return impl.enabled();
@@ -43,4 +52,17 @@ pub fn global_action(action: GlobalAction) void {
 pub fn read(buf: []u8) ?[]const u8 {
     if (@hasDecl(impl, "read")) return impl.read(buf);
     p.unsupported("accessibility.read");
+}
+// Subscribe to an accessibility event type; the service then forwards matching events
+// for take_event. Opt-in and filtered - nothing is forwarded until you subscribe.
+pub fn subscribe_event(event: Event) void {
+    if (@hasDecl(impl, "subscribe_event")) {
+        impl.subscribe_event(@intFromEnum(event));
+    } else p.unsupported("accessibility.subscribe_event");
+}
+// The latest subscribed event as "type\tpackage\ttext" into buf, read once; null
+// until one arrives.
+pub fn take_event(buf: []u8) ?[]const u8 {
+    if (@hasDecl(impl, "take_event")) return impl.take_event(buf);
+    p.unsupported("accessibility.take_event");
 }
