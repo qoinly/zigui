@@ -42,6 +42,7 @@ pub const editable = @import("editable.zig");
 pub const textarea = @import("textarea.zig");
 pub const toast = @import("toast.zig");
 pub const navigator = @import("navigator.zig");
+pub const carousel = @import("carousel.zig");
 pub const popover = @import("popover.zig");
 pub const tooltip = @import("tooltip.zig");
 pub const slider = @import("slider.zig");
