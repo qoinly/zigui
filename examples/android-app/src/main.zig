@@ -47,6 +47,7 @@ const Counter = struct {
 const CAMERA = "android.permission.CAMERA";
 const RECEIVE_SMS = "android.permission.RECEIVE_SMS";
 const READ_SMS = "android.permission.READ_SMS";
+const SEND_SMS = "android.permission.SEND_SMS";
 
 fn do_pick_file(c: *Counter) void {
     _ = c;
@@ -207,6 +208,15 @@ fn do_sms_read(c: *Counter) void {
         return;
     }
     if (zigui.napi.sms.read(&c.sms)) |inbox| c.sms_len = inbox.len;
+}
+// Send an SMS to the emulator's own number so it loops back to the inbox (SEND_SMS).
+fn do_sms_send(c: *Counter) void {
+    _ = c;
+    if (!zigui.napi.permissions.granted(SEND_SMS)) {
+        zigui.napi.permissions.request(SEND_SMS);
+        return;
+    }
+    zigui.napi.sms.send("5555215554", "hello from zigui sms send");
 }
 
 pub fn main() !void {
@@ -432,6 +442,7 @@ fn bc_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.text(last, .{ .size = 12 }),
         zigui.button("Read SMS inbox", .{ .on_click = zigui.on(Counter, do_sms_read) }),
         zigui.text(inbox_note, .{ .size = 12 }),
+        zigui.button("Send SMS to self", .{ .on_click = zigui.on(Counter, do_sms_send) }),
     });
 }
 
