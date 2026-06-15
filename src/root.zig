@@ -491,6 +491,108 @@ pub fn nav_page(
     return node.slide(fc.arena, .{ .width = w, .dx = -eased * w }, &kids);
 }
 
+// Caller-owned carousel state: one per carousel, holds the slide index + drag offset.
+pub const CarouselState = kit.carousel.CarouselState;
+
+pub const CarouselOpts = struct {
+    count: usize,
+    // The top-right Skip and the last slide's Finish both fire with `state` as ctx.
+    on_skip: ?ClickFn = null,
+    on_finish: ?ClickFn = null,
+};
+
+// A full-screen onboarding carousel: pages across `count` slides by horizontal drag
+// (finger-follows, snaps to the nearest on release) or the Next button, with page
+// dots, a Skip until the last slide, and a Finish on it. The app builds slide i via
+// `build_slide`; cstate is caller-owned. Allocation-free beyond the per-frame arena;
+// the loop idles once a slide settles.
+pub fn carousel(
+    f: *Frame,
+    comptime State: type,
+    cstate: *CarouselState,
+    state: *State,
+    o: CarouselOpts,
+    comptime build_slide: fn (*Frame, *State, usize) *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    std.debug.assert(o.count >= 1);
+    const w = f.size.width;
+    std.debug.assert(w >= 0);
+
+    // Snapshot the geometry the input callbacks need, clamp the index.
+    cstate.width = w;
+    cstate.count = o.count;
+    if (cstate.index >= o.count) cstate.index = o.count - 1;
+    std.debug.assert(cstate.index < o.count);
+
+    // Ease the live offset back to 0 when not dragging (spring-back / advance settle).
+    if (!cstate.dragging and cstate.dx != 0) {
+        cstate.dx += (0 - cstate.dx) * 0.22;
+        if (@abs(cstate.dx) < 0.5) cstate.dx = 0;
+        if (cstate.dx != 0) fc.paint.animating = true;
+    }
+
+    // The drag layer over the body, registered now (build phase) so the dots/buttons
+    // (hitboxes register later, at draw) win a tap; a drag elsewhere swipes the slides.
+    fc.paint.add_hitbox(.{
+        .x = f.body.origin.x,
+        .y = f.body.origin.y,
+        .w = f.body.size.width,
+        .h = f.body.size.height,
+        .on_point = kit.carousel.on_drag,
+        .on_drag_end = kit.carousel.on_release,
+        .ctx = @ptrCast(cstate),
+    }) catch {
+        // A full hitbox list drops the drag layer this frame; clear any in-flight
+        // capture so its release can't be lost and freeze the spring-back easing.
+        cstate.dragging = false;
+        cstate.dx = 0;
+    };
+
+    const slides = fc.arena.alloc(*node.Node, o.count) catch @panic("carousel arena oom");
+    for (slides, 0..) |*sl, i| sl.* = build_slide(f, state, i);
+    const off = -(@as(f32, @floatFromInt(cstate.index)) * w) + cstate.dx;
+    const track = node.slide(fc.arena, .{ .width = w, .dx = off }, slides);
+
+    const last = cstate.index + 1 >= o.count;
+
+    // Top: Skip on the right, hidden on the last slide.
+    const top = row(.{ .pad = .md, .justify = .flex_end, .height = 56 }, if (last) &.{} else &.{
+        kit_nodes.button(fc.arena, fc.theme, "Skip", .{
+            .variant = .ghost,
+            .paint = fc.paint,
+            .on_click = o.on_skip,
+            .ctx = @ptrCast(state),
+        }),
+    });
+
+    const dots = fc.arena.alloc(*node.Node, o.count) catch @panic("carousel arena oom");
+    for (dots, 0..) |*d, i| {
+        const dc = if (i == cstate.index) fc.theme.primary else fc.theme.border;
+        d.* = col(.{ .width = 8, .height = 8, .radius = 4, .bg = dc }, &.{});
+    }
+    const action = if (last)
+        kit_nodes.button(fc.arena, fc.theme, "Finish", .{
+            .variant = .default,
+            .paint = fc.paint,
+            .on_click = o.on_finish,
+            .ctx = @ptrCast(state),
+        })
+    else
+        kit_nodes.button(fc.arena, fc.theme, "Next", .{
+            .variant = .default,
+            .paint = fc.paint,
+            .on_click = kit.carousel.go_next,
+            .ctx = @ptrCast(cstate),
+        });
+    const bottom = row(.{ .pad = .lg, .justify = .space_between, .cross = .center }, &.{
+        row(.{ .gap = .sm }, dots),
+        action,
+    });
+
+    return col(.{ .grow = 1 }, &.{ top, track, bottom });
+}
+
 // The open dropdown menu: put it in the overlay region. Anchored to the trigger's
 // rect_out, dismisses on an outside click.
 pub fn menu_overlay(o: kit_nodes.MenuOverlay) *node.Node {

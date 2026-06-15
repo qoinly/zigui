@@ -262,20 +262,21 @@ pub fn scroll(a: A, state: *ScrollState, o: ScrollOpts, child: *Node) *Node {
 
 pub const SlideOpts = struct {
     // The viewport (page) width: the box clips to it and each child is pinned to it,
-    // so two full-width pages sit side by side.
+    // so the full-width pages line up side by side.
     width: f32,
-    // Horizontal offset applied to the children before clipping; 0 shows the first
-    // child, -width shows the second.
+    // Horizontal offset applied to the children before clipping; -i*width shows the
+    // i-th child (the navigator slides between 2, the carousel pages across N).
     dx: f32,
 };
 
-// A horizontal slide viewport (the navigator page transition): a row of full-width
-// page children, clipped to a `width`-wide box and offset by `dx`. Each child is
-// pinned to `width` and never shrinks, so two pages line up and dx slides between
-// them. The box fills its height; the row's cross-stretch sizes the pages to it.
+// A horizontal slide viewport: a row of full-width page children, clipped to a
+// `width`-wide box and offset by `dx`. Each child is pinned to `width` and never
+// shrinks, so the pages line up and dx slides between them (the navigator transition
+// uses 2; the carousel uses N). The box fills its height; the row's cross-stretch
+// sizes the pages to it.
 pub fn slide(a: A, o: SlideOpts, kids: []const *Node) *Node {
     std.debug.assert(o.width > 0); // the clip + the children's pinned width need a real page width
-    std.debug.assert(kids.len == 2); // a slide is exactly the leaving + arriving pages
+    std.debug.assert(kids.len >= 1); // a slide needs at least one page
     for (kids) |k| {
         k.style.width = .{ .px = o.width };
         k.style.flex_shrink = 0;
@@ -443,7 +444,7 @@ fn draw_slide(
     dx: f32,
 ) RenderError!void {
     std.debug.assert(depth <= MAX_DEPTH); // the cap draw_tree relies on, before recursing
-    std.debug.assert(n.children.len == 2); // a slide is always the two pages
+    std.debug.assert(n.children.len >= 1); // a slide always has at least one page
     std.debug.assert(view[2] >= 0 and view[3] >= 0); // the clip box never has negative extent
     const prim0 = b.prims.items.len;
     const spr0 = b.sprites.items.len;
