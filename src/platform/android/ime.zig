@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const jni = @import("jni.zig");
+const utf8 = @import("napi/utf8.zig");
 
 pub const FIELD_BUF_MAX: usize = 256;
 
@@ -24,10 +25,9 @@ pub fn on_native_text(env_ptr: *anyopaque, text: ?*anyopaque, caret_index: i32) 
     const chars = table.GetStringUTFChars(env, text_ref, null) orelse return;
     defer table.ReleaseStringUTFChars(env, text_ref, chars);
     const slice = std.mem.span(chars);
-    g_len = @min(slice.len, g_buf.len);
-    // A byte-count truncation could split a UTF-8 codepoint; back off to its start
-    // so the kit never shapes an invalid trailing sequence.
-    while (g_len > 0 and g_len < slice.len and (slice[g_len] & 0xc0) == 0x80) g_len -= 1;
+    // Back a cap-truncation off any split codepoint so the kit never shapes an
+    // invalid trailing sequence.
+    g_len = utf8.floor(slice, @min(slice.len, g_buf.len));
     @memcpy(g_buf[0..g_len], slice[0..g_len]);
     const clamped: usize = @intCast(@max(caret_index, 0));
     g_caret = @min(clamped, g_len);
