@@ -45,6 +45,12 @@ const Counter = struct {
     // the buffer it fills).
     sms: [256]u8 = undefined,
     sms_len: usize = 0,
+    // Kit overlay widgets (rendered by the kit, not native): a modal dialog, an eased
+    // edge sheet, and an in-app toast stack.
+    dialog_open: bool = false,
+    sheet_open: bool = false,
+    sheet_t: f32 = 0, // caller-eased sheet slide progress 0..1
+    toasts: [3]zigui.ToastSlot = .{ .{}, .{}, .{} },
 };
 
 const CAMERA = "android.permission.CAMERA";
@@ -224,9 +230,93 @@ fn do_sms_send(c: *Counter) void {
     zigui.napi.sms.send("5555215554", "hello from zigui sms send");
 }
 
+fn open_kit(c: *Counter) void {
+    _ = c;
+    nav.push("kit", "Kit UI");
+}
+fn open_dialog(c: *Counter) void {
+    c.dialog_open = true;
+}
+fn dialog_close(c: *Counter) void {
+    c.dialog_open = false;
+}
+fn dialog_confirm(c: *Counter) void {
+    c.dialog_open = false;
+    push_toast(c, "Confirmed", .success);
+}
+fn open_sheet(c: *Counter) void {
+    c.sheet_open = true;
+}
+fn sheet_close(c: *Counter) void {
+    c.sheet_open = false; // sheet_t eases to 0 over the next frames, sliding it out
+}
+fn show_toast(c: *Counter) void {
+    push_toast(c, "Saved (kit toast, not native)", .default);
+}
+
+// Push a toast into the first free slot; if all are full, overwrite slot 0.
+fn push_toast(c: *Counter, msg: []const u8, variant: zigui.ToastVariant) void {
+    for (&c.toasts) |*s| {
+        if (!s.active) {
+            s.* = .{ .active = true, .text = msg, .variant = variant };
+            return;
+        }
+    }
+    c.toasts[0] = .{ .active = true, .text = msg, .variant = variant };
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
-    try app.run(&state, .{ .body = render });
+    try app.run(&state, .{ .body = render, .overlay = overlay_view, .hud = hud_view });
+}
+
+// The modal layer: the eased edge sheet owns it while sliding, else the dialog frosts
+// the backdrop and blocks the body. Both are kit-rendered (GPU), not native Android.
+fn overlay_view(f: *zigui.Frame, counter: *Counter) ?*zigui.Node {
+    const target: f32 = if (counter.sheet_open) 1 else 0;
+    counter.sheet_t += (target - counter.sheet_t) * 0.25;
+    if (@abs(target - counter.sheet_t) < 0.005) counter.sheet_t = target;
+    if (counter.sheet_t != target) zigui.animate(); // keep ticking while it slides
+    if (counter.sheet_t > 0.001) {
+        return zigui.sheet(.{
+            .side = .bottom,
+            .open_t = counter.sheet_t,
+            .top_inset = f.body.origin.y,
+            .title = "Edit profile",
+            .description = "A kit sheet sliding from the bottom edge.",
+            .dismiss = counter.sheet_open,
+            .on_close = zigui.on(Counter, sheet_close),
+        });
+    }
+    counter.sheet_open = false; // fully closed
+    if (!counter.dialog_open) return null;
+    return zigui.dialog(.{
+        .width = 288, // fit a phone screen (the 420 default overflows)
+        .title = "Delete this?",
+        .description = "This kit dialog interrupts for a decision.",
+        .actions = &.{
+            .{
+                .label = "Cancel",
+                .variant = .outline,
+                .on_click = zigui.on(Counter, dialog_close),
+            },
+            .{
+                .label = "Delete",
+                .variant = .destructive,
+                .on_click = zigui.on(Counter, dialog_confirm),
+            },
+        },
+        .on_dismiss = zigui.on(Counter, dialog_close),
+    });
+}
+
+// The non-modal top layer: the in-app toast stack, fired from the Kit UI page.
+fn hud_view(f: *zigui.Frame, counter: *Counter) ?*zigui.Node {
+    _ = f;
+    for (counter.toasts) |s| {
+        if (s.active) return zigui.toasts(.{ .slots = &counter.toasts });
+    }
+    return null;
 }
 
 // A tap adds a dot, capped so the row never overflows the surface. With no font
@@ -282,6 +372,7 @@ fn dispatch(f: *zigui.Frame, counter: *Counter, route: []const u8) *zigui.Node {
     if (std.mem.eql(u8, route, "a11y")) return a11y_page(f, counter);
     if (std.mem.eql(u8, route, "notif")) return notif_page(f, counter);
     if (std.mem.eql(u8, route, "bc")) return bc_page(f, counter);
+    if (std.mem.eql(u8, route, "kit")) return kit_page(f, counter);
     return home_page(f, counter);
 }
 
@@ -324,6 +415,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Accessibility", .{ .on_click = zigui.on(Counter, open_a11y) }),
         zigui.button("Notif listener", .{ .on_click = zigui.on(Counter, open_notif) }),
         zigui.button("Broadcasts", .{ .on_click = zigui.on(Counter, open_bc) }),
+        zigui.button("Kit UI", .{ .on_click = zigui.on(Counter, open_kit) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -451,6 +543,32 @@ fn bc_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Read SMS inbox", .{ .on_click = zigui.on(Counter, do_sms_read) }),
         zigui.text(inbox_note, .{ .size = 12 }),
         zigui.button("Send SMS to self", .{ .on_click = zigui.on(Counter, do_sms_send) }),
+    });
+}
+
+// The kit-widget surface: a card (a styled surface), and triggers for the modal
+// dialog + edge sheet (overlay region) and the in-app toast stack (hud region) - all
+// kit-rendered through the same GPU renderer as desktop, not native Android views.
+fn kit_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    _ = counter;
+    const t = f.theme;
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Kit widgets.", .{ .size = 20 }),
+        zigui.col(.{
+            .gap = .sm,
+            .pad = .lg,
+            .bg = t.card,
+            .border = t.border,
+            .radius = t.radius,
+        }, &.{
+            zigui.text("Card", .{ .size = 16, .weight = .semi_bold }),
+            zigui.text("A surface grouping content.", .{ .size = 13, .muted = true }),
+            zigui.separator(.horizontal),
+            zigui.text("Same renderer as desktop.", .{ .size = 13 }),
+        }),
+        zigui.button("Open dialog", .{ .on_click = zigui.on(Counter, open_dialog) }),
+        zigui.button("Open sheet", .{ .on_click = zigui.on(Counter, open_sheet) }),
+        zigui.button("Show toast", .{ .on_click = zigui.on(Counter, show_toast) }),
     });
 }
 
