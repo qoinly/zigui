@@ -78,6 +78,7 @@ var state: Counter = .{};
 var nav: zigui.NavStack = .{};
 var list_scroll: zigui.ScrollState = .{};
 var field: zigui.TextField = .{};
+var onboarding: zigui.CarouselState = .{};
 
 fn focus_field(c: *Counter) void {
     c.focus = 1;
@@ -356,11 +357,52 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     zigui.napi.display.keep_awake(counter.awake);
     zigui.napi.display.immersive(counter.immersive);
 
+    // The onboarding carousel is full-screen (no app-bar): swipe or Next across the
+    // slides, Skip / Finish leave it.
+    if (std.mem.eql(u8, nav.current(), "splash")) {
+        return zigui.carousel(f, Counter, &onboarding, counter, .{
+            .count = 3,
+            .on_skip = zigui.on(Counter, leave_splash),
+            .on_finish = zigui.on(Counter, leave_splash),
+        }, splash_slide);
+    }
     // nav_page renders the current page, or slides the two pages during a push/pop.
     const page = zigui.nav_page(f, Counter, &nav, counter, dispatch);
     return zigui.col(.{}, &.{
         zigui.app_bar(nav.current_title(), .{ .show_back = nav.depth > 1 }),
         page,
+    });
+}
+
+fn open_splash(c: *Counter) void {
+    _ = c;
+    onboarding.index = 0;
+    nav.push("splash", "Onboarding");
+}
+fn leave_splash(c: *Counter) void {
+    _ = c;
+    nav.go("home", "Home"); // skip / finish: reset to the home root
+}
+
+// One onboarding slide; the carousel calls this for each i in 0..count.
+fn splash_slide(f: *zigui.Frame, counter: *Counter, i: usize) *zigui.Node {
+    _ = f;
+    _ = counter;
+    const titles = [_][]const u8{ "Welcome to zigui", "GPU-rendered", "One kit, every platform" };
+    const bodies = [_][]const u8{
+        "A Zig immediate-mode GUI toolkit.",
+        "Vulkan / Metal / D3D11 - blazing fast.",
+        "Desktop and Android from the same code.",
+    };
+    return zigui.col(.{
+        .pad = .lg,
+        .gap = .md,
+        .grow = 1,
+        .justify = .center,
+        .cross = .center,
+    }, &.{
+        zigui.text(titles[i], .{ .size = 26, .weight = .semi_bold }),
+        zigui.text(bodies[i], .{ .size = 15, .muted = true }),
     });
 }
 
@@ -416,6 +458,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Notif listener", .{ .on_click = zigui.on(Counter, open_notif) }),
         zigui.button("Broadcasts", .{ .on_click = zigui.on(Counter, open_bc) }),
         zigui.button("Kit UI", .{ .on_click = zigui.on(Counter, open_kit) }),
+        zigui.button("Onboarding", .{ .on_click = zigui.on(Counter, open_splash) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
