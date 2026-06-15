@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.provider.Telephony;
+import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -27,6 +28,7 @@ import android.window.OnBackInvokedDispatcher;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 
 // zigui's shipped activity shell. A thin shim over NativeActivity: the superclass
 // still loads the native library and runs the exported ANativeActivity_onCreate, so
@@ -341,6 +343,28 @@ public class ZiguiActivity extends NativeActivity {
             cur.close();
         }
         return sb.toString();
+    }
+
+    // native sms.send() calls here: hand the message to SmsManager, dividing a long
+    // body into multipart parts. An ungranted SEND_SMS (or any send failure) is
+    // swallowed - the native side treats send as fire-and-forget.
+    public void smsSend(String address, String body) {
+        SmsManager sms = Build.VERSION.SDK_INT >= 31
+            ? getSystemService(SmsManager.class)
+            : SmsManager.getDefault();
+        if (sms == null) {
+            return;
+        }
+        try {
+            ArrayList<String> parts = sms.divideMessage(body);
+            if (parts.size() > 1) {
+                sms.sendMultipartTextMessage(address, null, parts, null, null);
+            } else {
+                sms.sendTextMessage(address, null, body, null, null);
+            }
+        } catch (Exception e) {
+            // SEND_SMS not granted, or the send failed
+        }
     }
 
     private native void nativeOnText(String text, int caret);
