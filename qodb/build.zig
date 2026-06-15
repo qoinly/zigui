@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const qodb = b.addModule("qodb", .{
-        .root_source_file = b.path("src/qodb.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
