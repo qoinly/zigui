@@ -37,16 +37,18 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
     }
     zigui.napi.display.keep_awake(app.awake); // re-asserted each frame; the backend dedupes
 
-    const route = nav.current();
-    const page = if (std.mem.eql(u8, route, "detail"))
-        detail_page(f)
-    else
-        home_page(f, app);
-
+    // nav_page renders the current page, or slides the two pages during a push/pop.
+    const page = zigui.nav_page(f, App, &nav, app, dispatch);
     return zigui.col(.{}, &.{
         zigui.app_bar(nav.current_title(), .{ .show_back = nav.depth > 1 }),
         page,
     });
+}
+
+// The route -> page dispatch; nav_page calls it (twice during a slide, once otherwise).
+fn dispatch(f: *zigui.Frame, app: *App, route: []const u8) *zigui.Node {
+    if (std.mem.eql(u8, route, "detail")) return detail_page(f);
+    return home_page(f, app);
 }
 
 fn home_page(f: *zigui.Frame, app: *App) *zigui.Node {

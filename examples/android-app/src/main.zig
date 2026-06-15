@@ -266,26 +266,23 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     zigui.napi.display.keep_awake(counter.awake);
     zigui.napi.display.immersive(counter.immersive);
 
-    const route = nav.current();
-    const page = if (std.mem.eql(u8, route, "detail"))
-        detail_page(f)
-    else if (std.mem.eql(u8, route, "frame"))
-        frame_page(f)
-    else if (std.mem.eql(u8, route, "native"))
-        native_page(f, counter)
-    else if (std.mem.eql(u8, route, "a11y"))
-        a11y_page(f, counter)
-    else if (std.mem.eql(u8, route, "notif"))
-        notif_page(f, counter)
-    else if (std.mem.eql(u8, route, "bc"))
-        bc_page(f, counter)
-    else
-        home_page(f, counter);
-
+    // nav_page renders the current page, or slides the two pages during a push/pop.
+    const page = zigui.nav_page(f, Counter, &nav, counter, dispatch);
     return zigui.col(.{}, &.{
         zigui.app_bar(nav.current_title(), .{ .show_back = nav.depth > 1 }),
         page,
     });
+}
+
+// The route -> page dispatch; nav_page calls it (twice during a slide, once otherwise).
+fn dispatch(f: *zigui.Frame, counter: *Counter, route: []const u8) *zigui.Node {
+    if (std.mem.eql(u8, route, "detail")) return detail_page(f);
+    if (std.mem.eql(u8, route, "frame")) return frame_page(f);
+    if (std.mem.eql(u8, route, "native")) return native_page(f, counter);
+    if (std.mem.eql(u8, route, "a11y")) return a11y_page(f, counter);
+    if (std.mem.eql(u8, route, "notif")) return notif_page(f, counter);
+    if (std.mem.eql(u8, route, "bc")) return bc_page(f, counter);
+    return home_page(f, counter);
 }
 
 fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
