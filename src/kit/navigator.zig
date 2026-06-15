@@ -50,6 +50,22 @@ pub const NavStack = struct {
     result_out_len: usize = 0,
     result_out_valid: bool = false,
 
+    // Slide transition: a brief animated push/pop. `top` is always the destination;
+    // these hold the OTHER page (push: the parent left behind; pop: the popped page)
+    // so the navigator can build both during the slide. All inline - no allocation.
+    trans_active: bool = false,
+    trans_pop: bool = false, // direction: false = push (new slides in from the right)
+    trans_start: f64 = -1, // paint.now_s when the slide began; < 0 = not yet stamped
+    trans_route: [ROUTE_MAX]u8 = undefined,
+    trans_route_len: usize = 0,
+    trans_title: [ROUTE_MAX]u8 = undefined,
+    trans_title_len: usize = 0,
+    trans_args: [ARG_MAX]u8 = undefined,
+    trans_arg_len: usize = 0,
+    // While true, current()/current_title()/current_args() return the transition's
+    // from-page; the navigator flips it around building the leaving page.
+    build_from: bool = false,
+
     // Flat replace (reset to a single root entry), the showcase's go(section). A
     // reseeded root has no parent to receive a result, so any pending one is dropped.
     pub fn go(self: *NavStack, route: []const u8, title: []const u8) void {
@@ -57,6 +73,8 @@ pub const NavStack = struct {
         std.debug.assert(title.len > 0);
         self.depth = 0;
         self.result_out_valid = false;
+        self.trans_active = false; // a flat replace cancels any mid-flight slide
+        self.build_from = false;
         self.push(route, title);
         std.debug.assert(self.depth == 1); // go always leaves exactly the root
     }
@@ -80,6 +98,7 @@ pub const NavStack = struct {
         std.debug.assert(title.len > 0);
         std.debug.assert(data.len <= ARG_MAX); // a payload must fit the entry
         if (self.depth >= DEPTH_MAX) return;
+        if (self.depth >= 1) self.begin_transition(false); // slide the new page in
         set_str(&self.routes[self.depth], &self.route_lens[self.depth], route);
         set_str(&self.titles[self.depth], &self.title_lens[self.depth], title);
         store_bytes(&self.args[self.depth], &self.arg_lens[self.depth], data);
@@ -94,6 +113,7 @@ pub const NavStack = struct {
         std.debug.assert(self.depth <= DEPTH_MAX); // the stack never overflows its storage
         const before = self.depth;
         if (self.depth > 1) {
+            self.begin_transition(true); // slide the popped page out
             const top = self.depth - 1;
             if (self.result_lens[top] > 0) {
                 const staged = self.results[top][0..self.result_lens[top]];
@@ -125,6 +145,7 @@ pub const NavStack = struct {
 
     pub fn current(self: *const NavStack) []const u8 {
         std.debug.assert(self.depth <= DEPTH_MAX);
+        if (self.build_from and self.trans_active) return self.trans_route[0..self.trans_route_len];
         if (self.depth == 0) return "";
         const i = self.depth - 1;
         std.debug.assert(self.route_lens[i] <= ROUTE_MAX); // the slice stays inside the entry
@@ -133,6 +154,7 @@ pub const NavStack = struct {
 
     pub fn current_title(self: *const NavStack) []const u8 {
         std.debug.assert(self.depth <= DEPTH_MAX);
+        if (self.build_from and self.trans_active) return self.trans_title[0..self.trans_title_len];
         if (self.depth == 0) return "";
         const i = self.depth - 1;
         std.debug.assert(self.title_lens[i] <= ROUTE_MAX);
@@ -142,10 +164,24 @@ pub const NavStack = struct {
     // The forward payload the current page was pushed with (its intent extras).
     pub fn current_args(self: *const NavStack) []const u8 {
         std.debug.assert(self.depth <= DEPTH_MAX);
+        if (self.build_from and self.trans_active) return self.trans_args[0..self.trans_arg_len];
         if (self.depth == 0) return "";
         const i = self.depth - 1;
         std.debug.assert(self.arg_lens[i] <= ARG_MAX);
         return self.args[i][0..self.arg_lens[i]];
+    }
+
+    // Capture the live top as the transition's from-page (push: the parent being left;
+    // pop: the page being popped), so the navigator can build both during the slide.
+    fn begin_transition(self: *NavStack, is_pop: bool) void {
+        std.debug.assert(self.depth > 0); // a transition captures a live page
+        const i = self.depth - 1;
+        self.trans_active = true;
+        self.trans_pop = is_pop;
+        self.trans_start = -1; // stamped on the first render frame
+        set_str(&self.trans_route, &self.trans_route_len, self.routes[i][0..self.route_lens[i]]);
+        set_str(&self.trans_title, &self.trans_title_len, self.titles[i][0..self.title_lens[i]]);
+        store_bytes(&self.trans_args, &self.trans_arg_len, self.args[i][0..self.arg_lens[i]]);
     }
 };
 

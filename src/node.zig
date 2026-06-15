@@ -88,6 +88,10 @@ pub const Node = struct {
     // A scroll viewport: clips its child to its box and offsets it by state.y.
     scroll: ?*ScrollState = null,
     scroll_bar: ScrollBar = .hidden,
+    // A slide viewport (the navigator page transition): clips its children to its box
+    // and offsets them horizontally by slide_px. The children are a row of full-width
+    // pages, so a negative slide_px reveals the next page. null = not a slide.
+    slide_px: ?f32 = null,
     // nil until register; a stray draw before register then reads benign-empty
     // bounds instead of UB.
     id: LayoutId = LayoutId.nil,
@@ -256,6 +260,34 @@ pub fn scroll(a: A, state: *ScrollState, o: ScrollOpts, child: *Node) *Node {
     });
 }
 
+pub const SlideOpts = struct {
+    // The viewport (page) width: the box clips to it and each child is pinned to it,
+    // so two full-width pages sit side by side.
+    width: f32,
+    // Horizontal offset applied to the children before clipping; 0 shows the first
+    // child, -width shows the second.
+    dx: f32,
+};
+
+// A horizontal slide viewport (the navigator page transition): a row of full-width
+// page children, clipped to a `width`-wide box and offset by `dx`. Each child is
+// pinned to `width` and never shrinks, so two pages line up and dx slides between
+// them. The box fills its height; the row's cross-stretch sizes the pages to it.
+pub fn slide(a: A, o: SlideOpts, kids: []const *Node) *Node {
+    std.debug.assert(o.width > 0); // the clip + the children's pinned width need a real page width
+    std.debug.assert(kids.len == 2); // a slide is exactly the leaving + arriving pages
+    for (kids) |k| {
+        k.style.width = .{ .px = o.width };
+        k.style.flex_shrink = 0;
+    }
+    return make(a, .{
+        .kind = .box,
+        .style = style_of(.{ .grow = 1, .width = o.width }, .row),
+        .slide_px = o.dx,
+        .children = own_kids(a, kids),
+    });
+}
+
 // ---- passes: shape (text intrinsics) -> register (build engine tree) -> draw ----
 // All three recurse over children; each carries a depth bounded by the engine's
 // own cap (release-safe return), single-sourced from layout.MAX_LAYOUT_DEPTH.
@@ -387,7 +419,43 @@ fn draw_tree(
         try draw_scroll(b, eng, theme, n, depth, ox, oy, pc, view, st);
         return;
     }
+    if (n.slide_px) |dx| {
+        const view = [4]f32{ x, y, r.size.width, r.size.height };
+        try draw_slide(b, eng, theme, n, depth, ox, oy, view, dx);
+        return;
+    }
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
+}
+
+// The slide-viewport draw: render the page children translated by dx and clip the
+// primitives they emit to the view box (the draw_scroll pattern, horizontal). Input
+// is suppressed during the slide (pc = null), so a half-slid page is never clickable;
+// the transition is brief and the settled page re-renders with its hitboxes.
+fn draw_slide(
+    b: *RenderBuilder,
+    eng: *LayoutEngine,
+    theme: *const Theme,
+    n: *Node,
+    depth: u32,
+    ox: f32,
+    oy: f32,
+    view: [4]f32,
+    dx: f32,
+) RenderError!void {
+    std.debug.assert(depth <= MAX_DEPTH); // the cap draw_tree relies on, before recursing
+    std.debug.assert(n.children.len == 2); // a slide is always the two pages
+    std.debug.assert(view[2] >= 0 and view[3] >= 0); // the clip box never has negative extent
+    const prim0 = b.prims.items.len;
+    const spr0 = b.sprites.items.len;
+    const cspr0 = b.color_sprites.items.len;
+    for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox + dx, oy, null);
+    for (b.prims.items[prim0..]) |*p| switch (p.*) {
+        inline else => |*v| {
+            v.clip_bounds = clip_isect(v.clip_bounds, view);
+        },
+    };
+    for (b.sprites.items[spr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
+    for (b.color_sprites.items[cspr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
 }
 
 fn clip_isect(a: [4]f32, c: [4]f32) [4]f32 {
@@ -412,6 +480,7 @@ fn draw_scroll(
     view: [4]f32,
     st: *ScrollState,
 ) RenderError!void {
+    std.debug.assert(depth <= MAX_DEPTH); // the cap draw_tree relies on, before recursing
     std.debug.assert(n.children.len == 1);
     const vw = view[2];
     const vh = view[3];
