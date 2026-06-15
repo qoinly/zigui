@@ -47,7 +47,7 @@ pub const App = struct {
     // the buffer it fills).
     notif: [256]u8 = undefined,
     notif_len: usize = 0,
-    // The last broadcast received, "action\tpayload", kept across frames.
+    // The last broadcast, flattened to "action key=val ...", kept across frames.
     bc: [256]u8 = undefined,
     bc_len: usize = 0,
     // The inbox read-out, "address\tbody\n...", kept across frames (read() borrows
@@ -118,8 +118,8 @@ pub const App = struct {
         if (zigui.napi.notification_listener.take(&app.notif)) |n| {
             app.notif_len = n.len;
         }
-        if (zigui.napi.broadcast.take(&app.bc)) |b| {
-            app.bc_len = b.len;
+        if (zigui.napi.broadcast.take()) |b| {
+            app.bc_len = flatten_broadcast(&app.bc, b);
         }
         if (zigui.napi.accessibility.take_event(&app.a11y_event)) |e| {
             app.a11y_event_len = e.len;
@@ -131,3 +131,22 @@ pub const App = struct {
 // The modal + non-modal layers run/main passes alongside the body.
 pub const overlay_view = overlay.view;
 pub const hud_view = @import("scaffold/hud.zig").view;
+
+// Flatten a broadcast (action + key=value extras) into buf as "action key=val ...".
+// Shared by the foreground take() drain above and the headless log.
+pub fn flatten_broadcast(buf: []u8, b: zigui.napi.broadcast.Broadcast) usize {
+    var n = copy(buf, b.action);
+    for (b.extras) |kv| {
+        n += copy(buf[n..], " ");
+        n += copy(buf[n..], kv.key);
+        n += copy(buf[n..], "=");
+        n += copy(buf[n..], kv.value);
+    }
+    return n;
+}
+
+fn copy(dst: []u8, src: []const u8) usize {
+    const k = @min(dst.len, src.len);
+    @memcpy(dst[0..k], src[0..k]);
+    return k;
+}

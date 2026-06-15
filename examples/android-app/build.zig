@@ -20,5 +20,6 @@ pub fn build(b: *std.Build) void {
         .out_name = "zigui-android-app.apk",
         .include_accessibility = true,
         .include_notification_listener = true,
+        .include_broadcast_receiver = true,
     });
 }

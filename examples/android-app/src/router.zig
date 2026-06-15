@@ -12,6 +12,7 @@ const notif = @import("pages/notif.zig");
 const broadcasts = @import("pages/broadcasts.zig");
 const kit = @import("pages/kit.zig");
 const background = @import("pages/background.zig");
+const headless = @import("pages/headless.zig");
 
 // Dispatch by the nav stack's current route; nav_page calls this (twice during a
 // slide, once otherwise). An unknown route falls through to the home root.
@@ -25,5 +26,6 @@ pub fn dispatch(f: *Frame, app: *App, route: []const u8) *Node {
     if (eql(u8, route, "bc")) return broadcasts.view(f, app);
     if (eql(u8, route, "kit")) return kit.view(f, app);
     if (eql(u8, route, "work")) return background.view(f, app);
+    if (eql(u8, route, "headless")) return headless.view(f, app);
     return home.view(f, app);
 }
