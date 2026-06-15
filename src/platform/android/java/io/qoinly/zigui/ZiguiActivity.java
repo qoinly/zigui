@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
@@ -303,6 +304,41 @@ public class ZiguiActivity extends NativeActivity {
                 sb.append('\n');
             }
             sb.append(key).append('=').append(String.valueOf(v));
+        }
+        return sb.toString();
+    }
+
+    // native sms.read() calls here: query the inbox for the most recent messages as
+    // "address\tbody" lines (Cursor handling is far simpler in Java than over JNI).
+    // An ungranted READ_SMS makes query throw SecurityException; that, and any other
+    // failure, comes back as an empty string.
+    private static final int SMS_MAX_ROWS = 20;
+
+    public String smsRead() {
+        Cursor cur;
+        try {
+            cur = getContentResolver().query(
+                Uri.parse("content://sms/inbox"),
+                new String[] {"address", "body"},
+                null, null, "date DESC");
+        } catch (SecurityException e) {
+            return ""; // READ_SMS not granted
+        }
+        if (cur == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        try {
+            int rows = 0;
+            while (rows < SMS_MAX_ROWS && cur.moveToNext()) {
+                sb.append(cur.getString(0)).append('\t')
+                  .append(cur.getString(1)).append('\n');
+                rows++;
+            }
+        } catch (Exception e) {
+            return "";
+        } finally {
+            cur.close();
         }
         return sb.toString();
     }
