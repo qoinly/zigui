@@ -62,6 +62,8 @@ const RelStrUTFFn = *const fn (JNIEnv, jobject, [*:0]const u8) callconv(.c) void
 // A String[] for requestPermissions: allocate, then set each element.
 const NewObjectArrayFn = *const fn (JNIEnv, jint, jclass, jobject) callconv(.c) jobject;
 const SetObjectArrayElementFn = *const fn (JNIEnv, jobject, jint, jobject) callconv(.c) void;
+const GetArrayLengthFn = *const fn (JNIEnv, jobject) callconv(.c) jint;
+const GetObjectArrayElementFn = *const fn (JNIEnv, jobject, jint) callconv(.c) jobject;
 
 // Slot offsets are from jni.h's JNINativeInterface_; the padding-run lengths are
 // the gaps (in pointer-sized slots) between the entries we use.
@@ -113,9 +115,9 @@ pub const JNINativeInterface = extern struct {
     _r16: [1]?*const anyopaque, // 168: GetStringUTFLength
     GetStringUTFChars: GetStrUTFFn, // 169
     ReleaseStringUTFChars: RelStrUTFFn, // 170
-    _r17: [1]?*const anyopaque, // 171: GetArrayLength
+    GetArrayLength: GetArrayLengthFn, // 171
     NewObjectArray: NewObjectArrayFn, // 172
-    _r18: [1]?*const anyopaque, // 173: GetObjectArrayElement
+    GetObjectArrayElement: GetObjectArrayElementFn, // 173
     SetObjectArrayElement: SetObjectArrayElementFn, // 174
 };
 
@@ -125,10 +127,14 @@ pub const JNINativeInterface = extern struct {
 // activity object - both on that same thread.
 var g_env: ?JNIEnv = null;
 var g_activity: jobject = null;
+// Recorded on the UI thread so napi can refuse calls from a worker / headless thread,
+// where g_env is the wrong thread's JNIEnv (using it cross-thread is undefined).
+var g_ui_tid: std.Thread.Id = 0;
 
 pub fn set_thread(env_ptr: ?*anyopaque, activity_obj: jobject) void {
     g_env = if (env_ptr) |p| @ptrCast(@alignCast(p)) else null;
     g_activity = activity_obj;
+    g_ui_tid = std.Thread.getCurrentId();
 }
 
 pub fn thread_env() ?JNIEnv {
@@ -137,6 +143,10 @@ pub fn thread_env() ?JNIEnv {
 
 pub fn thread_activity() jobject {
     return g_activity;
+}
+
+pub fn on_ui_thread() bool {
+    return std.Thread.getCurrentId() == g_ui_tid;
 }
 
 // libjnigraphics (a public NDK library): locks a Bitmap's pixels for direct

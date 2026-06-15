@@ -10,6 +10,7 @@ const notif = @import("notif.zig");
 const broadcasts = @import("broadcasts.zig");
 const kit = @import("kit.zig");
 const background = @import("background.zig");
+const headless = @import("headless.zig");
 const onboarding = @import("onboarding.zig");
 
 // A tap adds a dot, capped so the row never overflows the surface. With no font the
@@ -75,6 +76,7 @@ pub fn view(f: *Frame, app: *App) *Node {
         zigui.button("Broadcasts", .{ .on_click = zigui.on(App, broadcasts.open) }),
         zigui.button("Kit UI", .{ .on_click = zigui.on(App, kit.open) }),
         zigui.button("Background", .{ .on_click = zigui.on(App, background.open) }),
+        zigui.button("Headless", .{ .on_click = zigui.on(App, headless.open) }),
         zigui.button("Onboarding", .{ .on_click = zigui.on(App, onboarding.open) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(App, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(App, toggle_immersive) }),

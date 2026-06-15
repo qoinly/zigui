@@ -118,6 +118,8 @@ What works:
   battery and connectivity, brightness and orientation, links and share, file
   picker, biometric prompt, accessibility, notification listener, broadcasts, and
   SMS) reaches the platform through a shipped Java shell - the app writes no Java.
+  Plus off-UI-thread background work and headless background events (a Zig handler
+  runs on a notification or a manifest broadcast even when the app is closed).
 
 ## Limitations
 

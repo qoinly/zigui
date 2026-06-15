@@ -14,9 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
-import android.provider.Telephony;
 import android.telephony.SmsManager;
-import android.telephony.SmsMessage;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
@@ -239,7 +237,7 @@ public class ZiguiActivity extends NativeActivity {
     private final BroadcastReceiver bcReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
-            nativeOnBroadcast(intent.getAction(), broadcastPayload(intent));
+            nativeOnBroadcast(intent.getAction(), ZiguiBroadcast.decode(intent));
         }
     };
     private IntentFilter bcFilter;
@@ -269,49 +267,6 @@ public class ZiguiActivity extends NativeActivity {
                 bcRegistered = true;
             }
         });
-    }
-
-    // The payload native receives alongside the action. SMS is decoded to
-    // "sender\tbody"; any other broadcast gets a best-effort "key=value" dump of its
-    // simple extras (empty when there are none). Extraction is a primitive, not a
-    // decision - the app reacts in Zig.
-    private static String broadcastPayload(Intent intent) {
-        if (Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) {
-            return smsPayload(intent);
-        }
-        return genericExtras(intent);
-    }
-
-    private static String smsPayload(Intent intent) {
-        SmsMessage[] msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent);
-        if (msgs == null || msgs.length == 0) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append(msgs[0].getOriginatingAddress()).append('\t');
-        for (SmsMessage m : msgs) {
-            sb.append(m.getMessageBody()); // concatenate a multipart message
-        }
-        return sb.toString();
-    }
-
-    private static String genericExtras(Intent intent) {
-        Bundle extras = intent.getExtras();
-        if (extras == null) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (String key : extras.keySet()) {
-            Object v = extras.get(key);
-            if (v == null) {
-                continue;
-            }
-            if (sb.length() > 0) {
-                sb.append('\n');
-            }
-            sb.append(key).append('=').append(String.valueOf(v));
-        }
-        return sb.toString();
     }
 
     // native sms.read() calls here: query the inbox for the most recent messages as
@@ -379,5 +334,5 @@ public class ZiguiActivity extends NativeActivity {
 
     private native void nativeOnBiometric(int result);
 
-    private native void nativeOnBroadcast(String action, String payload);
+    private native void nativeOnBroadcast(String action, String[] kv);
 }

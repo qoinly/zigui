@@ -10,8 +10,17 @@
 const zigui = @import("zigui");
 const app = @import("app.zig");
 const App = app.App;
+const headless_page = @import("pages/headless.zig");
 
 var state: App = .{};
+
+// zigui calls this for a notification / broadcast even when the app is not foreground
+// (Android cold-starts the process if needed). It runs on the binder/receiver thread
+// with no render loop - pure Zig over the decoded payload, no napi. Discovered at
+// comptime (the @import("root") bridge), so it works whether or not main() ran.
+pub fn on_background_event(ev: zigui.BackgroundEvent) void {
+    headless_page.on_event(ev);
+}
 
 pub fn main() !void {
     var window = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });

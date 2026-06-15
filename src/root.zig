@@ -88,6 +88,12 @@ pub const napi = @import("napi/root.zig");
 pub const background = @import("background.zig");
 pub const Task = background.Task;
 
+// Headless background events. An app defines `pub fn on_background_event(ev:
+// zigui.BackgroundEvent) void` in its root to handle a notification / broadcast with
+// no foreground (Android delivers these even when the app is not running). The domain
+// lives under napi because on Android its events come entirely through native APIs.
+pub const BackgroundEvent = napi.headless.BackgroundEvent;
+
 pub const theme = @import("theme.zig");
 pub const Spacing = theme.Spacing;
 pub const Breakpoint = theme.Breakpoint;

@@ -78,6 +78,7 @@ them), aligns, and signs.
 | `min_api` | `26` | the minimum API |
 | `include_accessibility` | `false` | dex the accessibility service + its config resource |
 | `include_notification_listener` | `false` | dex the notification-listener service |
+| `include_broadcast_receiver` | `false` | dex the static broadcast receiver (headless broadcasts) |
 
 ### Manifest
 
@@ -163,12 +164,89 @@ lookup fails, so a call is never a crash:
 | `napi.biometric` | the biometric prompt |
 | `napi.accessibility` | gesture injection, screen read, a11y-event subscription |
 | `napi.notification_listener` | observe posted notifications |
-| `napi.broadcast` | subscribe to system broadcasts (SMS received, screen, ...) |
+| `napi.broadcast` | subscribe to system broadcasts; `take()` yields `Broadcast{action, extras}` |
 | `napi.sms` | read the inbox, send a message |
 
 The async results (a picked file, a biometric outcome, a forwarded notification)
 are read once per frame through a `take_*` poll, so a view stays a pure function of
-state.
+state. `napi.broadcast.take()` returns a `Broadcast{ action, extras: []const
+KeyValue }`: a broadcast can carry many extras (battery state has ~15), SMS is
+decoded to `address`/`body` pairs, and the data URI rides as `data`.
+
+## Background work
+
+Run a heavy job off the UI thread so it never holds a frame. The result rides the
+same poll the napi sinks use - a worker writes it into a caller-owned `Task`, and a
+view reads it once with `poll`:
+
+```zig
+var job: zigui.Task(u64) = .{}; // caller-owned, lives in app state
+
+fn start(app: *App) void {
+    if (job.busy()) return;
+    // work: fn(*App, *const zigui.background.Cancel) ?u64 (null = cancelled)
+    zigui.background.submit(&job, app, work);
+}
+
+fn render(f: *zigui.Frame, app: *App) *zigui.Node {
+    if (job.poll()) |result| { _ = result; } // once, the frame the job finished
+    // ...
+}
+```
+
+A job runs on its own thread (concurrency is capped; past the cap it runs inline),
+and a finished job nudges the loop to render so the poll fires. `request_cancel`
+sets a cooperative flag the job checks. The contract: a job is pure Zig / syscalls /
+sockets - it must NOT call `napi.*`. Off the UI thread napi refuses the call (a
+one-time logcat warning and a no-op), so a stray call degrades safely instead of
+touching a wrong-thread JNIEnv. The desktop idle-loop wake is a follow-up; the Android
+vsync loop needs none.
+
+## Background events (headless)
+
+Android delivers some events even when the app is not foreground - a posted
+notification, or a broadcast the app declares in its manifest (the system
+cold-starts the process to deliver). Define `on_background_event` in your root and
+zigui calls it with the decoded event, on the delivering thread, with no render loop:
+
+```zig
+pub fn on_background_event(ev: zigui.BackgroundEvent) void {
+    switch (ev) {
+        .notification => |n| log(n.package, n.title, n.text),
+        .broadcast => |b| {
+            // b.action, plus b.extras (e.g. address= / body= for SMS)
+            for (b.extras) |kv| store(kv.key, kv.value);
+        },
+    }
+}
+```
+
+The entry is comptime-discovered (the same bridge as `main`), so it resolves whether
+or not `main` ran - the cold-start case where no runtime registration could have
+happened. The handler is pure Zig over a decoded, borrowed payload (copy what you
+keep); like a background job it must not call `napi.*`.
+
+Notifications arrive once the listener is enabled. A broadcast runs headless only
+through a manifest-declared receiver (the runtime `napi.broadcast.subscribe` path
+delivers only while the process is alive):
+
+```zig
+zigui.androidApk(b, .{ .include_broadcast_receiver = true /* ... */ });
+```
+
+```xml
+<receiver android:name="io.qoinly.zigui.ZiguiBroadcastReceiver" android:exported="true">
+    <intent-filter>
+        <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+    </intent-filter>
+    <meta-data android:name="android.app.lib_name" android:value="my_app" />
+</receiver>
+```
+
+Since API 26 only an allowlist of broadcasts may start a manifest receiver
+(`SMS_RECEIVED`, `BOOT_COMPLETED`, ...). A cold start reaches a naturally-killed /
+cached process, but NOT one the user force-stopped - Android's stopped-state rule
+withholds broadcasts from it until the user relaunches.
 
 ## Optional services
 

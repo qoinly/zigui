@@ -11,8 +11,8 @@
 // the work returns. This suits heavy-but-occasional GUI work, not a fire-hose.
 //
 // Contract: a job is pure Zig / syscalls / sockets. It must NOT call zigui.napi.*
-// (JNI is bound to the UI thread; off-thread it no-ops). A result that needs a JNI
-// call is handed back first, then made on the UI thread.
+// (JNI is bound to the UI thread; off it, napi refuses the call - a warn-once + no-op).
+// A result that needs a JNI call is handed back first, then made on the UI thread.
 
 const std = @import("std");
 
