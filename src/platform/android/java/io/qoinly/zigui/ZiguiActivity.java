@@ -1,9 +1,11 @@
 package io.qoinly.zigui;
 
 import android.app.NativeActivity;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.hardware.biometrics.BiometricPrompt;
@@ -11,6 +13,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
+import android.provider.Telephony;
+import android.telephony.SmsMessage;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
@@ -222,6 +226,87 @@ public class ZiguiActivity extends NativeActivity {
         return ZiguiNotificationListenerService.isEnabled();
     }
 
+    // Broadcast subscription: one context-registered receiver, its filter growing as
+    // native subscribes actions. onReceive runs on the main thread (no Handler given),
+    // so the native forward is on the same thread the kit polls from.
+    private final BroadcastReceiver bcReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            nativeOnBroadcast(intent.getAction(), broadcastPayload(intent));
+        }
+    };
+    private IntentFilter bcFilter;
+    private boolean bcRegistered;
+
+    public void broadcastSubscribe(final String action) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                if (bcFilter == null) {
+                    bcFilter = new IntentFilter();
+                }
+                bcFilter.addAction(action);
+                if (bcRegistered) {
+                    unregisterReceiver(bcReceiver);
+                }
+                // RECEIVER_EXPORTED, not NOT_EXPORTED: some system broadcasts come
+                // from a process other than system_server (SMS_RECEIVED is sent by
+                // the phone process), and NOT_EXPORTED drops those. Protected system
+                // broadcasts cannot be forged by other apps, so this is safe; an app
+                // subscribing to a custom (non-protected) action should know other
+                // apps could then trigger it.
+                if (Build.VERSION.SDK_INT >= 33) {
+                    registerReceiver(bcReceiver, bcFilter, Context.RECEIVER_EXPORTED);
+                } else {
+                    registerReceiver(bcReceiver, bcFilter);
+                }
+                bcRegistered = true;
+            }
+        });
+    }
+
+    // The payload native receives alongside the action. SMS is decoded to
+    // "sender\tbody"; any other broadcast gets a best-effort "key=value" dump of its
+    // simple extras (empty when there are none). Extraction is a primitive, not a
+    // decision - the app reacts in Zig.
+    private static String broadcastPayload(Intent intent) {
+        if (Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) {
+            return smsPayload(intent);
+        }
+        return genericExtras(intent);
+    }
+
+    private static String smsPayload(Intent intent) {
+        SmsMessage[] msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent);
+        if (msgs == null || msgs.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(msgs[0].getOriginatingAddress()).append('\t');
+        for (SmsMessage m : msgs) {
+            sb.append(m.getMessageBody()); // concatenate a multipart message
+        }
+        return sb.toString();
+    }
+
+    private static String genericExtras(Intent intent) {
+        Bundle extras = intent.getExtras();
+        if (extras == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String key : extras.keySet()) {
+            Object v = extras.get(key);
+            if (v == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(key).append('=').append(String.valueOf(v));
+        }
+        return sb.toString();
+    }
+
     private native void nativeOnText(String text, int caret);
 
     private native boolean nativeOnBack();
@@ -229,4 +314,6 @@ public class ZiguiActivity extends NativeActivity {
     private native void nativeOnFile(String content);
 
     private native void nativeOnBiometric(int result);
+
+    private native void nativeOnBroadcast(String action, String payload);
 }

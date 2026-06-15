@@ -35,9 +35,13 @@ const Counter = struct {
     // the buffer it fills).
     notif: [256]u8 = undefined,
     notif_len: usize = 0,
+    // The last broadcast received, "action\tpayload", kept across frames.
+    bc: [256]u8 = undefined,
+    bc_len: usize = 0,
 };
 
 const CAMERA = "android.permission.CAMERA";
+const RECEIVE_SMS = "android.permission.RECEIVE_SMS";
 
 fn do_pick_file(c: *Counter) void {
     _ = c;
@@ -178,6 +182,20 @@ fn do_notif_post(c: *Counter) void {
     zigui.napi.notifications.post("zigui", "hello from the listener demo");
 }
 
+fn open_bc(c: *Counter) void {
+    _ = c;
+    nav.push("bc", "Broadcasts");
+}
+// Subscribe to a system broadcast (screen on/off, no payload) and SMS (decoded
+// payload, needs the runtime RECEIVE_SMS permission).
+fn do_bc_subscribe(c: *Counter) void {
+    _ = c;
+    if (!zigui.napi.permissions.granted(RECEIVE_SMS)) zigui.napi.permissions.request(RECEIVE_SMS);
+    zigui.napi.broadcast.subscribe("android.intent.action.SCREEN_ON");
+    zigui.napi.broadcast.subscribe("android.intent.action.SCREEN_OFF");
+    zigui.napi.broadcast.subscribe("android.provider.Telephony.SMS_RECEIVED");
+}
+
 pub fn main() !void {
     var app = try zigui.App.init(.{ .title = "zigui", .size = .{ 400, 800 } });
     try app.run(&state, .{ .body = render });
@@ -207,6 +225,9 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     if (zigui.napi.notification_listener.take(&counter.notif)) |n| { // a notification arrived
         counter.notif_len = n.len;
     }
+    if (zigui.napi.broadcast.take(&counter.bc)) |b| { // a subscribed broadcast arrived
+        counter.bc_len = b.len;
+    }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
     // two live toggles below.
@@ -225,6 +246,8 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         a11y_page(f, counter)
     else if (std.mem.eql(u8, route, "notif"))
         notif_page(f, counter)
+    else if (std.mem.eql(u8, route, "bc"))
+        bc_page(f, counter)
     else
         home_page(f, counter);
 
@@ -272,6 +295,7 @@ fn home_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Native APIs", .{ .on_click = zigui.on(Counter, open_native) }),
         zigui.button("Accessibility", .{ .on_click = zigui.on(Counter, open_a11y) }),
         zigui.button("Notif listener", .{ .on_click = zigui.on(Counter, open_notif) }),
+        zigui.button("Broadcasts", .{ .on_click = zigui.on(Counter, open_bc) }),
         zigui.button(awake_label, .{ .on_click = zigui.on(Counter, toggle_awake) }),
         zigui.button(imm_label, .{ .on_click = zigui.on(Counter, toggle_immersive) }),
         zigui.text(note, .{ .size = 16 }),
@@ -374,6 +398,23 @@ fn notif_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         zigui.button("Post test notif", .{ .on_click = zigui.on(Counter, do_notif_post) }),
         zigui.text("Latest:", .{ .size = 14 }),
         zigui.text(latest, .{ .size = 12 }),
+    });
+}
+
+// The broadcast-subscription surface. "Subscribe" registers screen on/off (no
+// payload) + SMS (decoded "sender\tbody"); the last received broadcast shows as
+// "action\tpayload". Trigger screen events with adb keyevent, SMS with emu sms send.
+fn bc_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
+    _ = f;
+    const got = counter.bc[0..counter.bc_len];
+    const last = if (counter.bc_len > 0) got else "(none received yet)";
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Broadcasts.", .{ .size = 20 }),
+        zigui.button("Subscribe screen + SMS", .{
+            .on_click = zigui.on(Counter, do_bc_subscribe),
+        }),
+        zigui.text("Last:", .{ .size = 14 }),
+        zigui.text(last, .{ .size = 12 }),
     });
 }
 
