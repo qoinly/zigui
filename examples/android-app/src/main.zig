@@ -31,6 +31,9 @@ const Counter = struct {
     // it fills, so copy it out for the page to show).
     a11y_read: [256]u8 = undefined,
     a11y_read_len: usize = 0,
+    // The last subscribed accessibility event, "type\tpackage\ttext", kept across frames.
+    a11y_event: [256]u8 = undefined,
+    a11y_event_len: usize = 0,
     // The last notification the listener caught, kept across frames (take() borrows
     // the buffer it fills).
     notif: [256]u8 = undefined,
@@ -154,10 +157,6 @@ fn do_a11y_enable(c: *Counter) void {
     _ = c;
     zigui.napi.accessibility.request_enable();
 }
-fn do_a11y_back(c: *Counter) void {
-    _ = c;
-    zigui.napi.accessibility.global_action(.back);
-}
 fn do_a11y_home(c: *Counter) void {
     _ = c;
     zigui.napi.accessibility.global_action(.home);
@@ -172,6 +171,12 @@ fn do_a11y_read(c: *Counter) void {
     if (zigui.napi.accessibility.read(&c.a11y_read)) |tree| {
         c.a11y_read_len = tree.len;
     }
+}
+// Subscribe to window-change + notification events; the service then forwards them.
+fn do_a11y_events(c: *Counter) void {
+    _ = c;
+    zigui.napi.accessibility.subscribe_event(.window_state_changed);
+    zigui.napi.accessibility.subscribe_event(.notification_state_changed);
 }
 
 fn open_notif(c: *Counter) void {
@@ -250,6 +255,9 @@ fn render(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     }
     if (zigui.napi.broadcast.take(&counter.bc)) |b| { // a subscribed broadcast arrived
         counter.bc_len = b.len;
+    }
+    if (zigui.napi.accessibility.take_event(&counter.a11y_event)) |e| { // an a11y event arrived
+        counter.a11y_event_len = e.len;
     }
     // Window properties, re-asserted every frame (the backend hops into the OS
     // only on a change): light status-bar icons over this dark theme, plus the
@@ -393,15 +401,18 @@ fn a11y_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     const status = if (on) "Service: enabled" else "Service: disabled";
     const tree = counter.a11y_read[0..counter.a11y_read_len];
     const read_note = if (counter.a11y_read_len > 0) tree else "(no read yet)";
+    const ev = counter.a11y_event[0..counter.a11y_event_len];
+    const ev_note = if (counter.a11y_event_len > 0) ev else "(no event yet)";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Accessibility.", .{ .size = 20 }),
         zigui.text(status, .{ .size = 16 }),
         zigui.button("Enable service", .{ .on_click = zigui.on(Counter, do_a11y_enable) }),
-        zigui.button("Back action", .{ .on_click = zigui.on(Counter, do_a11y_back) }),
         zigui.button("Home action", .{ .on_click = zigui.on(Counter, do_a11y_home) }),
         zigui.button("Inject swipe", .{ .on_click = zigui.on(Counter, do_a11y_swipe) }),
         zigui.button("Read screen", .{ .on_click = zigui.on(Counter, do_a11y_read) }),
         zigui.text(read_note, .{ .size = 12 }),
+        zigui.button("Subscribe events", .{ .on_click = zigui.on(Counter, do_a11y_events) }),
+        zigui.text(ev_note, .{ .size = 12 }),
     });
 }
 
