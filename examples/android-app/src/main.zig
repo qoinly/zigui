@@ -38,10 +38,15 @@ const Counter = struct {
     // The last broadcast received, "action\tpayload", kept across frames.
     bc: [256]u8 = undefined,
     bc_len: usize = 0,
+    // The inbox read-out, "address\tbody\n...", kept across frames (read() borrows
+    // the buffer it fills).
+    sms: [256]u8 = undefined,
+    sms_len: usize = 0,
 };
 
 const CAMERA = "android.permission.CAMERA";
 const RECEIVE_SMS = "android.permission.RECEIVE_SMS";
+const READ_SMS = "android.permission.READ_SMS";
 
 fn do_pick_file(c: *Counter) void {
     _ = c;
@@ -194,6 +199,14 @@ fn do_bc_subscribe(c: *Counter) void {
     zigui.napi.broadcast.subscribe("android.intent.action.SCREEN_ON");
     zigui.napi.broadcast.subscribe("android.intent.action.SCREEN_OFF");
     zigui.napi.broadcast.subscribe("android.provider.Telephony.SMS_RECEIVED");
+}
+// Read the SMS inbox into the page buffer (READ_SMS, distinct from RECEIVE_SMS).
+fn do_sms_read(c: *Counter) void {
+    if (!zigui.napi.permissions.granted(READ_SMS)) {
+        zigui.napi.permissions.request(READ_SMS);
+        return;
+    }
+    if (zigui.napi.sms.read(&c.sms)) |inbox| c.sms_len = inbox.len;
 }
 
 pub fn main() !void {
@@ -408,6 +421,8 @@ fn bc_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
     _ = f;
     const got = counter.bc[0..counter.bc_len];
     const last = if (counter.bc_len > 0) got else "(none received yet)";
+    const inbox = counter.sms[0..counter.sms_len];
+    const inbox_note = if (counter.sms_len > 0) inbox else "(inbox not read yet)";
     return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
         zigui.text("Broadcasts.", .{ .size = 20 }),
         zigui.button("Subscribe screen + SMS", .{
@@ -415,6 +430,8 @@ fn bc_page(f: *zigui.Frame, counter: *Counter) *zigui.Node {
         }),
         zigui.text("Last:", .{ .size = 14 }),
         zigui.text(last, .{ .size = 12 }),
+        zigui.button("Read SMS inbox", .{ .on_click = zigui.on(Counter, do_sms_read) }),
+        zigui.text(inbox_note, .{ .size = 12 }),
     });
 }
 
