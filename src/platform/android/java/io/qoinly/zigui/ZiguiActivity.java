@@ -223,6 +223,10 @@ public class ZiguiActivity extends NativeActivity {
         return ZiguiAccessibilityService.readScreen();
     }
 
+    public void a11ySubscribeEvent(int type) {
+        ZiguiAccessibilityService.subscribeEvent(type);
+    }
+
     // Notification-listener bridge: native reads connection state through this
     // delegator (the shell forwards posted notifications straight to native).
     public boolean notifEnabled() {

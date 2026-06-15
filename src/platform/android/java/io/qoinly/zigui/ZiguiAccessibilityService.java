@@ -2,21 +2,33 @@ package io.qoinly.zigui;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import java.util.List;
 
 // zigui's shipped accessibility service: a system-bound AccessibilityService that
-// injects gestures (dispatchGesture) and reads the foreground node tree. The native
-// side never names this class - ZiguiActivity delegates to the static instance,
-// keeping the package out of the library. It holds no state beyond the singleton and
-// reacts to no live events; every method no-ops when it is not connected. The shell
-// forwards/exposes primitives, it does not decide - an app's event-driven logic
-// belongs in its own code, not here.
+// injects gestures (dispatchGesture), reads the foreground node tree, and forwards
+// subscribed accessibility events to native. The native side never names this class -
+// ZiguiActivity delegates to the static instance. The shell forwards primitives + the
+// raw event, it does not decide; the app's event-driven logic lives in its own Zig.
+// Events are opt-in (sEventMask, default 0 = forward nothing), so an idle app pays no
+// per-event cost.
 public class ZiguiAccessibilityService extends AccessibilityService {
     private static ZiguiAccessibilityService sInstance;
+    // The OR of the AccessibilityEvent types native subscribed to; 0 forwards nothing.
+    private static volatile int sEventMask;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        loadAppLibrary();
+    }
 
     @Override
     public void onServiceConnected() {
@@ -32,10 +44,51 @@ public class ZiguiAccessibilityService extends AccessibilityService {
     }
 
     @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {}
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        int type = event.getEventType();
+        if ((sEventMask & type) == 0) {
+            return; // not subscribed - forward nothing
+        }
+        CharSequence pkg = event.getPackageName();
+        nativeOnA11yEvent(type, pkg != null ? pkg.toString() : "", eventText(event));
+    }
 
     @Override
     public void onInterrupt() {}
+
+    static void subscribeEvent(int type) {
+        sEventMask |= type;
+    }
+
+    private static String eventText(AccessibilityEvent event) {
+        List<CharSequence> parts = event.getText();
+        if (parts == null || parts.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (CharSequence cs : parts) {
+            if (cs != null) {
+                sb.append(cs);
+            }
+        }
+        return sb.toString();
+    }
+
+    // The JNI native below resolves only against a ClassLoader-loaded library; if the
+    // system binds this service before ZiguiActivity ran, load the app .so here too.
+    // The lib name comes from this service's android.app.lib_name meta-data.
+    private void loadAppLibrary() {
+        try {
+            ServiceInfo si = getPackageManager().getServiceInfo(
+                new ComponentName(this, getClass()), PackageManager.GET_META_DATA);
+            String lib = si.metaData != null ? si.metaData.getString("android.app.lib_name") : null;
+            if (lib != null) {
+                System.loadLibrary(lib);
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            // the activity's own load may still cover it
+        }
+    }
 
     static boolean isEnabled() {
         return sInstance != null;
@@ -120,4 +173,6 @@ public class ZiguiAccessibilityService extends AccessibilityService {
             walk(node.getChild(i), sb, depth + 1, count);
         }
     }
+
+    private native void nativeOnA11yEvent(int type, String pkg, String text);
 }

@@ -11,6 +11,7 @@ const picker = @import("napi/picker.zig");
 const biometric = @import("napi/biometric.zig");
 const notification_listener = @import("napi/notification_listener.zig");
 const broadcast = @import("napi/broadcast.zig");
+const accessibility = @import("napi/accessibility.zig");
 
 // ZiguiActivity's hidden EditText pushes every edit here (the erased env + String).
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnText(
@@ -77,4 +78,16 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBroadcast(
 ) callconv(.c) void {
     _ = this;
     broadcast.on_native_broadcast(env, action, payload);
+}
+
+// The accessibility service forwards each subscribed event's type, package, and text.
+export fn Java_io_qoinly_zigui_ZiguiAccessibilityService_nativeOnA11yEvent(
+    env: *anyopaque,
+    this: *anyopaque,
+    event_type: i32,
+    pkg: ?*anyopaque,
+    text: ?*anyopaque,
+) callconv(.c) void {
+    _ = this;
+    accessibility.on_native_a11y_event(env, event_type, pkg, text);
 }
