@@ -69,15 +69,28 @@ export fn Java_io_qoinly_zigui_ZiguiNotificationListenerService_nativeOnNotifica
     notification_listener.on_native_notification(env, pkg, title, text);
 }
 
-// A subscribed broadcast receiver forwards each match's action + payload here.
+// A subscribed broadcast receiver forwards each match's action + a String[] of
+// alternating key, value extras here.
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBroadcast(
     env: *anyopaque,
     this: *anyopaque,
     action: ?*anyopaque,
-    payload: ?*anyopaque,
+    kv: ?*anyopaque,
 ) callconv(.c) void {
     _ = this;
-    broadcast.on_native_broadcast(env, action, payload);
+    broadcast.on_native_broadcast(env, action, kv);
+}
+
+// The manifest-declared (static) receiver forwards each broadcast here for the
+// headless path (may run on a cold-started process).
+export fn Java_io_qoinly_zigui_ZiguiBroadcastReceiver_nativeOnBroadcast(
+    env: *anyopaque,
+    this: *anyopaque,
+    action: ?*anyopaque,
+    kv: ?*anyopaque,
+) callconv(.c) void {
+    _ = this;
+    broadcast.on_native_static_broadcast(env, action, kv);
 }
 
 // The accessibility service forwards each subscribed event's type, package, and text.

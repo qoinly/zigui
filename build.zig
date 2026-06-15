@@ -196,6 +196,9 @@ pub const AndroidApkOptions = struct {
     include_accessibility: bool = false,
     // Dex zigui's notification-listener service.
     include_notification_listener: bool = false,
+    // Dex zigui's static broadcast receiver (for headless / cold-start broadcasts the
+    // app declares in its manifest, e.g. SMS_RECEIVED).
+    include_broadcast_receiver: bool = false,
 };
 
 pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
@@ -240,6 +243,12 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
         zigui_files.path(b.fmt("{s}/ZiguiActivity.java", .{java_dir})),
         "io/qoinly/zigui/ZiguiActivity.java",
     );
+    // The broadcast payload decode, shared by the activity's runtime receiver and the
+    // static ZiguiBroadcastReceiver; the activity always references it.
+    _ = java_tree.addCopyFile(
+        zigui_files.path(b.fmt("{s}/ZiguiBroadcast.java", .{java_dir})),
+        "io/qoinly/zigui/ZiguiBroadcast.java",
+    );
     if (opts.include_accessibility) {
         _ = java_tree.addCopyFile(
             zigui_files.path(b.fmt("{s}/ZiguiAccessibilityService.java", .{java_dir})),
@@ -250,6 +259,12 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
         _ = java_tree.addCopyFile(
             zigui_files.path(b.fmt("{s}/ZiguiNotificationListenerService.java", .{java_dir})),
             "io/qoinly/zigui/ZiguiNotificationListenerService.java",
+        );
+    }
+    if (opts.include_broadcast_receiver) {
+        _ = java_tree.addCopyFile(
+            zigui_files.path(b.fmt("{s}/ZiguiBroadcastReceiver.java", .{java_dir})),
+            "io/qoinly/zigui/ZiguiBroadcastReceiver.java",
         );
     }
 

@@ -8,6 +8,7 @@ const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
 const utf8 = @import("utf8.zig");
+const headless = @import("../../../napi/headless.zig");
 
 const JNIEnv = util.JNIEnv;
 
@@ -60,13 +61,25 @@ pub fn on_native_notification(
     text: ?*anyopaque,
 ) void {
     const env: JNIEnv = @ptrCast(@alignCast(env_ptr));
+    var pbuf: [128]u8 = undefined;
+    var tbuf: [192]u8 = undefined;
+    var xbuf: [NOTIF_MAX]u8 = undefined;
+    const p = util.read_jstr(env, pkg, &pbuf);
+    const ti = util.read_jstr(env, title, &tbuf);
+    const tx = util.read_jstr(env, text, &xbuf);
+
+    // Headless: hand the app a decoded event on this thread, so its handler runs even
+    // when nothing is foreground to poll the mailbox below.
+    headless.dispatch(.{ .notification = .{ .package = p, .title = ti, .text = tx } });
+
+    // Foreground mailbox for take(): "package\ttitle\ttext".
     g_valid.store(false, .monotonic); // mark in-progress so a poll skips a half-write
     g_len = 0;
-    append(env, pkg);
-    append_byte('\t');
-    append(env, title);
-    append_byte('\t');
-    append(env, text);
+    put(p);
+    put_byte('\t');
+    put(ti);
+    put_byte('\t');
+    put(tx);
     std.debug.assert(g_len <= NOTIF_MAX);
     g_valid.store(true, .release); // publish the fully-written buffer
 }
@@ -84,21 +97,15 @@ pub fn take(buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-// Appends a Java String's modified-UTF8 to g_buf, clamped to what is left, with a
-// back-off so a truncation never splits a codepoint.
-fn append(env: JNIEnv, s: ?*anyopaque) void {
-    const ref = s orelse return;
-    std.debug.assert(g_len <= NOTIF_MAX); // the back-off below relies on the room calc
-    const t = env.*;
-    const chars = t.GetStringUTFChars(env, ref, null) orelse return;
-    defer t.ReleaseStringUTFChars(env, ref, chars);
-    const span = std.mem.span(chars);
-    const k = utf8.floor(span, @min(span.len, NOTIF_MAX - g_len));
-    @memcpy(g_buf[g_len .. g_len + k], span[0..k]);
+// Appends a slice to g_buf, clamped to the room left (codepoint-floored at the cut).
+fn put(slice: []const u8) void {
+    std.debug.assert(g_len <= NOTIF_MAX); // the clamp below relies on the room calc
+    const k = utf8.floor(slice, @min(slice.len, NOTIF_MAX - g_len));
+    @memcpy(g_buf[g_len .. g_len + k], slice[0..k]);
     g_len += k;
 }
 
-fn append_byte(b: u8) void {
+fn put_byte(b: u8) void {
     if (g_len >= NOTIF_MAX) return;
     g_buf[g_len] = b;
     g_len += 1;
