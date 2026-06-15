@@ -82,6 +82,12 @@ pub const render_tree_at = node.render_at;
 // lacks is a compile error only where a caller actually uses it (see napi/root.zig).
 pub const napi = @import("napi/root.zig");
 
+// Background work: run a heavy job off the UI thread, read its result back in the
+// view with a poll. Cross-platform (std.Thread); on Android a finished job nudges
+// the vsync loop to render so the poll runs.
+pub const background = @import("background.zig");
+pub const Task = background.Task;
+
 pub const theme = @import("theme.zig");
 pub const Spacing = theme.Spacing;
 pub const Breakpoint = theme.Breakpoint;
@@ -846,4 +852,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("kit/textarea.zig"); // refAllDecls is non-recursive; pull kit/* tests in explicitly
     _ = @import("platform/android/napi/utf8.zig"); // pure helper, host-testable
+    _ = @import("background.zig");
 }

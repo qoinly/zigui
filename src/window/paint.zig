@@ -13,6 +13,7 @@ const geometry = @import("../geometry.zig");
 const color = @import("../color.zig");
 const label = @import("../render/label.zig");
 const input = @import("../input.zig");
+const background = @import("../background.zig");
 
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
@@ -449,6 +450,9 @@ pub const PaintContext = struct {
             self.renderer.request_redraw();
         }
         if (self.animating) self.renderer.request_redraw();
+        // A background job finished: render once so the view's poll() picks up the
+        // result. The edge is consumed here, on the loop's own thread.
+        if (background.took_completion()) self.renderer.request_redraw();
         self.now_s = monotonic_seconds() - self.base_s;
         if (!self.renderer.dirty) return null;
 

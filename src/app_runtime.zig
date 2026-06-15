@@ -8,6 +8,7 @@ const node = @import("node.zig");
 const geometry = @import("geometry.zig");
 const display_link = @import("display_link.zig");
 const frame_ctx = @import("frame_ctx.zig");
+const background = @import("background.zig");
 const custom_shell = @import("custom_shell.zig");
 
 // What `render` receives each frame. Read it for layout; do not retain it - the
@@ -395,6 +396,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        background.drain(); // let any detached job finish before its Task memory goes
         if (self.windows) |set| {
             set.deinit(self.alloc);
             self.alloc.destroy(set);

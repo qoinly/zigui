@@ -55,6 +55,10 @@ pub const App = struct {
     sms: [256]u8 = undefined,
     sms_len: usize = 0,
 
+    // A background job + its last result, kept after poll consumes it once.
+    bg_task: zigui.Task(u64) = .{},
+    bg_result: ?u64 = null,
+
     // Kit overlay widgets (rendered by the kit, not native): a modal dialog, an eased
     // edge sheet, and an in-app toast stack. The overlay / hud scaffold draws them.
     dialog_open: bool = false,
@@ -120,6 +124,7 @@ pub const App = struct {
         if (zigui.napi.accessibility.take_event(&app.a11y_event)) |e| {
             app.a11y_event_len = e.len;
         }
+        if (app.bg_task.poll()) |r| app.bg_result = r;
     }
 };
 
