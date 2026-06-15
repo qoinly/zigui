@@ -845,4 +845,5 @@ pub const PolychromeSprite = primitives.PolychromeSprite;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("kit/textarea.zig"); // refAllDecls is non-recursive; pull kit/* tests in explicitly
+    _ = @import("platform/android/napi/utf8.zig"); // pure helper, host-testable
 }

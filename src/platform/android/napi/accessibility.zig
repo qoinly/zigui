@@ -7,6 +7,7 @@
 const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
+const utf8 = @import("utf8.zig");
 
 const JNIEnv = util.JNIEnv;
 
@@ -73,9 +74,7 @@ pub fn read(buf: []u8) ?[]const u8 {
     const chars = t.GetStringUTFChars(env, s, null) orelse return null;
     defer t.ReleaseStringUTFChars(env, s, chars);
     const span = std.mem.span(chars);
-    var n = @min(span.len, buf.len);
-    // A byte-count truncation could split a UTF-8 codepoint; back off to its start.
-    while (n > 0 and n < span.len and (span[n] & 0xc0) == 0x80) n -= 1;
+    const n = utf8.floor(span, @min(span.len, buf.len));
     @memcpy(buf[0..n], span[0..n]);
     return buf[0..n];
 }
@@ -149,8 +148,7 @@ fn append(env: JNIEnv, s: ?*anyopaque) void {
     const chars = t.GetStringUTFChars(env, ref, null) orelse return;
     defer t.ReleaseStringUTFChars(env, ref, chars);
     const span = std.mem.span(chars);
-    var k = @min(span.len, EVENT_MAX - g_len);
-    while (k > 0 and k < span.len and (span[k] & 0xc0) == 0x80) k -= 1;
+    const k = utf8.floor(span, @min(span.len, EVENT_MAX - g_len));
     @memcpy(g_buf[g_len .. g_len + k], span[0..k]);
     g_len += k;
 }

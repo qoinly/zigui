@@ -7,6 +7,7 @@
 const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
+const utf8 = @import("utf8.zig");
 
 const JNIEnv = util.JNIEnv;
 
@@ -92,8 +93,7 @@ fn append(env: JNIEnv, s: ?*anyopaque) void {
     const chars = t.GetStringUTFChars(env, ref, null) orelse return;
     defer t.ReleaseStringUTFChars(env, ref, chars);
     const span = std.mem.span(chars);
-    var k = @min(span.len, NOTIF_MAX - g_len);
-    while (k > 0 and k < span.len and (span[k] & 0xc0) == 0x80) k -= 1;
+    const k = utf8.floor(span, @min(span.len, NOTIF_MAX - g_len));
     @memcpy(g_buf[g_len .. g_len + k], span[0..k]);
     g_len += k;
 }

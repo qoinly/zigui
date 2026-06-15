@@ -39,7 +39,8 @@ fn render(f: *zigui.Frame, state: *State) *zigui.Node { ... }
 
 Blocks until the window closes. The view fn returns the UI tree for this frame;
 the same `state` pointer you passed to `run` comes back on every call and is
-what callbacks receive.
+what callbacks receive. (On Android `run` does not block - the framework owns the
+loop - so the state must outlive `main`; see [On Android](#on-android).)
 
 ### Views
 
@@ -151,6 +152,9 @@ zigui.row(.{ .pad = .{ .px = 24 } }, kids)
 
 ## Multiple windows
 
+Desktop only - Android is a single NativeActivity surface, so `open_window` and the
+per-window helpers below do not apply there (see [On Android](#on-android)).
+
 `run` opens the first window and blocks. To open more, call `open_window` while
 `run` is going (i.e. from a click). Each extra window has its own state and views;
 the title, id, and size go in the options.
@@ -196,6 +200,22 @@ A view shared across windows reads which one it is drawing:
 
 See `examples/multiwindow_demo.zig`.
 
+## On Android
+
+The same `App.init` / `run` / view shape runs on Android, with a few differences
+the platform forces. [docs/android.md](android.md) has the full backend guide; the
+loop-side facts:
+
+- `run` does not block. A NativeActivity hands its loop to the framework, and the
+  drawing surface arrives asynchronously after `run` returns. So the app state can
+  not be a `main` stack local - give it a lifetime that outlives `main` (a global,
+  or heap), and do not `defer app.deinit()` to tear it down at the end of `main`.
+- One surface. There is no `open_window`, no extra windows, and no `window_id` /
+  `window_is_key` routing - the activity is the whole UI.
+- No window chrome. There is no title band or traffic-light gutter to fill; the
+  `titlebar` view is unused. `body`, `overlay`, and `hud` work as on desktop, and
+  `f.body` already accounts for the system bar insets.
+
 ## deinit
 
 ```zig
@@ -203,3 +223,4 @@ defer app.deinit();
 ```
 
 Stops the display link, closes the window, and frees what `App.init` allocated.
+On Android this is a no-op parity shim (the framework owns teardown).

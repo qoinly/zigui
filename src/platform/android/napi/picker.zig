@@ -5,6 +5,7 @@
 const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
+const utf8 = @import("utf8.zig");
 
 const JNIEnv = util.JNIEnv;
 
@@ -77,11 +78,8 @@ pub fn on_native_file(env_ptr: *anyopaque, content: ?*anyopaque) void {
     const chars = t.GetStringUTFChars(env, ref, null) orelse return;
     defer t.ReleaseStringUTFChars(env, ref, chars);
     const span = std.mem.span(chars);
-    g_file_len = @min(span.len, FILE_MAX);
-    // A byte-count truncation could split a UTF-8 codepoint; back off to its start.
-    while (g_file_len > 0 and g_file_len < span.len and (span[g_file_len] & 0xc0) == 0x80) {
-        g_file_len -= 1;
-    }
+    // Back the cap-truncation off any split codepoint before the copy.
+    g_file_len = utf8.floor(span, @min(span.len, FILE_MAX));
     @memcpy(g_file_buf[0..g_file_len], span[0..g_file_len]);
     g_file_valid = true;
     std.debug.assert(g_file_len <= FILE_MAX);

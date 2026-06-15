@@ -6,6 +6,7 @@
 const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
+const utf8 = @import("utf8.zig");
 
 // The recent inbox messages, "address\tbody\n..." per message, copied into buf. null
 // on a JNI miss; empty when the inbox is empty or READ_SMS is not granted.
@@ -21,9 +22,7 @@ pub fn read(buf: []u8) ?[]const u8 {
     const chars = t.GetStringUTFChars(env, s, null) orelse return null;
     defer t.ReleaseStringUTFChars(env, s, chars);
     const span = std.mem.span(chars);
-    var n = @min(span.len, buf.len);
-    // A byte-count truncation could split a UTF-8 codepoint; back off to its start.
-    while (n > 0 and n < span.len and (span[n] & 0xc0) == 0x80) n -= 1;
+    const n = utf8.floor(span, @min(span.len, buf.len));
     @memcpy(buf[0..n], span[0..n]);
     return buf[0..n];
 }
@@ -43,9 +42,8 @@ pub fn send(address: []const u8, body: []const u8) void {
     const addr = util.jstr(env, address) orelse return;
     defer t.DeleteLocalRef(env, addr);
     // jstr caps + asserts at STR_MAX, so clamp the body first - a long one truncates,
-    // never trips the assert; back off so the cut never splits a UTF-8 codepoint.
-    var bn = @min(body.len, util.STR_MAX);
-    while (bn > 0 and bn < body.len and (body[bn] & 0xc0) == 0x80) bn -= 1;
+    // never trips the assert; floor so the cut never splits a UTF-8 codepoint.
+    const bn = utf8.floor(body, @min(body.len, util.STR_MAX));
     const text = util.jstr(env, body[0..bn]) orelse return;
     defer t.DeleteLocalRef(env, text);
     var args = [_]jni.jvalue{ .{ .l = addr }, .{ .l = text } };
