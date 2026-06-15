@@ -443,6 +443,54 @@ pub fn handle_back(stack: *NavStack) void {
     if (fc.paint.take_back()) stack.pop();
 }
 
+// The navigator's animated page slot: builds the current page, or - during a brief
+// push/pop transition - slides the leaving and arriving pages past each other (the
+// native page feel). The app hands its route->view dispatch; pages read the nav state
+// normally (the stack flips which entry is "current" while it builds the leaving
+// page). A drop-in for "dispatch the current route to a page node". Allocation-free
+// beyond the per-frame arena; the loop idles again once the slide settles. `dispatch`
+// must be a pure view builder - it runs twice (both pages) mid-slide.
+pub fn nav_page(
+    f: *Frame,
+    comptime State: type,
+    stack: *NavStack,
+    state: *State,
+    comptime dispatch: fn (*Frame, *State, []const u8) *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    if (!stack.trans_active) return dispatch(f, state, stack.current());
+
+    if (stack.trans_start < 0) stack.trans_start = fc.paint.now_s; // stamp on frame one
+    std.debug.assert(stack.trans_start <= fc.paint.now_s); // the start is never in the future
+    const SLIDE_S: f64 = 0.22;
+    const t = @min((fc.paint.now_s - stack.trans_start) / SLIDE_S, 1.0);
+    if (t >= 1) {
+        stack.trans_active = false;
+        return dispatch(f, state, stack.current());
+    }
+    fc.paint.animating = true; // keep presenting through the slide
+
+    // ease-out cubic: quick then settling.
+    const inv: f32 = 1 - @as(f32, @floatCast(t));
+    const eased = 1 - inv * inv * inv;
+
+    const to_node = dispatch(f, state, stack.current()); // build_from false: the destination
+    stack.build_from = true;
+    const from_node = dispatch(f, state, stack.current()); // the leaving page
+    stack.build_from = false;
+
+    std.debug.assert(f.size.width >= 0); // the slide offset scales by the page width
+    const w = f.size.width;
+    if (stack.trans_pop) {
+        // pop: [destination, leaving]; the leaving page slides off to the right.
+        const kids = [_]*node.Node{ to_node, from_node };
+        return node.slide(fc.arena, .{ .width = w, .dx = -(1 - eased) * w }, &kids);
+    }
+    // push: [leaving, destination]; the destination slides in from the right.
+    const kids = [_]*node.Node{ from_node, to_node };
+    return node.slide(fc.arena, .{ .width = w, .dx = -eased * w }, &kids);
+}
+
 // The open dropdown menu: put it in the overlay region. Anchored to the trigger's
 // rect_out, dismisses on an outside click.
 pub fn menu_overlay(o: kit_nodes.MenuOverlay) *node.Node {
