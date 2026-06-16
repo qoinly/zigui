@@ -64,6 +64,9 @@ pub fn Range(comptime V: type) type {
 fn Cmp(comptime field: []const u8, comptime op: Op, comptime Operand: type) type {
     return struct {
         operand: Operand,
+        // Planner markers: a collection inspects these at comptime to seed from an index.
+        pub const qodb_field: []const u8 = field;
+        pub const qodb_op: Op = op;
         pub fn match(self: @This(), comptime T: type, rec: T) bool {
             return apply(op, @field(rec, field), self.operand);
         }
@@ -87,6 +90,9 @@ pub fn not(pred: anytype) Not(@TypeOf(pred)) {
 fn Junction(comptime Preds: type, comptime kind: enum { all, any }) type {
     return struct {
         preds: Preds,
+        // Planner markers: a top-level `all` lets a collection seed from an indexed member.
+        pub const qodb_kind = kind;
+        pub const qodb_preds = Preds;
         pub fn match(self: @This(), comptime T: type, rec: T) bool {
             inline for (self.preds) |p| {
                 const m = p.match(T, rec);

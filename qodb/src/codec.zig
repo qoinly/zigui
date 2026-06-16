@@ -2,11 +2,12 @@
 // blob and back. Monomorphized per type (no runtime reflection), so a call compiles to
 // straight-line field reads/writes - blazing fast without an interpreter.
 //
-// The wire layout is field-by-field in DECLARATION order (not the struct's in-memory
-// layout, which the compiler may reorder/pad): a scalar is its native bytes, a slice is
-// a u32 length then its bytes, an optional is a present-byte then the value, a union is
-// its tag then the active field. Declaration order keeps the format stable across
-// compiler layout changes, which a persistent store needs.
+// The wire layout is field-by-field in CANONICAL order - struct fields sorted by name,
+// independent of both the declaration order and the compiler's in-memory layout: a scalar
+// is its native bytes, a slice is a u32 length then its bytes, an optional is a present-
+// byte then the value, a union is its tag then the active field. Sorting by name means
+// reordering a struct's fields in source does not change the format (no migration needed);
+// only adding, removing, renaming, or retyping a field does.
 //
 // Native scalar width + native endianness: qodb is a local, per-device store, so a
 // value is always read back on the arch that wrote it - no byte-swapping. Decode is
@@ -54,7 +55,10 @@ fn size_of_value(comptime T: type, value: T) usize {
         },
         .@"struct" => |s| blk: {
             var n: usize = 0;
-            inline for (s.fields) |f| n += size_of_value(f.type, @field(value, f.name));
+            inline for (comptime field_order(T)) |fi| {
+                const f = s.fields[fi];
+                n += size_of_value(f.type, @field(value, f.name));
+            }
             break :blk n;
         },
         .optional => |o| if (value) |v| 1 + size_of_value(o.child, v) else 1,
@@ -81,7 +85,8 @@ fn encode_value(comptime T: type, value: T, out: []u8, n: *usize) Error!void {
         .int, .float => try put(out, n, std.mem.asBytes(&value)),
         .@"enum" => |e| try encode_value(e.tag_type, @intFromEnum(value), out, n),
         .array => |a| for (value) |elem| try encode_value(a.child, elem, out, n),
-        .@"struct" => |s| inline for (s.fields) |f| {
+        .@"struct" => |s| inline for (comptime field_order(T)) |fi| {
+            const f = s.fields[fi];
             try encode_value(f.type, @field(value, f.name), out, n);
         },
         .optional => |o| {
@@ -134,7 +139,10 @@ fn decode_value(comptime T: type, bytes: []const u8, n: *usize) Error!T {
         },
         .@"struct" => |s| {
             var v: T = undefined;
-            inline for (s.fields) |f| @field(v, f.name) = try decode_value(f.type, bytes, n);
+            inline for (comptime field_order(T)) |fi| {
+                const f = s.fields[fi];
+                @field(v, f.name) = try decode_value(f.type, bytes, n);
+            }
             return v;
         },
         .optional => |o| {
@@ -176,6 +184,110 @@ fn byte_slice(comptime T: type, value: T) []const u8 {
     return value;
 }
 
+// Field indices of T's struct in canonical (name-sorted) order - the wire order, so a
+// source reordering leaves the format (and layout_hash) unchanged. Indices, not
+// StructFields, since a StructField is comptime-only and cannot be returned by value.
+fn field_order(comptime T: type) [@typeInfo(T).@"struct".fields.len]usize {
+    return name_order(@typeInfo(T).@"struct".fields);
+}
+
+// Indices of `fields` (any field list carrying `.name`) sorted by name. Runs at comptime.
+fn name_order(comptime fields: anytype) [fields.len]usize {
+    var idx: [fields.len]usize = undefined;
+    for (&idx, 0..) |*p, i| p.* = i;
+    for (1..idx.len) |i| { // insertion sort, ascending by name
+        const cur = idx[i];
+        var j = i;
+        while (j > 0 and std.mem.lessThan(u8, fields[cur].name, fields[idx[j - 1]].name)) {
+            idx[j] = idx[j - 1];
+            j -= 1;
+        }
+        idx[j] = cur;
+    }
+    return idx;
+}
+
+// Indices of enum `fields` sorted by tag value - the value is what the codec writes, so
+// hashing in value order makes an enum arm reorder (with stable values) invisible, exactly
+// as the wire is. Runs at comptime.
+fn value_order(comptime fields: anytype) [fields.len]usize {
+    var idx: [fields.len]usize = undefined;
+    for (&idx, 0..) |*p, i| p.* = i;
+    for (1..idx.len) |i| {
+        const cur = idx[i];
+        var j = i;
+        while (j > 0 and fields[cur].value < fields[idx[j - 1]].value) : (j -= 1) {
+            idx[j] = idx[j - 1];
+        }
+        idx[j] = cur;
+    }
+    return idx;
+}
+
+// A hash of T's wire shape: it changes exactly when the encoded format changes. It mirrors
+// the codec's own order-independence - struct fields folded in name order, enum/union arms
+// in tag-value order - so any pure source reorder leaves it unmoved; an added/removed/
+// renamed/retyped field, or a changed enum/union arm value, moves it. A persisted record
+// carries this, so a real shape change is caught on load rather than silently mis-decoded.
+pub fn layout_hash(comptime T: type) u64 {
+    return hash_shape(0xcbf29ce484222325, T);
+}
+
+fn hash_shape(acc: u64, comptime T: type) u64 {
+    return switch (@typeInfo(T)) {
+        .void => mix(acc, "v"),
+        .bool => mix(acc, "b"),
+        .int, .float => mix(acc, @typeName(T)),
+        .pointer => mix(acc, "p"), // []const u8
+        .@"enum" => |e| blk: {
+            var h = mix(acc, "e");
+            h = mix(h, @typeName(e.tag_type));
+            inline for (comptime value_order(e.fields)) |fi| { // value order: reorder-invariant
+                h = mix_int(mix(h, e.fields[fi].name), e.fields[fi].value);
+            }
+            break :blk h;
+        },
+        .@"struct" => |s| blk: {
+            var h = mix(acc, "s");
+            inline for (comptime field_order(T)) |fi| {
+                const f = s.fields[fi];
+                h = hash_shape(mix(h, f.name), f.type);
+            }
+            break :blk h;
+        },
+        .optional => |o| hash_shape(mix(acc, "o"), o.child),
+        .array => |a| hash_shape(mix_int(mix(acc, "a"), a.len), a.child),
+        .@"union" => |u| blk: {
+            var h = mix(acc, "u");
+            const tag = @typeInfo(u.tag_type orelse unsupported(T)).@"enum";
+            inline for (comptime value_order(tag.fields)) |fi| { // tag value: what the wire holds
+                h = mix_int(mix(h, tag.fields[fi].name), tag.fields[fi].value);
+            }
+            inline for (comptime name_order(u.fields)) |fi| { // payload decoded by name
+                h = hash_shape(mix(h, u.fields[fi].name), u.fields[fi].type);
+            }
+            break :blk h;
+        },
+        else => unsupported(T),
+    };
+}
+
+fn mix(acc: u64, comptime s: []const u8) u64 {
+    var h = acc;
+    for (s) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn mix_int(acc: u64, comptime v: i128) u64 {
+    var h = acc;
+    const u: u128 = @bitCast(v);
+    inline for (0..16) |i| h = mix(h, &[_]u8{@truncate(u >> (i * 8))});
+    return h;
+}
+
 fn unsupported(comptime T: type) noreturn {
     @compileError("qodb codec: unsupported type " ++ @typeName(T) ++
         " (supported: ints, floats, bools, enums, arrays, structs, optionals, tagged " ++
@@ -183,16 +295,17 @@ fn unsupported(comptime T: type) noreturn {
 }
 
 fn put(out: []u8, n: *usize, bytes: []const u8) Error!void {
-    if (n.* + bytes.len > out.len) return error.NoSpace;
+    assert(n.* <= out.len); // the cursor never passes the end
+    if (bytes.len > out.len - n.*) return error.NoSpace; // subtract: `n + len` could overflow
     @memcpy(out[n.*..][0..bytes.len], bytes);
     n.* += bytes.len;
     assert(n.* <= out.len);
 }
 
 fn take(bytes: []const u8, n: *usize, len: usize) Error![]const u8 {
-    if (n.* + len > bytes.len) return error.Corrupt;
+    assert(n.* <= bytes.len); // the cursor never passes the end
+    if (len > bytes.len - n.*) return error.Corrupt; // subtract: `n + len` could overflow
     defer n.* += len;
-    assert(n.* + len <= bytes.len);
     return bytes[n.*..][0..len];
 }
 
@@ -231,17 +344,37 @@ test "roundtrip a mixed struct" {
     try std.testing.expectEqualSlices(i32, &a.scores, &b.scores);
 }
 
-test "declaration-order layout is layout-independent" {
-    // Fields the compiler would reorder in memory; the wire stays declaration order.
-    const Reorder = struct { a: u32, b: u8, c: u8, d: u16 };
-    const r = Reorder{ .a = 0x11223344, .b = 0xAB, .c = 0xCD, .d = 0xBEEF };
-    var buf: [16]u8 = undefined;
-    const len = try encode(r, &buf);
-    try std.testing.expectEqual(@as(usize, 8), len);
-    // a (4) then b (1) then c (1) then d (2), in declaration order.
-    const want = [_]u8{ 0x44, 0x33, 0x22, 0x11, 0xAB, 0xCD, 0xEF, 0xBE };
-    try std.testing.expectEqualSlices(u8, &want, buf[0..len]);
-    try std.testing.expectEqual(r, try decode(Reorder, buf[0..len]));
+test "wire order is canonical (by name), not declaration order" {
+    // Same fields, different declaration order -> identical wire and identical layout_hash.
+    const Abc = struct { a: u32, b: u8, c: u16 };
+    const Cba = struct { c: u16, a: u32, b: u8 };
+    var ba: [16]u8 = undefined;
+    var bb: [16]u8 = undefined;
+    const la = try encode(Abc{ .a = 0x11223344, .b = 0xAB, .c = 0xBEEF }, &ba);
+    const lb = try encode(Cba{ .a = 0x11223344, .b = 0xAB, .c = 0xBEEF }, &bb);
+    try std.testing.expectEqualSlices(u8, ba[0..la], bb[0..lb]);
+    // Canonical order a,b,c: a (4) then b (1) then c (2).
+    const want = [_]u8{ 0x44, 0x33, 0x22, 0x11, 0xAB, 0xEF, 0xBE };
+    try std.testing.expectEqualSlices(u8, &want, ba[0..la]);
+    try std.testing.expectEqual(layout_hash(Abc), layout_hash(Cba));
+}
+
+test "layout_hash changes on a real shape change, not on a reorder" {
+    const V1 = struct { id: u64, name: []const u8 };
+    const Reordered = struct { name: []const u8, id: u64 };
+    const Added = struct { id: u64, name: []const u8, age: u16 };
+    const Retyped = struct { id: u32, name: []const u8 };
+    try std.testing.expectEqual(layout_hash(V1), layout_hash(Reordered)); // reorder: same
+    try std.testing.expect(layout_hash(V1) != layout_hash(Added)); // add field: differs
+    try std.testing.expect(layout_hash(V1) != layout_hash(Retyped)); // retype: differs
+
+    // An enum arm reorder with stable values is invisible (the wire holds the value); a
+    // changed arm value is not.
+    const Same = struct { r: enum(u8) { a = 1, b = 2 } };
+    const ArmReorder = struct { r: enum(u8) { b = 2, a = 1 } };
+    const ArmRevalue = struct { r: enum(u8) { a = 9, b = 2 } };
+    try std.testing.expectEqual(layout_hash(Same), layout_hash(ArmReorder));
+    try std.testing.expect(layout_hash(Same) != layout_hash(ArmRevalue));
 }
 
 test "void union arm, optional, and short-buffer errors" {
