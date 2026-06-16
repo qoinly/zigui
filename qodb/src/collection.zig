@@ -64,6 +64,17 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             return self.records.items.len;
         }
 
+        // Reserve room for `n` records up front: the record/blob arrays and the key map grow
+        // once to exactly `n` rather than incrementally, so a known-size bulk load does no
+        // reallocation or rehash and holds no power-of-two slack. load() pre-sizes itself
+        // from the snapshot; call this before a large upsert run.
+        pub fn ensure_capacity(self: *Self, n: usize) Error!void {
+            std.debug.assert(n <= std.math.maxInt(u32)); // the key map sizes with a u32
+            try self.records.ensureTotalCapacityPrecise(self.gpa, n);
+            try self.blobs.ensureTotalCapacityPrecise(self.gpa, n);
+            try self.by_key.ensureTotalCapacity(self.gpa, @intCast(n));
+        }
+
         // All records, borrowing the collection's storage (valid until the next mutation).
         pub fn items(self: *const Self) []const T {
             return self.records.items;
@@ -305,6 +316,7 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             std.debug.assert(self.count() == 0);
             var n: usize = 0;
             const records = try read_u32(data, &n);
+            try self.ensure_capacity(records); // the count is known: grow once, no rehash
             var k: usize = 0;
             while (k < records) : (k += 1) {
                 const len = try read_u32(data, &n);
@@ -344,6 +356,7 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             std.debug.assert(self.count() == 0);
             var n: usize = 0;
             const records = try read_u32(data, &n);
+            try self.ensure_capacity(records); // the count is known: grow once, no rehash
             var k: usize = 0;
             while (k < records) : (k += 1) {
                 const len = try read_u32(data, &n);
