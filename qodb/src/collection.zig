@@ -1,8 +1,11 @@
 // A typed collection: an in-memory set of struct T keyed by one field, with CRUD and
 // the typed query iterator. Each record's variable bytes (its []const u8 fields) live in
-// a per-record blob the collection owns (the codec encoding), so a record is self-
-// contained and freed precisely on replace/remove - no arena that only grows. A record
-// returned by get/query borrows that storage: it is valid until the next mutation.
+// ONE growing byte arena the collection owns (the codec encodings packed back to back),
+// not a malloc per record: an insert is an arena append, so a bulk load makes no per-
+// record allocation. A record returned by get/query borrows the arena: it is valid until
+// the next mutation. Appending can reallocate the arena and move its bytes, so the stored
+// decoded records are re-pointed (re-decoded from their spans) whenever the base moves;
+// a replace/remove leaves dead bytes that a compaction reclaims once they pass a threshold.
 
 const std = @import("std");
 const codec = @import("codec.zig");
@@ -39,12 +42,25 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         pub const Record = T; // the struct this collection stores (for schema introspection)
         pub const key_field = config.key;
 
+        // A record's encoded bytes live at arena[span.off..][0..span.len]; span[i] backs
+        // records[i]. The arena packs every live (and not-yet-compacted dead) encoding back
+        // to back; an append may move the arena, so records is re-pointed when it does.
+        const Span = struct { off: u32, len: u32 };
+
         gpa: std.mem.Allocator,
-        records: std.ArrayListUnmanaged(T) = .empty, // slices point into the matching blob
-        blobs: std.ArrayListUnmanaged([]u8) = .empty, // blobs[i] backs records[i]
+        records: std.ArrayListUnmanaged(T) = .empty, // slices point into the arena
+        arena: std.ArrayListUnmanaged(u8) = .empty, // every record's encoding, packed
+        spans: std.ArrayListUnmanaged(Span) = .empty, // spans[i] locates records[i] in arena
+        dead: usize = 0, // arena bytes no live span covers; compacted past the threshold
         by_key: KeyMap = .empty, // key -> index in records
         indexes: IndexSet = undefined, // one FieldIndex per config.indexes; set in init
         revision: u64 = 0, // bumped on each mutation; a database derives dirtiness from it
+
+        // The average encoded record size assumed when pre-sizing the arena from a known
+        // record count, and the dead-fraction at which a mutation triggers a compaction.
+        const avg_record_estimate = 52;
+        const compact_num = 1; // compact once dead * compact_den >= arena.len * compact_num
+        const compact_den = 2; // i.e. dead is at least half the arena
 
         pub fn init(gpa: std.mem.Allocator) Self {
             var self: Self = .{ .gpa = gpa };
@@ -53,9 +69,9 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.blobs.items) |b| self.gpa.free(b);
             self.records.deinit(self.gpa);
-            self.blobs.deinit(self.gpa);
+            self.arena.deinit(self.gpa);
+            self.spans.deinit(self.gpa);
             self.by_key.deinit(self.gpa);
             inline for (0..config.indexes.len) |k| self.indexes[k].deinit(self.gpa);
         }
@@ -71,8 +87,11 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         pub fn ensure_capacity(self: *Self, n: usize) Error!void {
             std.debug.assert(n <= std.math.maxInt(u32)); // the key map sizes with a u32
             try self.records.ensureTotalCapacityPrecise(self.gpa, n);
-            try self.blobs.ensureTotalCapacityPrecise(self.gpa, n);
+            try self.spans.ensureTotalCapacityPrecise(self.gpa, n);
             try self.by_key.ensureTotalCapacity(self.gpa, @intCast(n));
+            // One arena growth up front to a size estimate, not a cap: an append still grows
+            // it if records run larger. Precise, so the reservation holds no power-of-two slack.
+            try self.arena.ensureTotalCapacityPrecise(self.gpa, n * avg_record_estimate);
         }
 
         // All records, borrowing the collection's storage (valid until the next mutation).
@@ -80,14 +99,53 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             return self.records.items;
         }
 
+        const Appended = struct { span: Span, rec: T }; // a just-appended encoding + its view
+
         // Insert `rec`, or replace the record with the same key. The record's bytes are
-        // copied into a collection-owned blob, so `rec`'s own slices need not outlive this.
+        // copied into the collection's arena, so `rec`'s own slices need not outlive this.
         pub fn upsert(self: *Self, rec: T) Error!void {
-            const blob = try self.gpa.alloc(u8, codec.size_of(rec));
-            errdefer self.gpa.free(blob);
-            _ = codec.encode(rec, blob) catch unreachable; // sized exactly above
-            try self.insert_blob(blob);
+            const a = try self.append_encoding(rec); // appended; may have re-pointed
+            try self.insert_record(a.span, a.rec);
             self.revision +%= 1;
+        }
+
+        // Encode `rec` onto the end of the arena, returning its span AND a view of it whose
+        // []const u8 fields point into the freshly written arena bytes (encode_inplace does
+        // the encode and the re-point in one walk, so the caller need not decode the span
+        // back). A growth that moves the arena base re-points every already-stored record
+        // first; the just-appended span is NOT yet in spans/records, so it is the caller's
+        // to commit.
+        fn append_encoding(self: *Self, rec: T) Error!Appended {
+            const size = codec.size_of(rec);
+            std.debug.assert(size <= std.math.maxInt(u32)); // a span length is a u32
+            const off = self.arena.items.len;
+            std.debug.assert(off <= std.math.maxInt(u32)); // arena offsets are u32
+            const before = self.arena.items.ptr;
+            try self.arena.ensureUnusedCapacity(self.gpa, size);
+            if (self.arena.items.ptr != before) self.repoint_all();
+            const dst = self.arena.addManyAsSliceAssumeCapacity(size);
+            const stored = codec.encode_inplace(T, rec, dst) catch unreachable; // sized above
+            return .{ .span = .{ .off = @intCast(off), .len = @intCast(size) }, .rec = stored };
+        }
+
+        // Re-decode every stored record from its span so its []const u8 fields point into
+        // the arena's current bytes. Called after the arena's base moves (a realloc) or a
+        // compaction rewrites offsets. A string primary key is stored in by_key as a slice
+        // into the arena, so it is re-pointed to the new bytes too (the content - and thus
+        // the hash and bucket - is unchanged, so overwriting the key pointer in place is
+        // safe). Secondary indexes own their key copies, so they need no fixup.
+        fn repoint_all(self: *Self) void {
+            for (self.records.items, self.spans.items) |*r, s| {
+                r.* = codec.decode(T, self.arena.items[s.off..][0..s.len]) catch unreachable;
+            }
+            // A string primary key is stored in by_key as a slice into the old arena bytes;
+            // walk the map by record index (never by content, whose stored bytes now dangle)
+            // and overwrite each key pointer from its re-decoded record. The content - hence
+            // the hash and bucket - is unchanged, so an in-place key rewrite is safe.
+            if (comptime is_byte_slice(KeyType)) {
+                var it = self.by_key.iterator();
+                while (it.next()) |e| e.key_ptr.* = key_of(self.records.items[e.value_ptr.*]);
+            }
         }
 
         pub fn get(self: *const Self, key: KeyType) ?T {
@@ -100,18 +158,19 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         pub fn remove(self: *Self, key: KeyType) bool {
             const i = self.by_key.get(key) orelse return false;
             std.debug.assert(i < self.records.items.len);
-            // Unindex while the blob is alive (a []const u8 value is read from it).
+            // Unindex while the bytes are alive (a []const u8 value is read from the record).
             const rec_i = self.records.items[i];
             inline for (config.indexes, 0..) |fname, k| {
                 self.indexes[k].drop(self.gpa, @field(rec_i, fname), i);
             }
-            _ = self.by_key.remove(key); // before the free: a string key is stored by reference
-            self.gpa.free(self.blobs.items[i]);
+            // The removed span becomes dead arena space (reclaimed by a later compaction).
+            self.dead += self.spans.items[i].len;
+            _ = self.by_key.remove(key); // a string key points into the arena; drop it first
             const last = self.records.items.len - 1;
             if (i != last) {
                 const moved = self.records.items[last];
                 self.records.items[i] = moved;
-                self.blobs.items[i] = self.blobs.items[last];
+                self.spans.items[i] = self.spans.items[last];
                 // The moved key is already mapped (to `last`); updating it allocates nothing.
                 self.by_key.putAssumeCapacity(key_of(moved), i);
                 // The moved record's index postings pointed at `last`; repoint them to `i`.
@@ -120,10 +179,35 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                 }
             }
             _ = self.records.pop();
-            _ = self.blobs.pop();
-            std.debug.assert(self.records.items.len == self.blobs.items.len);
+            _ = self.spans.pop();
+            std.debug.assert(self.records.items.len == self.spans.items.len);
+            self.maybe_compact();
             self.revision +%= 1;
             return true;
+        }
+
+        // Reclaim dead arena bytes once they are at least the configured fraction of the
+        // arena: pack every live span's encoding into a fresh tight buffer (spans are in
+        // record order, not arena order, so an in-place slide could overlap), swap it in,
+        // and re-point all records. Keys/index keys are independent copies, so only the
+        // records' borrowed slices move; no map touch is needed. Compaction is a pure
+        // memory optimization, so a failed scratch allocation just leaves the dead bytes.
+        fn maybe_compact(self: *Self) void {
+            if (self.dead * compact_den < self.arena.items.len * compact_num) return;
+            if (self.dead == 0) return;
+            const live = self.arena.items.len - self.dead;
+            var packed_arena: std.ArrayListUnmanaged(u8) = .empty;
+            packed_arena.ensureTotalCapacityPrecise(self.gpa, live) catch return;
+            for (self.spans.items) |*s| {
+                const dst: u32 = @intCast(packed_arena.items.len);
+                packed_arena.appendSliceAssumeCapacity(self.arena.items[s.off..][0..s.len]);
+                s.off = dst;
+            }
+            std.debug.assert(packed_arena.items.len == live);
+            self.arena.deinit(self.gpa);
+            self.arena = packed_arena;
+            self.dead = 0;
+            self.repoint_all();
         }
 
         // A lazy iterator over the records a predicate matches (a query.* predicate). If the
@@ -228,41 +312,61 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             @compileError("qodb: '" ++ fname ++ "' is not a secondary-index field");
         }
 
-        // Takes ownership of `blob` (an encoded record); decodes + indexes it. `key`
-        // points into the new blob; on a replace the old map entry (whose key points
-        // into the old blob) is removed BEFORE the old blob is freed, then re-inserted
-        // against the new blob's bytes - a string key must never dangle into a freed blob.
-        fn insert_blob(self: *Self, blob: []u8) Error!void {
-            const rec = codec.decode(T, blob) catch return error.Corrupt;
+        // Decode the encoding at `span` (a freshly appended arena tail) and commit it. Used
+        // by load, where the bytes come from a file rather than from encode_inplace.
+        fn insert_span(self: *Self, span: Span) Error!void {
+            const rec = codec.decode(T, self.arena.items[span.off..][0..span.len]) catch {
+                self.arena.items.len = span.off; // roll the un-committable tail off the arena
+                return error.Corrupt;
+            };
+            try self.insert_record(span, rec);
+        }
+
+        // Commit `rec` (whose slices point into the arena at `span`, the freshly appended
+        // tail) and index it. A single getOrPut locates or reserves the key's slot: an
+        // insert is one probe (not get-then-put), a replace re-points the slot's key in place
+        // (same content, same bucket) and turns the old encoding into dead arena space (still
+        // readable, never freed). On any error the appended tail is rolled off the arena so a
+        // failed write leaves no dead space, and a reserved slot is removed.
+        fn insert_record(self: *Self, span: Span, rec: T) Error!void {
+            errdefer {
+                std.debug.assert(self.arena.items.len == span.off + span.len); // the tail
+                self.arena.items.len = span.off; // roll the failed append off the arena
+            }
             const key = key_of(rec);
-            std.debug.assert(self.records.items.len == self.blobs.items.len); // parallel arrays
-            if (self.by_key.get(key)) |i| {
+            std.debug.assert(self.records.items.len == self.spans.items.len); // parallel arrays
+            const gop = try self.by_key.getOrPut(self.gpa, key);
+            if (gop.found_existing) {
+                const i = gop.value_ptr.*;
                 const old_rec = self.records.items[i];
                 // Add the new index values (fallible, rolled back on error) BEFORE dropping
-                // the old ones; an unchanged field keeps its posting. Everything that reads
-                // the old record (index drop, the by_key key bytes) runs while the old blob
-                // is still alive - only then is it freed and the record committed.
+                // the old ones; an unchanged field keeps its posting. The old record's bytes
+                // stay in the arena (now dead), so reading them here is always safe.
                 try self.index_add(old_rec, rec, i);
                 self.index_drop(old_rec, rec, i);
-                std.debug.assert(self.by_key.remove(key)); // old key bytes back the old blob
-                self.gpa.free(self.blobs.items[i]);
+                gop.key_ptr.* = key; // re-point the slot's key to the new span (content same)
+                self.dead += self.spans.items[i].len; // the replaced encoding is now dead
                 self.records.items[i] = rec;
-                self.blobs.items[i] = blob;
-                self.by_key.putAssumeCapacity(key, i); // re-point key to the new blob
+                self.spans.items[i] = span;
+                self.maybe_compact();
                 return;
             }
+            // New key: the slot is reserved but the parallel arrays are not yet grown.
+            errdefer {
+                const removed = self.by_key.remove(key); // drop the reserved slot
+                std.debug.assert(removed);
+            }
+            const pos = self.records.items.len;
+            gop.value_ptr.* = pos;
             try self.records.append(self.gpa, rec);
             errdefer _ = self.records.pop();
-            try self.blobs.append(self.gpa, blob);
-            errdefer _ = self.blobs.pop();
-            const pos = self.records.items.len - 1;
-            try self.by_key.put(self.gpa, key, pos);
-            errdefer std.debug.assert(self.by_key.remove(key));
+            try self.spans.append(self.gpa, span);
+            errdefer _ = self.spans.pop();
             inline for (config.indexes, 0..) |fname, k| {
                 try self.indexes[k].add(self.gpa, @field(rec, fname), pos);
                 errdefer self.indexes[k].drop(self.gpa, @field(rec, fname), pos);
             }
-            std.debug.assert(self.records.items.len == self.blobs.items.len);
+            std.debug.assert(self.records.items.len == self.spans.items.len);
         }
 
         // Add the new record's changed index values at `pos`; an error rolls back what was
@@ -295,16 +399,16 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         // persistence seals); deserialize is its inverse.
         pub fn serialize(self: *const Self) std.mem.Allocator.Error![]u8 {
             var total: usize = @sizeOf(u32);
-            for (self.blobs.items) |b| total += @sizeOf(u32) + b.len;
+            for (self.spans.items) |s| total += @sizeOf(u32) + s.len;
             const buf = try self.gpa.alloc(u8, total);
             errdefer self.gpa.free(buf);
 
             var n: usize = 0;
             write_u32(buf, &n, @intCast(self.records.items.len));
-            for (self.blobs.items) |b| {
-                write_u32(buf, &n, @intCast(b.len));
-                @memcpy(buf[n..][0..b.len], b);
-                n += b.len;
+            for (self.spans.items) |s| {
+                write_u32(buf, &n, s.len);
+                @memcpy(buf[n..][0..s.len], self.arena.items[s.off..][0..s.len]);
+                n += s.len;
             }
             std.debug.assert(n == total);
             return buf;
@@ -316,15 +420,25 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             std.debug.assert(self.count() == 0);
             var n: usize = 0;
             const records = try read_u32(data, &n);
-            try self.ensure_capacity(records); // the count is known: grow once, no rehash
+            // Each record needs at least a u32 length header; a count that cannot fit is
+            // corrupt (and would underflow the payload subtraction below). Subtract form.
+            if (records > (data.len - n) / @sizeOf(u32)) return error.Corrupt;
+            try self.records.ensureTotalCapacityPrecise(self.gpa, records);
+            try self.spans.ensureTotalCapacityPrecise(self.gpa, records);
+            try self.by_key.ensureTotalCapacity(self.gpa, records);
+            // The payload bytes are exactly the snapshot minus its count and length headers;
+            // size the arena to hold them all with one growth, no per-record reallocation.
+            const payload = data.len - n - records * @sizeOf(u32);
+            try self.arena.ensureTotalCapacityPrecise(self.gpa, payload);
             var k: usize = 0;
             while (k < records) : (k += 1) {
                 const len = try read_u32(data, &n);
                 if (len > data.len - n) return error.Corrupt; // subtract: `n + len` could overflow
-                const blob = try self.gpa.dupe(u8, data[n..][0..len]);
-                errdefer self.gpa.free(blob);
+                const off = self.arena.items.len;
+                std.debug.assert(off <= std.math.maxInt(u32)); // arena offsets are u32
+                self.arena.appendSliceAssumeCapacity(data[n..][0..len]);
                 n += len;
-                try self.insert_blob(blob); // takes ownership on success; we free on error
+                try self.insert_span(.{ .off = @intCast(off), .len = len });
             }
         }
 
@@ -490,7 +604,8 @@ fn FieldIndex(comptime T: type, comptime fname: []const u8) type {
             if (created) {
                 gop.value_ptr.* = .empty;
                 if (owns_key) gop.key_ptr.* = gpa.dupe(u8, value) catch |e| {
-                    std.debug.assert(fi.map.remove(value));
+                    const removed = fi.map.remove(value);
+                    std.debug.assert(removed);
                     return e;
                 };
             }
@@ -523,10 +638,12 @@ fn FieldIndex(comptime T: type, comptime fname: []const u8) type {
             posting.deinit(gpa);
             if (owns_key) {
                 const owned = fi.map.getKeyPtr(value).?.*;
-                std.debug.assert(fi.map.remove(value));
+                const removed = fi.map.remove(value);
+                std.debug.assert(removed);
                 gpa.free(owned);
             } else {
-                std.debug.assert(fi.map.remove(value));
+                const removed = fi.map.remove(value);
+                std.debug.assert(removed);
             }
         }
 
@@ -737,4 +854,16 @@ test "secondary index is rebuilt on load" {
         var it = c.find_by("email", "a@x.io"); // resolves only if the index was rebuilt
         try std.testing.expectEqual(@as(usize, 2), count_find(&it));
     }
+}
+
+test "deserialize rejects a corrupt record count without underflowing" {
+    const User = struct { id: u64, name: []const u8 };
+    var c = Collection(User, .{ .key = "id" }).init(std.testing.allocator);
+    defer c.deinit();
+    // A 4-byte snapshot whose count claims 100 records: the arena-payload subtraction must
+    // surface error.Corrupt, not underflow into a panic / huge allocation.
+    var buf: [4]u8 = undefined;
+    var count: u32 = 100;
+    @memcpy(&buf, std.mem.asBytes(&count));
+    try std.testing.expectError(error.Corrupt, c.deserialize(&buf));
 }
