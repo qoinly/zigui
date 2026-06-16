@@ -13,7 +13,10 @@ const Counting = struct {
     peak: usize = 0,
 
     fn allocator(self: *Counting) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        return .{
+            .ptr = self,
+            .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+        };
     }
     fn bump(self: *Counting, add: usize, sub: usize) void {
         self.live = self.live + add - sub;
@@ -33,7 +36,8 @@ const Counting = struct {
     }
     fn remap(ctx: *anyopaque, mem: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const self: *Counting = @ptrCast(@alignCast(ctx));
-        const p = self.backing.vtable.remap(self.backing.ptr, mem, a, new_len, ra) orelse return null;
+        const p = self.backing.vtable.remap(self.backing.ptr, mem, a, new_len, ra) orelse
+            return null;
         self.bump(new_len, mem.len);
         return p;
     }
@@ -86,28 +90,40 @@ pub fn main() !void {
     var t0: i96 = 0;
     var sink: u64 = 0;
 
-    std.debug.print("qodb benchmark - {d} records, mode {s}\n\n", .{ N, @tagName(@import("builtin").mode) });
+    const mode = @tagName(@import("builtin").mode);
+    std.debug.print("qodb benchmark - {d} records, mode {s}\n\n", .{ N, mode });
 
     const Users = qodb.Collection(User, .{ .key = "id", .indexes = &.{"country"} });
     var users = Users.init(gpa);
     defer users.deinit();
 
-    // upsert
-    try users.ensure_capacity(N); // pre-size: the count is known up front
-    var name_buf: [32]u8 = undefined;
-    var email_buf: [32]u8 = undefined;
-    t0 = nowns(io);
-    for (0..N) |i| {
-        const name = std.fmt.bufPrint(&name_buf, "user-{d}", .{i}) catch unreachable;
-        const email = std.fmt.bufPrint(&email_buf, "u{d}@example.io", .{i}) catch unreachable;
-        try users.upsert(.{
+    // Pre-generate the records from the UNCOUNTED backing allocator, so the upsert timing
+    // measures qodb (encode + index + arena), not the fmt/rng of building the inputs, and
+    // the scratch does not pollute qodb's measured footprint.
+    const raw = counting.backing;
+    const prebuilt = try raw.alloc(User, N);
+    defer raw.free(prebuilt);
+    const scratch = try raw.alloc(u8, N * 32);
+    defer raw.free(scratch);
+    var soff: usize = 0;
+    for (prebuilt, 0..) |*u, i| {
+        const name = std.fmt.bufPrint(scratch[soff..], "user-{d}", .{i}) catch unreachable;
+        soff += name.len;
+        const email = std.fmt.bufPrint(scratch[soff..], "u{d}@example.io", .{i}) catch unreachable;
+        soff += email.len;
+        u.* = .{
             .id = i,
             .age = @intCast(rng.intRangeAtMost(u8, 0, 99)),
             .name = name,
             .email = email,
             .country = countries[rng.intRangeLessThan(usize, 0, countries.len)],
-        });
+        };
     }
+
+    // upsert
+    try users.ensure_capacity(N); // pre-size: the count is known up front
+    t0 = nowns(io);
+    for (prebuilt) |u| try users.upsert(u);
     row("upsert (insert)", N, since(io, t0));
     const peak_after_insert = counting.peak;
 
@@ -192,19 +208,25 @@ pub fn main() !void {
             var iv: [12]u8 = undefined;
             try self.io.randomSecure(&iv);
             @memcpy(out[0..12], &iv);
-            std.crypto.aead.aes_gcm.Aes256Gcm.encrypt(out[12..][0..32], out[44..][0..16], dek, "", iv, self.master);
+            const Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
+            Gcm.encrypt(out[12..][0..32], out[44..][0..16], dek, "", iv, self.master);
             return 60;
         }
         fn unwrap(ctx: *anyopaque, w: []const u8, dek: *[32]u8) qodb.secure.Error!void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             const tag = w[44..][0..16].*;
-            std.crypto.aead.aes_gcm.Aes256Gcm.decrypt(dek, w[12..][0..32], tag, "", w[0..12].*, self.master) catch return error.BadKey;
+            const Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
+            Gcm.decrypt(dek, w[12..][0..32], tag, "", w[0..12].*, self.master) catch
+                return error.BadKey;
         }
         fn nope(_: *anyopaque, _: std.mem.Allocator, _: []const u8) qodb.secure.Error![]u8 {
             return error.Corrupt;
         }
         fn provider(self: *@This()) qodb.secure.KeyProvider {
-            return .{ .ctx = self, .vtable = &.{ .wrap = wrap, .unwrap = unwrap, .seal = nope, .open = nope } };
+            return .{
+                .ctx = self,
+                .vtable = &.{ .wrap = wrap, .unwrap = unwrap, .seal = nope, .open = nope },
+            };
         }
     };
     var kek = SoftKek{ .master = @splat(7), .io = io };
