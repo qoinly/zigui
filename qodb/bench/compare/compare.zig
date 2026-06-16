@@ -8,10 +8,10 @@
 // Record: { id, age, name, email, country } with a secondary index on `country`. The same
 // pre-generated records and the same random get/query/scan inputs feed every engine.
 //
-// qodb's read speed is architectural, not a handicap on the others: it stores already-
-// decoded structs and returns them BORROWED (valid until the next mutation) with no copy
-// or API marshalling, whereas SQLite/LMDB inherently marshal each value through their API.
-// That borrow is the tradeoff qodb makes for the speed (weaker value ownership/lifetime).
+// qodb's read speed is architectural, not a handicap on the others: a record it returns
+// BORROWS its in-memory storage (valid until the next mutation) with no copy or API
+// marshalling, whereas SQLite/LMDB inherently marshal each value through their API. That
+// borrow is the tradeoff qodb makes for the speed (weaker value ownership/lifetime).
 //
 // Honest framing: qodb is an in-memory store with snapshot persistence; SQLite/LMDB are
 // durable disk engines. The `:memory:` / NOSYNC rows are the like-for-like in-memory
@@ -159,7 +159,7 @@ pub fn main() !void {
     std.debug.print("comparative benchmark - {d} records, get x{d}, query x{d}, scan x{d}\n", .{
         N, GETS, QUERIES, SCANS,
     });
-    std.debug.print("sqlite {s}, lmdb mapped, qodb arena\n", .{c.sqlite3_libversion()});
+    std.debug.print("sqlite {s}\n", .{c.sqlite3_libversion()});
     header();
 
     print_row(try bench_qodb(gpa, io, recs, get_ids, q_country));
@@ -234,7 +234,7 @@ fn bench_qodb(
         .scan_ms = scan_ms,
         .disk_mb = file_mb(io, path),
         .mem_mb = peak_mb,
-        .mem_src = "heap (arena+AoS)",
+        .mem_src = "heap",
     };
 }
 

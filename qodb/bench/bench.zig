@@ -98,8 +98,8 @@ pub fn main() !void {
     defer users.deinit();
 
     // Pre-generate the records from the UNCOUNTED backing allocator, so the upsert timing
-    // measures qodb (encode + index + arena), not the fmt/rng of building the inputs, and
-    // the scratch does not pollute qodb's measured footprint.
+    // measures qodb's own work, not the fmt/rng of building the inputs, and the scratch
+    // does not pollute qodb's measured footprint.
     const raw = counting.backing;
     const prebuilt = try raw.alloc(User, N);
     defer raw.free(prebuilt);
