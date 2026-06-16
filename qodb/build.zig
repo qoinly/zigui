@@ -29,4 +29,26 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_bench.addArgs(args);
     const bench_step = b.step("bench", "Run benchmarks (use -Doptimize=ReleaseFast)");
     bench_step.dependOn(&run_bench.step);
+
+    // The comparative benchmark links SQLite + LMDB (vendored C) and is gated behind a flag
+    // so the normal build needs no C sources. Run with -Doptimize=ReleaseFast -Dcompare.
+    if (b.option(bool, "compare", "Build the qodb vs SQLite vs LMDB comparison") orelse false) {
+        const cmp = b.createModule(.{
+            .root_source_file = b.path("bench/compare/compare.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cmp.addImport("qodb", qodb);
+        cmp.addIncludePath(b.path("bench/compare/vendor"));
+        cmp.addCSourceFiles(.{
+            .root = b.path("bench/compare/vendor"),
+            .files = &.{ "sqlite3.c", "mdb.c", "midl.c" },
+            .flags = &.{"-DSQLITE_THREADSAFE=0"},
+        });
+        cmp.link_libc = true;
+        const cmp_exe = b.addExecutable(.{ .name = "compare", .root_module = cmp });
+        const run_cmp = b.addRunArtifact(cmp_exe);
+        const cmp_step = b.step("compare", "Run the comparative benchmark");
+        cmp_step.dependOn(&run_cmp.step);
+    }
 }
