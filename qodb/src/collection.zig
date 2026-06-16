@@ -1,11 +1,12 @@
-// A typed collection: an in-memory set of struct T keyed by one field, with CRUD and
-// the typed query iterator. Each record's variable bytes (its []const u8 fields) live in
-// ONE growing byte arena the collection owns (the codec encodings packed back to back),
-// not a malloc per record: an insert is an arena append, so a bulk load makes no per-
-// record allocation. A record returned by get/query borrows the arena: it is valid until
-// the next mutation. Appending can reallocate the arena and move its bytes, so the stored
-// decoded records are re-pointed (re-decoded from their spans) whenever the base moves;
-// a replace/remove leaves dead bytes that a compaction reclaims once they pass a threshold.
+// A typed collection: an in-memory set of struct T keyed by one field, with CRUD and the
+// typed query iterator. Each record's encoding (the codec bytes) lives in ONE growing byte
+// arena the collection owns, packed back to back - not a malloc per record, so an insert is
+// an arena append. No decoded copy of a record is stored: get/query DECODE from the span on
+// demand (zero-copy - the result's []const u8 fields borrow the arena), so a record is valid
+// until the next mutation. Appending can reallocate the arena and move its bytes; the only
+// borrow that survives across a read is a string primary key in by_key, which is re-pointed
+// when the bytes move. A replace/remove leaves dead bytes a compaction reclaims past a
+// threshold.
 
 const std = @import("std");
 const codec = @import("codec.zig");
@@ -42,17 +43,18 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         pub const Record = T; // the struct this collection stores (for schema introspection)
         pub const key_field = config.key;
 
-        // A record's encoded bytes live at arena[span.off..][0..span.len]; span[i] backs
-        // records[i]. The arena packs every live (and not-yet-compacted dead) encoding back
-        // to back; an append may move the arena, so records is re-pointed when it does.
+        // A record's encoded bytes live at arena[span.off..][0..span.len]; spans[i] locates
+        // record i. The arena packs every live (and not-yet-compacted dead) encoding back to
+        // back. No decoded copy of the record is kept - get/query DECODE from the span on
+        // demand (zero-copy: the result borrows the arena, valid until the next mutation), so
+        // an append that moves the arena only has to re-point a string primary key.
         const Span = struct { off: u32, len: u32 };
 
         gpa: std.mem.Allocator,
-        records: std.ArrayListUnmanaged(T) = .empty, // slices point into the arena
         arena: std.ArrayListUnmanaged(u8) = .empty, // every record's encoding, packed
-        spans: std.ArrayListUnmanaged(Span) = .empty, // spans[i] locates records[i] in arena
+        spans: std.ArrayListUnmanaged(Span) = .empty, // spans[i] locates record i in the arena
         dead: usize = 0, // arena bytes no live span covers; compacted past the threshold
-        by_key: KeyMap = .empty, // key -> index in records
+        by_key: KeyMap = .empty, // key -> index in spans
         indexes: IndexSet = undefined, // one FieldIndex per config.indexes; set in init
         revision: u64 = 0, // bumped on each mutation; a database derives dirtiness from it
 
@@ -69,7 +71,6 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.records.deinit(self.gpa);
             self.arena.deinit(self.gpa);
             self.spans.deinit(self.gpa);
             self.by_key.deinit(self.gpa);
@@ -77,16 +78,15 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         }
 
         pub fn count(self: *const Self) usize {
-            return self.records.items.len;
+            return self.spans.items.len;
         }
 
-        // Reserve room for `n` records up front: the record/blob arrays and the key map grow
-        // once to exactly `n` rather than incrementally, so a known-size bulk load does no
-        // reallocation or rehash and holds no power-of-two slack. load() pre-sizes itself
-        // from the snapshot; call this before a large upsert run.
+        // Reserve room for `n` records up front: the span array and the key map grow once to
+        // exactly `n` rather than incrementally, so a known-size bulk load does no realloc or
+        // rehash and holds no power-of-two slack. load() pre-sizes itself from the snapshot;
+        // call this before a large upsert run.
         pub fn ensure_capacity(self: *Self, n: usize) Error!void {
             std.debug.assert(n <= std.math.maxInt(u32)); // the key map sizes with a u32
-            try self.records.ensureTotalCapacityPrecise(self.gpa, n);
             try self.spans.ensureTotalCapacityPrecise(self.gpa, n);
             try self.by_key.ensureTotalCapacity(self.gpa, @intCast(n));
             // One arena growth up front to a size estimate, not a cap: an append still grows
@@ -94,9 +94,12 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             try self.arena.ensureTotalCapacityPrecise(self.gpa, n * avg_record_estimate);
         }
 
-        // All records, borrowing the collection's storage (valid until the next mutation).
-        pub fn items(self: *const Self) []const T {
-            return self.records.items;
+        // The record at index `i`, decoded from its span; the result borrows the arena and is
+        // valid until the next mutation.
+        fn record_at(self: *const Self, i: usize) T {
+            std.debug.assert(i < self.spans.items.len); // every read funnels through here
+            const s = self.spans.items[i];
+            return codec.decode(T, self.arena.items[s.off..][0..s.len]) catch unreachable;
         }
 
         const Appended = struct { span: Span, rec: T }; // a just-appended encoding + its view
@@ -112,9 +115,8 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
         // Encode `rec` onto the end of the arena, returning its span AND a view of it whose
         // []const u8 fields point into the freshly written arena bytes (encode_inplace does
         // the encode and the re-point in one walk, so the caller need not decode the span
-        // back). A growth that moves the arena base re-points every already-stored record
-        // first; the just-appended span is NOT yet in spans/records, so it is the caller's
-        // to commit.
+        // back). A growth that moves the arena base re-points the string primary key first;
+        // the just-appended span is not yet in spans, so it is the caller's to commit.
         fn append_encoding(self: *Self, rec: T) Error!Appended {
             const size = codec.size_of(rec);
             std.debug.assert(size <= std.math.maxInt(u32)); // a span length is a u32
@@ -122,54 +124,46 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             std.debug.assert(off <= std.math.maxInt(u32)); // arena offsets are u32
             const before = self.arena.items.ptr;
             try self.arena.ensureUnusedCapacity(self.gpa, size);
-            if (self.arena.items.ptr != before) self.repoint_all();
+            if (self.arena.items.ptr != before) self.repoint_keys();
             const dst = self.arena.addManyAsSliceAssumeCapacity(size);
             const stored = codec.encode_inplace(T, rec, dst) catch unreachable; // sized above
             return .{ .span = .{ .off = @intCast(off), .len = @intCast(size) }, .rec = stored };
         }
 
-        // Re-decode every stored record from its span so its []const u8 fields point into
-        // the arena's current bytes. Called after the arena's base moves (a realloc) or a
-        // compaction rewrites offsets. A string primary key is stored in by_key as a slice
-        // into the arena, so it is re-pointed to the new bytes too (the content - and thus
-        // the hash and bucket - is unchanged, so overwriting the key pointer in place is
-        // safe). Secondary indexes own their key copies, so they need no fixup.
-        fn repoint_all(self: *Self) void {
-            for (self.records.items, self.spans.items) |*r, s| {
-                r.* = codec.decode(T, self.arena.items[s.off..][0..s.len]) catch unreachable;
-            }
-            // A string primary key is stored in by_key as a slice into the old arena bytes;
-            // walk the map by record index (never by content, whose stored bytes now dangle)
-            // and overwrite each key pointer from its re-decoded record. The content - hence
-            // the hash and bucket - is unchanged, so an in-place key rewrite is safe.
-            if (comptime is_byte_slice(KeyType)) {
-                var it = self.by_key.iterator();
-                while (it.next()) |e| e.key_ptr.* = key_of(self.records.items[e.value_ptr.*]);
-            }
+        // Re-point a string primary key after the arena's bytes move (a realloc or a
+        // compaction). by_key stores such a key as a slice into the arena, so on a move every
+        // key pointer must be refreshed from its record's current bytes. The map is walked by
+        // record index (never by content, whose old bytes have moved) and the key is rewritten
+        // in place - the content, hence the hash and bucket, is unchanged. A non-byte-slice key
+        // is stored by value, so there is nothing to do (and the function compiles to nothing).
+        // Secondary indexes own their key copies and never need this.
+        fn repoint_keys(self: *Self) void {
+            if (comptime !is_byte_slice(KeyType)) return;
+            var it = self.by_key.iterator();
+            while (it.next()) |e| e.key_ptr.* = key_of(self.record_at(e.value_ptr.*));
         }
 
         pub fn get(self: *const Self, key: KeyType) ?T {
             const i = self.by_key.get(key) orelse return null;
-            std.debug.assert(i < self.records.items.len); // the map index never outruns records
-            return self.records.items[i];
+            std.debug.assert(i < self.spans.items.len); // the map index never outruns spans
+            return self.record_at(i);
         }
 
         // Remove the record with `key`; returns whether one existed.
         pub fn remove(self: *Self, key: KeyType) bool {
             const i = self.by_key.get(key) orelse return false;
-            std.debug.assert(i < self.records.items.len);
+            std.debug.assert(i < self.spans.items.len);
             // Unindex while the bytes are alive (a []const u8 value is read from the record).
-            const rec_i = self.records.items[i];
+            const rec_i = self.record_at(i);
             inline for (config.indexes, 0..) |fname, k| {
                 self.indexes[k].drop(self.gpa, @field(rec_i, fname), i);
             }
             // The removed span becomes dead arena space (reclaimed by a later compaction).
             self.dead += self.spans.items[i].len;
             _ = self.by_key.remove(key); // a string key points into the arena; drop it first
-            const last = self.records.items.len - 1;
+            const last = self.spans.items.len - 1;
             if (i != last) {
-                const moved = self.records.items[last];
-                self.records.items[i] = moved;
+                const moved = self.record_at(last);
                 self.spans.items[i] = self.spans.items[last];
                 // The moved key is already mapped (to `last`); updating it allocates nothing.
                 self.by_key.putAssumeCapacity(key_of(moved), i);
@@ -178,9 +172,7 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                     self.indexes[k].repoint(@field(moved, fname), last, i);
                 }
             }
-            _ = self.records.pop();
             _ = self.spans.pop();
-            std.debug.assert(self.records.items.len == self.spans.items.len);
             self.maybe_compact();
             self.revision +%= 1;
             return true;
@@ -188,9 +180,8 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
 
         // Reclaim dead arena bytes once they are at least the configured fraction of the
         // arena: pack every live span's encoding into a fresh tight buffer (spans are in
-        // record order, not arena order, so an in-place slide could overlap), swap it in,
-        // and re-point all records. Keys/index keys are independent copies, so only the
-        // records' borrowed slices move; no map touch is needed. Compaction is a pure
+        // record order, not arena order, so an in-place slide could overlap), swap it in, and
+        // re-point a string primary key (the only borrow into the arena). Compaction is a pure
         // memory optimization, so a failed scratch allocation just leaves the dead bytes.
         fn maybe_compact(self: *Self) void {
             if (self.dead * compact_den < self.arena.items.len * compact_num) return;
@@ -207,7 +198,7 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             self.arena.deinit(self.gpa);
             self.arena = packed_arena;
             self.dead = 0;
-            self.repoint_all();
+            self.repoint_keys();
         }
 
         // A lazy iterator over the records a predicate matches (a query.* predicate). If the
@@ -223,14 +214,15 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                 const value = if (comptime s.child) |j| pred.preds[j].operand else pred.operand;
                 break :pos self.indexes[slot].seek(value);
             } else null;
-            return .{ .recs = self.records.items, .pred = pred, .positions = positions };
+            return .{ .col = self, .pred = pred, .positions = positions, .n = self.count() };
         }
 
         pub fn Iterator(comptime P: type) type {
             return struct {
-                recs: []const T,
+                col: *const Self, // each visited record is decoded from its span on demand
                 pred: P,
                 positions: ?[]const usize, // seeded candidate positions, or null to scan all
+                n: usize, // record count at query() time (do not mutate while iterating)
                 i: usize = 0,
 
                 pub fn next(it: *@This()) ?T {
@@ -238,13 +230,14 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                         while (it.i < ps.len) {
                             const p = ps[it.i];
                             it.i += 1;
-                            std.debug.assert(p < it.recs.len); // a posting never outruns records
-                            if (it.pred.match(T, it.recs[p])) return it.recs[p];
+                            std.debug.assert(p < it.n); // a posting never outruns the records
+                            const rec = it.col.record_at(p);
+                            if (it.pred.match(T, rec)) return rec;
                         }
                         return null;
                     }
-                    while (it.i < it.recs.len) {
-                        const rec = it.recs[it.i];
+                    while (it.i < it.n) {
+                        const rec = it.col.record_at(it.i);
                         it.i += 1;
                         if (it.pred.match(T, rec)) return rec;
                     }
@@ -287,20 +280,21 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             value: @FieldType(T, fname),
         ) FindIterator {
             const k = comptime index_slot(fname);
-            return .{ .recs = self.records.items, .positions = self.indexes[k].seek(value) };
+            return .{ .col = self, .positions = self.indexes[k].seek(value), .n = self.count() };
         }
 
         pub const FindIterator = struct {
-            recs: []const T,
+            col: *const Self,
             positions: []const usize,
+            n: usize,
             i: usize = 0,
 
             pub fn next(it: *FindIterator) ?T {
                 if (it.i >= it.positions.len) return null;
                 const pos = it.positions[it.i];
                 it.i += 1;
-                std.debug.assert(pos < it.recs.len); // a posting never outruns records
-                return it.recs[pos];
+                std.debug.assert(pos < it.n); // a posting never outruns the records
+                return it.col.record_at(pos);
             }
         };
 
@@ -334,11 +328,10 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                 self.arena.items.len = span.off; // roll the failed append off the arena
             }
             const key = key_of(rec);
-            std.debug.assert(self.records.items.len == self.spans.items.len); // parallel arrays
             const gop = try self.by_key.getOrPut(self.gpa, key);
             if (gop.found_existing) {
                 const i = gop.value_ptr.*;
-                const old_rec = self.records.items[i];
+                const old_rec = self.record_at(i); // its bytes are still alive in the arena
                 // Add the new index values (fallible, rolled back on error) BEFORE dropping
                 // the old ones; an unchanged field keeps its posting. The old record's bytes
                 // stay in the arena (now dead), so reading them here is always safe.
@@ -346,27 +339,23 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
                 self.index_drop(old_rec, rec, i);
                 gop.key_ptr.* = key; // re-point the slot's key to the new span (content same)
                 self.dead += self.spans.items[i].len; // the replaced encoding is now dead
-                self.records.items[i] = rec;
                 self.spans.items[i] = span;
                 self.maybe_compact();
                 return;
             }
-            // New key: the slot is reserved but the parallel arrays are not yet grown.
+            // New key: the slot is reserved but the span array is not yet grown.
             errdefer {
                 const removed = self.by_key.remove(key); // drop the reserved slot
                 std.debug.assert(removed);
             }
-            const pos = self.records.items.len;
+            const pos = self.spans.items.len;
             gop.value_ptr.* = pos;
-            try self.records.append(self.gpa, rec);
-            errdefer _ = self.records.pop();
             try self.spans.append(self.gpa, span);
             errdefer _ = self.spans.pop();
             inline for (config.indexes, 0..) |fname, k| {
                 try self.indexes[k].add(self.gpa, @field(rec, fname), pos);
                 errdefer self.indexes[k].drop(self.gpa, @field(rec, fname), pos);
             }
-            std.debug.assert(self.records.items.len == self.spans.items.len);
         }
 
         // Add the new record's changed index values at `pos`; an error rolls back what was
@@ -404,7 +393,7 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             errdefer self.gpa.free(buf);
 
             var n: usize = 0;
-            write_u32(buf, &n, @intCast(self.records.items.len));
+            write_u32(buf, &n, @intCast(self.spans.items.len));
             for (self.spans.items) |s| {
                 write_u32(buf, &n, s.len);
                 @memcpy(buf[n..][0..s.len], self.arena.items[s.off..][0..s.len]);
@@ -423,7 +412,6 @@ pub fn Collection(comptime T: type, comptime config: Config) type {
             // Each record needs at least a u32 length header; a count that cannot fit is
             // corrupt (and would underflow the payload subtraction below). Subtract form.
             if (records > (data.len - n) / @sizeOf(u32)) return error.Corrupt;
-            try self.records.ensureTotalCapacityPrecise(self.gpa, records);
             try self.spans.ensureTotalCapacityPrecise(self.gpa, records);
             try self.by_key.ensureTotalCapacity(self.gpa, records);
             // The payload bytes are exactly the snapshot minus its count and length headers;
