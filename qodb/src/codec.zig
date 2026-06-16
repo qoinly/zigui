@@ -42,6 +42,78 @@ pub fn decode(comptime T: type, bytes: []const u8) Error!T {
     return v;
 }
 
+// Encode `value` into `out` AND return a copy of it whose []const u8 fields point into
+// `out` instead of the caller's buffers - the result the collection stores after a write.
+// One structural walk does both, replacing an encode followed by a decode of the same
+// blob. `out` must be sized with size_of (NoSpace otherwise) and must outlive the result.
+pub fn encode_inplace(comptime T: type, value: T, out: []u8) Error!T {
+    var n: usize = 0;
+    const v = try encode_inplace_value(T, value, out, &n);
+    assert(n == size_of(value)); // the walk wrote exactly what size_of predicted
+    return v;
+}
+
+// The encode walk, returning a re-pointed value. A scalar/bool/enum passes through; a
+// slice is written and its stored view (a window into `out`) returned; structs, optionals,
+// arrays, and unions rebuild from their re-pointed parts. Mirrors encode_value exactly so
+// the bytes are identical - only the returned value differs (it borrows `out`).
+fn encode_inplace_value(comptime T: type, value: T, out: []u8, n: *usize) Error!T {
+    switch (@typeInfo(T)) {
+        .void, .bool, .int, .float, .@"enum" => {
+            try encode_value(T, value, out, n);
+            return value;
+        },
+        .pointer => {
+            const bytes = byte_slice(T, value);
+            assert(bytes.len <= std.math.maxInt(u32)); // length is a u32 on the wire
+            try encode_value(u32, @intCast(bytes.len), out, n);
+            const at = n.*;
+            try put(out, n, bytes);
+            return out[at..][0..bytes.len]; // the stored slice borrows `out`
+        },
+        .optional => |o| {
+            if (value) |inner| {
+                try put(out, n, &[_]u8{1});
+                return try encode_inplace_value(o.child, inner, out, n);
+            }
+            try put(out, n, &[_]u8{0});
+            return null;
+        },
+        .array => |a| {
+            var stored: T = undefined;
+            for (value, &stored) |elem, *slot| {
+                slot.* = try encode_inplace_value(a.child, elem, out, n);
+            }
+            return stored;
+        },
+        .@"struct" => |s| {
+            var stored: T = value; // scalars copy through; slice fields get re-pointed below
+            inline for (comptime field_order(T)) |fi| {
+                const f = s.fields[fi];
+                @field(stored, f.name) =
+                    try encode_inplace_value(f.type, @field(value, f.name), out, n);
+            }
+            return stored;
+        },
+        .@"union" => return try encode_inplace_union(T, value, out, n),
+        else => unsupported(T),
+    }
+}
+
+// Encode a tagged union and return it with its active payload re-pointed into `out`, so a
+// slice inside a union arm borrows the blob like every other field.
+fn encode_inplace_union(comptime T: type, value: T, out: []u8, n: *usize) Error!T {
+    const u = @typeInfo(T).@"union";
+    const Tag = u.tag_type orelse unsupported(T);
+    try encode_value(Tag, std.meta.activeTag(value), out, n);
+    switch (value) {
+        inline else => |payload, tag| {
+            const stored = try encode_inplace_value(@TypeOf(payload), payload, out, n);
+            return @unionInit(T, @tagName(tag), stored);
+        },
+    }
+}
+
 fn size_of_value(comptime T: type, value: T) usize {
     return switch (@typeInfo(T)) {
         .void => 0,
@@ -375,6 +447,43 @@ test "layout_hash changes on a real shape change, not on a reorder" {
     const ArmRevalue = struct { r: enum(u8) { a = 9, b = 2 } };
     try std.testing.expectEqual(layout_hash(Same), layout_hash(ArmReorder));
     try std.testing.expect(layout_hash(Same) != layout_hash(ArmRevalue));
+}
+
+test "encode_inplace writes identical bytes and re-points slices into out" {
+    const Tag = union(enum) { none, label: []const u8 };
+    const Rec = struct {
+        id: u64,
+        name: []const u8,
+        nick: ?[]const u8,
+        tag: Tag,
+    };
+    var src_name = [_]u8{ 'a', 'd', 'a' };
+    var src_nick = [_]u8{ 'x', 'y' };
+    var src_label = [_]u8{ 'h', 'i' };
+    const r = Rec{
+        .id = 7,
+        .name = &src_name,
+        .nick = &src_nick,
+        .tag = .{ .label = &src_label },
+    };
+
+    var plain: [64]u8 = undefined;
+    var inplace: [64]u8 = undefined;
+    const lp = try encode(r, &plain);
+    const stored = try encode_inplace(Rec, r, &inplace); // also fills `inplace`
+    try std.testing.expectEqualSlices(u8, plain[0..lp], inplace[0..lp]);
+
+    // The stored value equals the input by content but borrows `inplace`, not the sources.
+    try std.testing.expectEqual(@as(u64, 7), stored.id);
+    try std.testing.expectEqualStrings("ada", stored.name);
+    try std.testing.expectEqualStrings("xy", stored.nick.?);
+    try std.testing.expectEqualStrings("hi", stored.tag.label);
+    const base = @intFromPtr(&inplace);
+    const end = base + inplace.len;
+    inline for (.{ stored.name.ptr, stored.nick.?.ptr, stored.tag.label.ptr }) |p| {
+        const a = @intFromPtr(p);
+        try std.testing.expect(a >= base and a < end); // points into `out`, not the sources
+    }
 }
 
 test "void union arm, optional, and short-buffer errors" {
