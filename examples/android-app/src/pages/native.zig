@@ -71,8 +71,12 @@ pub fn view(f: *Frame, app: *App) *Node {
     const note = if (app.last_result_len > 0) clip else "(clipboard empty)";
     const file = app.file_preview[0..app.file_preview_len];
     const file_note = if (app.file_preview_len > 0) file else "(no file picked)";
-    const has_cam = zigui.napi.permissions.granted(CAMERA);
-    const cam = if (has_cam) "Camera: granted" else "Camera: not granted";
+    const cam = switch (zigui.napi.permissions.status(CAMERA)) {
+        .granted => "Camera: granted",
+        .not_requested => "Camera: not requested",
+        .declined => "Camera: declined",
+        .declined_permanent => "Camera: declined (enable in Settings)",
+    };
     const auth = if (app.auth_done) |ok|
         (if (ok) "Auth: success" else "Auth: failed")
     else
