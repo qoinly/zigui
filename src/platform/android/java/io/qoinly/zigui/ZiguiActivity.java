@@ -326,6 +326,56 @@ public class ZiguiActivity extends NativeActivity {
         }
     }
 
+    // Permissions. Native bridges these; the PackageManager / SharedPreferences chains
+    // are far terser in Java than in JNI (the same reason the sms helpers live here).
+    private static final String PERM_ASKED_PREFS = "zigui_permissions_asked";
+
+    // The manifest's runtime permissions, "\n"-joined, so a screen drives off the
+    // manifest instead of hardcoding names. Empty when none are declared.
+    public String permissionsDeclared() {
+        try {
+            String[] ps = getPackageManager()
+                .getPackageInfo(getPackageName(), PackageManager.GET_PERMISSIONS)
+                .requestedPermissions;
+            if (ps == null) {
+                return "";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (String p : ps) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                sb.append(p);
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // 0 granted, 1 not-requested, 2 declined (askable), 3 declined permanently. The OS
+    // reports never-asked and "don't ask again" the same way (rationale false), so an
+    // asked flag persisted on request() splits the two.
+    public int permissionState(String name) {
+        if (checkSelfPermission(name) == PackageManager.PERMISSION_GRANTED) {
+            return 0;
+        }
+        if (shouldShowRequestPermissionRationale(name)) {
+            return 2;
+        }
+        boolean asked = getSharedPreferences(PERM_ASKED_PREFS, MODE_PRIVATE)
+            .getBoolean(name, false);
+        return asked ? 3 : 1;
+    }
+
+    // Marks the attempt (so permissionState can later tell permanent-deny from
+    // never-asked) and raises the system dialog.
+    public void permissionRequest(String name) {
+        getSharedPreferences(PERM_ASKED_PREFS, MODE_PRIVATE)
+            .edit().putBoolean(name, true).apply();
+        requestPermissions(new String[] { name }, 0);
+    }
+
     private native void nativeOnText(String text, int caret);
 
     private native boolean nativeOnBack();
