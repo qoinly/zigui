@@ -1,4 +1,20 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Android has no main(): the framework calls the exported
+// ANativeActivity_onCreate. Zig emits an export only when it is reachable, so
+// force-reference it here - importing zigui from an Android app pulls the entry
+// into the binary.
+comptime {
+    if (builtin.abi.isAndroid()) {
+        _ = &@import("platform/android/app.zig").ANativeActivity_onCreate;
+    }
+}
+
+// The JNI bridge symbols the shipped io.qoinly.zigui.ZiguiActivity's native methods
+// resolve against live in src/platform/android/jni_exports.zig and forward straight
+// to the internal sinks (ime, custom_shell, picker, biometric) - the app writes no
+// JNI glue, so there is no package-named sink to re-export here.
 
 const color = @import("color.zig");
 const node = @import("node.zig");
@@ -60,6 +76,23 @@ pub fn animate() void {
 }
 pub const render_tree = node.render;
 pub const render_tree_at = node.render_at;
+
+// Native platform APIs (vibrate, share, notifications, the device pickers, ...).
+// A namespace, not flat wrappers, so each call is analyzed lazily: an API a target
+// lacks is a compile error only where a caller actually uses it (see napi/root.zig).
+pub const napi = @import("napi/root.zig");
+
+// Background work: run a heavy job off the UI thread, read its result back in the
+// view with a poll. Cross-platform (std.Thread); on Android a finished job nudges
+// the vsync loop to render so the poll runs.
+pub const background = @import("background.zig");
+pub const Task = background.Task;
+
+// Headless background events. An app defines `pub fn on_background_event(ev:
+// zigui.BackgroundEvent) void` in its root to handle a notification / broadcast with
+// no foreground (Android delivers these even when the app is not running). The domain
+// lives under napi because on Android its events come entirely through native APIs.
+pub const BackgroundEvent = napi.headless.BackgroundEvent;
 
 pub const theme = @import("theme.zig");
 pub const Spacing = theme.Spacing;
@@ -143,21 +176,6 @@ pub fn input_events() []const InputEvent {
     return frame_ctx.get().paint.raw_inputs();
 }
 
-// Clipboard. Read/write plain text, plus an external-change poll: clipboard_changed
-// returns true once each time something outside this app changes the clipboard (our
-// own set_clipboard_text writes are not reported), so a remote-control loop can
-// forward it. The clipboard is one per app (every window shares it), and the poll
-// is edge-triggered, so call clipboard_changed once a frame from a single window.
-pub fn clipboard_text(buf: []u8) []const u8 {
-    return custom_shell.pasteboard_read_into(buf);
-}
-pub fn set_clipboard_text(s: []const u8) void {
-    custom_shell.pasteboard_write_string(s);
-}
-pub fn clipboard_changed() bool {
-    return custom_shell.clipboard_changed_external();
-}
-
 // Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
 // window; display_bounds(i) gives monitor i's frame in points so the app can size a
 // stream or place a window per screen.
@@ -187,6 +205,7 @@ pub fn display_count() u32 {
 pub fn display_bounds(index: u32) BoundsF {
     return custom_shell.display_bounds(index);
 }
+
 pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;
@@ -311,6 +330,24 @@ pub fn tabs(
     oo.ctx = fc.state;
     return kit_nodes.tabs(fc.arena, fc.theme, labels, state, oo);
 }
+// A bottom navigation bar: a persistent icon+label row that switches top-level
+// sections. `state` is caller-owned (the tab hitboxes outlive the frame); pass
+// `safe_bottom` the bottom inset so the band reaches the screen edge under the nav.
+pub fn bottom_bar(
+    items: []const kit.bottom_bar.Item,
+    state: *kit.bottom_bar.State,
+    o: kit_nodes.BottomBar,
+) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    oo.ctx = fc.state;
+    return kit_nodes.bottom_bar(fc.arena, fc.theme, items, state, oo);
+}
+pub const BottomBarState = kit.bottom_bar.State;
+pub const BottomBarItem = kit.bottom_bar.Item;
+pub const BottomBarStyle = kit.bottom_bar.Style;
+pub const BottomBarOpts = kit_nodes.BottomBar;
 pub fn toggle_group(
     items: []const kit.toggle_group.ToggleGroupItem,
     o: kit_nodes.ToggleGrp,
@@ -412,6 +449,179 @@ pub fn tabbar(o: kit_nodes.Tabbar) *node.Node {
 pub const TabbarOpts = kit_nodes.Tabbar;
 pub const TabItem = kit.tabbar.TabItem;
 pub const TabBarState = kit.tabbar.TabBarState;
+
+// Page-route navigation (cross-platform, Flutter-feel). The route stack is plain
+// app state; the app owns the route->view dispatch. NavStack.push/pop/go drive
+// it; app_bar draws the flat themed bar with an auto back-chevron; handle_back
+// pops on Esc / the Android Back button (and publishes the depth so Android Back
+// backgrounds the app at the root instead of popping).
+pub const NavStack = kit.navigator.NavStack;
+
+pub fn app_bar(title: []const u8, o: kit_nodes.AppBar) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    return kit_nodes.app_bar(fc.arena, fc.theme, title, oo);
+}
+pub const AppBarOpts = kit_nodes.AppBar;
+
+// Call once a frame from the body that hosts the navigator: pops the stack on a
+// back request (Esc / Android Back / the app-bar chevron) and publishes the depth.
+pub fn handle_back(stack: *NavStack) void {
+    const fc = frame_ctx.get();
+    fc.paint.nav_depth = @intCast(stack.depth);
+    if (fc.paint.take_back()) stack.pop();
+}
+
+// The navigator's animated page slot: builds the current page, or - during a brief
+// push/pop transition - slides the leaving and arriving pages past each other (the
+// native page feel). The app hands its route->view dispatch; pages read the nav state
+// normally (the stack flips which entry is "current" while it builds the leaving
+// page). A drop-in for "dispatch the current route to a page node". Allocation-free
+// beyond the per-frame arena; the loop idles again once the slide settles. `dispatch`
+// must be a pure view builder - it runs twice (both pages) mid-slide.
+pub fn nav_page(
+    f: *Frame,
+    comptime State: type,
+    stack: *NavStack,
+    state: *State,
+    comptime dispatch: fn (*Frame, *State, []const u8) *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    if (!stack.trans_active) return dispatch(f, state, stack.current());
+
+    if (stack.trans_start < 0) stack.trans_start = fc.paint.now_s; // stamp on frame one
+    std.debug.assert(stack.trans_start <= fc.paint.now_s); // the start is never in the future
+    const SLIDE_S: f64 = 0.22;
+    const t = @min((fc.paint.now_s - stack.trans_start) / SLIDE_S, 1.0);
+    if (t >= 1) {
+        stack.trans_active = false;
+        return dispatch(f, state, stack.current());
+    }
+    fc.paint.animating = true; // keep presenting through the slide
+
+    // ease-out cubic: quick then settling.
+    const inv: f32 = 1 - @as(f32, @floatCast(t));
+    const eased = 1 - inv * inv * inv;
+
+    const to_node = dispatch(f, state, stack.current()); // build_from false: the destination
+    stack.build_from = true;
+    const from_node = dispatch(f, state, stack.current()); // the leaving page
+    stack.build_from = false;
+
+    std.debug.assert(f.size.width >= 0); // the slide offset scales by the page width
+    const w = f.size.width;
+    if (stack.trans_pop) {
+        // pop: [destination, leaving]; the leaving page slides off to the right.
+        const kids = [_]*node.Node{ to_node, from_node };
+        return node.slide(fc.arena, .{ .width = w, .dx = -(1 - eased) * w }, &kids);
+    }
+    // push: [leaving, destination]; the destination slides in from the right.
+    const kids = [_]*node.Node{ from_node, to_node };
+    return node.slide(fc.arena, .{ .width = w, .dx = -eased * w }, &kids);
+}
+
+// Caller-owned carousel state: one per carousel, holds the slide index + drag offset.
+pub const CarouselState = kit.carousel.CarouselState;
+
+pub const CarouselOpts = struct {
+    count: usize,
+    // The top-right Skip and the last slide's Finish both fire with `state` as ctx.
+    on_skip: ?ClickFn = null,
+    on_finish: ?ClickFn = null,
+};
+
+// A full-screen onboarding carousel: pages across `count` slides by horizontal drag
+// (finger-follows, snaps to the nearest on release) or the Next button, with page
+// dots, a Skip until the last slide, and a Finish on it. The app builds slide i via
+// `build_slide`; cstate is caller-owned. Allocation-free beyond the per-frame arena;
+// the loop idles once a slide settles.
+pub fn carousel(
+    f: *Frame,
+    comptime State: type,
+    cstate: *CarouselState,
+    state: *State,
+    o: CarouselOpts,
+    comptime build_slide: fn (*Frame, *State, usize) *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    std.debug.assert(o.count >= 1);
+    const w = f.size.width;
+    std.debug.assert(w >= 0);
+
+    // Snapshot the geometry the input callbacks need, clamp the index.
+    cstate.width = w;
+    cstate.count = o.count;
+    if (cstate.index >= o.count) cstate.index = o.count - 1;
+    std.debug.assert(cstate.index < o.count);
+
+    // Ease the live offset back to 0 when not dragging (spring-back / advance settle).
+    if (!cstate.dragging and cstate.dx != 0) {
+        cstate.dx += (0 - cstate.dx) * 0.22;
+        if (@abs(cstate.dx) < 0.5) cstate.dx = 0;
+        if (cstate.dx != 0) fc.paint.animating = true;
+    }
+
+    // The drag layer over the body, registered now (build phase) so the dots/buttons
+    // (hitboxes register later, at draw) win a tap; a drag elsewhere swipes the slides.
+    fc.paint.add_hitbox(.{
+        .x = f.body.origin.x,
+        .y = f.body.origin.y,
+        .w = f.body.size.width,
+        .h = f.body.size.height,
+        .on_point = kit.carousel.on_drag,
+        .on_drag_end = kit.carousel.on_release,
+        .ctx = @ptrCast(cstate),
+    }) catch {
+        // A full hitbox list drops the drag layer this frame; clear any in-flight
+        // capture so its release can't be lost and freeze the spring-back easing.
+        cstate.dragging = false;
+        cstate.dx = 0;
+    };
+
+    const slides = fc.arena.alloc(*node.Node, o.count) catch @panic("carousel arena oom");
+    for (slides, 0..) |*sl, i| sl.* = build_slide(f, state, i);
+    const off = -(@as(f32, @floatFromInt(cstate.index)) * w) + cstate.dx;
+    const track = node.slide(fc.arena, .{ .width = w, .dx = off }, slides);
+
+    const last = cstate.index + 1 >= o.count;
+
+    // Top: Skip on the right, hidden on the last slide.
+    const top = row(.{ .pad = .md, .justify = .flex_end, .height = 56 }, if (last) &.{} else &.{
+        kit_nodes.button(fc.arena, fc.theme, "Skip", .{
+            .variant = .ghost,
+            .paint = fc.paint,
+            .on_click = o.on_skip,
+            .ctx = @ptrCast(state),
+        }),
+    });
+
+    const dots = fc.arena.alloc(*node.Node, o.count) catch @panic("carousel arena oom");
+    for (dots, 0..) |*d, i| {
+        const dc = if (i == cstate.index) fc.theme.primary else fc.theme.border;
+        d.* = col(.{ .width = 8, .height = 8, .radius = 4, .bg = dc }, &.{});
+    }
+    const action = if (last)
+        kit_nodes.button(fc.arena, fc.theme, "Finish", .{
+            .variant = .default,
+            .paint = fc.paint,
+            .on_click = o.on_finish,
+            .ctx = @ptrCast(state),
+        })
+    else
+        kit_nodes.button(fc.arena, fc.theme, "Next", .{
+            .variant = .default,
+            .paint = fc.paint,
+            .on_click = kit.carousel.go_next,
+            .ctx = @ptrCast(cstate),
+        });
+    const bottom = row(.{ .pad = .lg, .justify = .space_between, .cross = .center }, &.{
+        row(.{ .gap = .sm }, dots),
+        action,
+    });
+
+    return col(.{ .grow = 1 }, &.{ top, track, bottom });
+}
 
 // The open dropdown menu: put it in the overlay region. Anchored to the trigger's
 // rect_out, dismisses on an outside click.
@@ -546,7 +756,18 @@ pub fn on_move2(
 pub const kit = @import("kit/root.zig");
 
 pub const app = @import("app.zig");
-pub const App = app_runtime.App;
+// Android's high-level App owns a different lifecycle (the surface arrives async
+// via onNativeWindowCreated, the framework owns the run loop), so it gets a
+// parallel App that reuses the render bridge + paint machinery but forks the
+// loop ownership. The desktop App.init/run stays byte-for-byte. Select the
+// module first (the app.zig facade pattern) so the Android file stays out of
+// non-Android analysis - its NativeActivity export must never reach a desktop
+// binary.
+const app_runtime_impl = if (builtin.abi.isAndroid())
+    @import("platform/android/app_runtime.zig")
+else
+    app_runtime;
+pub const App = app_runtime_impl.App;
 pub const WindowOptions = app_runtime.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const Theme = window.Theme;
@@ -654,4 +875,6 @@ pub const PolychromeSprite = primitives.PolychromeSprite;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("kit/textarea.zig"); // refAllDecls is non-recursive; pull kit/* tests in explicitly
+    _ = @import("platform/android/napi/utf8.zig"); // pure helper, host-testable
+    _ = @import("background.zig");
 }

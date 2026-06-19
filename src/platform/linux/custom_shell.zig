@@ -9,6 +9,7 @@ const wayland_shell = @import("wayland_shell.zig");
 const x11_shell = @import("x11_shell.zig");
 const shell_types = @import("shell_types.zig");
 const csd = @import("csd.zig");
+const idle_inhibit = @import("idle_inhibit.zig");
 const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 
@@ -221,6 +222,11 @@ pub fn apply_cursor(kind: CursorKind) void {
         .wayland => wayland_shell.apply_cursor(kind),
         .x11 => x11_shell.apply_cursor(kind),
     }
+}
+
+// Idle-sleep inhibitor via dbus (the ScreenSaver service), the same on both arms.
+pub fn set_keep_awake(on: bool) void {
+    idle_inhibit.set(on);
 }
 
 pub fn current_shift_down() bool {

@@ -332,6 +332,19 @@ pub fn current_shift_down() bool {
     return (state & win32.KEY_DOWN_MASK) != 0;
 }
 
+// Keep the display + machine awake (a stream wants this). The app re-asserts it
+// every frame, so a cached value keeps the call to one per change.
+var g_awake: bool = false;
+pub fn set_keep_awake(on: bool) void {
+    if (g_awake == on) return;
+    g_awake = on;
+    const flags: u32 = if (on)
+        win32.ES_CONTINUOUS | win32.ES_SYSTEM_REQUIRED | win32.ES_DISPLAY_REQUIRED
+    else
+        win32.ES_CONTINUOUS;
+    _ = win32.SetThreadExecutionState(flags);
+}
+
 fn request_redraw() void {
     if (g_redraw) |r| {
         if (g_ctx) |c| r(c);

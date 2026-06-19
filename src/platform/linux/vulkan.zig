@@ -82,6 +82,7 @@ pub const SHADER_STAGE_FRAGMENT_BIT: u32 = 0x10;
 pub const DESCRIPTOR_TYPE_STORAGE_BUFFER: u32 = 7;
 pub const DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
 
+pub const FORMAT_UNDEFINED: u32 = 0;
 pub const FORMAT_R8_UNORM: u32 = 9;
 pub const FORMAT_R8G8_UNORM: u32 = 16;
 pub const FORMAT_R8G8B8A8_UNORM: u32 = 37;
@@ -154,6 +155,7 @@ const ST_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
 const ST_PRESENT_INFO_KHR: u32 = 1000001001;
 const ST_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
 const ST_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1000005000;
+const ST_ANDROID_SURFACE_CREATE_INFO_KHR: u32 = 1000008000;
 const ST_IMAGE_CREATE_INFO: u32 = 14;
 const ST_SAMPLER_CREATE_INFO: u32 = 31;
 const ST_IMAGE_MEMORY_BARRIER: u32 = 45;
@@ -166,6 +168,10 @@ const ST_SAMPLER_YCBCR_CONVERSION_CREATE_INFO: u32 = 1000156000;
 const ST_SAMPLER_YCBCR_CONVERSION_INFO: u32 = 1000156001;
 const ST_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: u32 = 1000156004;
 const ST_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT: u32 = 1000158004;
+const ST_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID: u32 = 1000129001;
+const ST_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID: u32 = 1000129002;
+const ST_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID: u32 = 1000129003;
+const ST_EXTERNAL_FORMAT_ANDROID: u32 = 1000129005;
 
 pub const API_VERSION_1_0: u32 = 1 << 22;
 pub const API_VERSION_1_1: u32 = (1 << 22) | (1 << 12);
@@ -326,6 +332,20 @@ pub const CreateXcbSurfaceFn = *const fn (
     *SurfaceKHR,
 ) callconv(.c) Result;
 
+pub const AndroidSurfaceCreateInfoKHR = extern struct {
+    s_type: u32 = ST_ANDROID_SURFACE_CREATE_INFO_KHR,
+    p_next: ?*const anyopaque = null,
+    flags: u32 = 0,
+    window: *anyopaque, // ANativeWindow*
+};
+
+pub const CreateAndroidSurfaceFn = *const fn (
+    *Instance,
+    *const AndroidSurfaceCreateInfoKHR,
+    ?*const anyopaque,
+    *SurfaceKHR,
+) callconv(.c) Result;
+
 // ---- dmabuf zero-copy NV12 import (the IOSurface analogue) ----
 // A decoder's dmabuf fd becomes a multiplanar VkImage sampled through a
 // ycbcr-conversion sampler. Everything here is Vulkan 1.1 core or device
@@ -442,6 +462,59 @@ pub const GetMemoryFdPropertiesFn = *const fn (
     u32,
     i32,
     *MemoryFdPropertiesKHR,
+) callconv(.c) Result;
+
+// ---- AHardwareBuffer zero-copy NV12 import (the Android dmabuf analogue) ----
+// A decoder's AHardwareBuffer becomes a multiplanar VkImage sampled through a
+// ycbcr-conversion sampler, exactly like the dmabuf fd path but importing through
+// VK_ANDROID_external_memory_android_hardware_buffer. The buffer handle is the
+// NDK's opaque AHardwareBuffer; the driver reports its size, accepting memory
+// types, and pixel format (a concrete VkFormat, or an opaque external one).
+
+pub const EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT: u32 = 0x400;
+
+pub const AHardwareBuffer = opaque {};
+
+// Driver-reported import properties; chain a format-properties struct on p_next to
+// also read the buffer's VkFormat and the ycbcr conversion it suggests.
+pub const AndroidHardwareBufferPropertiesANDROID = extern struct {
+    s_type: u32 = ST_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+    p_next: ?*anyopaque = null,
+    allocation_size: DeviceSize = 0,
+    memory_type_bits: u32 = 0,
+};
+
+pub const AndroidHardwareBufferFormatPropertiesANDROID = extern struct {
+    s_type: u32 = ST_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
+    p_next: ?*anyopaque = null,
+    format: u32 = 0,
+    external_format: u64 = 0,
+    format_features: u32 = 0,
+    sampler_ycbcr_conversion_components: ComponentMapping = .{},
+    suggested_ycbcr_model: u32 = 0,
+    suggested_ycbcr_range: u32 = 0,
+    suggested_x_chroma_offset: u32 = 0,
+    suggested_y_chroma_offset: u32 = 0,
+};
+
+pub const ImportAndroidHardwareBufferInfoANDROID = extern struct {
+    s_type: u32 = ST_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+    p_next: ?*const anyopaque = null,
+    buffer: *AHardwareBuffer,
+};
+
+// Chained into both the ycbcr conversion and the image create when the buffer's
+// pixel layout has no concrete VkFormat (external_format != 0).
+pub const ExternalFormatANDROID = extern struct {
+    s_type: u32 = ST_EXTERNAL_FORMAT_ANDROID,
+    p_next: ?*const anyopaque = null,
+    external_format: u64 = 0,
+};
+
+pub const GetAndroidHardwareBufferPropertiesFn = *const fn (
+    *Device,
+    *const AHardwareBuffer,
+    *AndroidHardwareBufferPropertiesANDROID,
 ) callconv(.c) Result;
 
 pub const SurfaceCapabilitiesKHR = extern struct {
@@ -1281,7 +1354,10 @@ pub var global: GlobalFns = undefined;
 
 pub fn load() Error!void {
     if (g_loaded) return;
-    const handle = dlopen("libvulkan.so.1", RTLD_NOW) orelse return error.LibraryLoadFailed;
+    // Desktop Linux ships the versioned soname; Android's loader is the
+    // unversioned libvulkan.so, so fall back to it.
+    const handle = dlopen("libvulkan.so.1", RTLD_NOW) orelse
+        dlopen("libvulkan.so", RTLD_NOW) orelse return error.LibraryLoadFailed;
     const gipa = dlsym(handle, "vkGetInstanceProcAddr") orelse return error.LibraryLoadFailed;
     get_instance_proc_addr = @ptrCast(@alignCast(gipa));
     inline for (@typeInfo(GlobalFns).@"struct".fields) |field| {

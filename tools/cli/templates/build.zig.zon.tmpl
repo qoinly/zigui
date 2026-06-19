@@ -1,0 +1,14 @@
+.{
+    .name = .{{ident}},
+    .version = "0.1.0",
+    .fingerprint = {{fingerprint}},
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zigui = {{dep}},
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",{{android_paths}}
+    },
+}

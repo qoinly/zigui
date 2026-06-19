@@ -386,6 +386,12 @@ pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
 pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
+// Idle-sleep inhibitor: ES_CONTINUOUS holds the state until the next call, the
+// DISPLAY/SYSTEM bits keep the screen + machine awake.
+pub const ES_CONTINUOUS: u32 = 0x80000000;
+pub const ES_SYSTEM_REQUIRED: u32 = 0x00000001;
+pub const ES_DISPLAY_REQUIRED: u32 = 0x00000002;
+pub extern "kernel32" fn SetThreadExecutionState(flags: u32) callconv(.winapi) u32;
 pub extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.winapi) ?HMODULE;
 pub extern "kernel32" fn GetProcAddress(
     module: HMODULE,

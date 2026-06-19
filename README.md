@@ -9,7 +9,8 @@
 ## Requirements
 
 - Zig 0.16.0
-- macOS (Metal), Windows (Direct3D 11), or Linux (Vulkan; Wayland or X11)
+- macOS (Metal), Windows (Direct3D 11), Linux (Vulkan; Wayland or X11), or
+  Android (Vulkan; min API 26)
 
 ## Install
 
@@ -34,11 +35,27 @@ exe.root_module.addImport("zigui", zigui.module("zigui"));
 const zigui = @import("zigui");
 ```
 
+Or scaffold a fresh project (desktop, android, or both) with the CLI - it writes the
+build files and a starter `main.zig` for you:
+
+```sh
+zig build cli                          # builds zig-out/bin/zigui
+zigui create myapp --target desktop
+```
+
+See [docs/cli.md](docs/cli.md).
+
+For Android, the same module builds into a signed APK through the `zigui.androidApk`
+build helper - the app writes no Java (zigui ships its own activity and services
+under `io.qoinly.zigui`). See [docs/android.md](docs/android.md) for the toolchain
+setup and the build wiring.
+
 ## Docs
 
 The API docs live in [docs/](docs/README.md) - app & window, layout, theming, the
 kit, rendering, plus external frames, input capture, and system integration
-(clipboard, fullscreen, displays).
+(clipboard, fullscreen, displays). [docs/android.md](docs/android.md) covers the
+Android backend, and [docs/cli.md](docs/cli.md) the project-scaffolding CLI.
 
 ## Build from source
 
@@ -48,6 +65,9 @@ zig build test   # run the tests
 
 cd examples/showcase && zig build run   # the demo app
 ```
+
+The desktop demo doubles as the visual reference. `examples/android-app` is the
+Android counterpart - `zig build` produces an APK (see [docs/android.md](docs/android.md)).
 
 ## Components
 
@@ -65,7 +85,8 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 - **Feedback** - `alert`, `toasts` (auto-dismiss stack), `tooltip_overlay`
 - **Containers / overlays** - `dialog`, `sheet` (edge slide),
   `popover_overlay`, `menu_overlay` (submenus), `sidebar` (disclosure tree,
-  resize), `tabbar` (closeable, reorderable, pinnable)
+  resize), `tabbar` (closeable, reorderable, pinnable), `bottom_bar` (mobile
+  nav, standard + floating)
 - **Charts** - `line_chart` (curve, fill, gradient, stacked, dots),
   `bar_chart` (grouped, stacked), `donut`
 
@@ -76,6 +97,7 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 | macOS | works | Metal |
 | Windows | works | Direct3D 11 |
 | Linux | works | Vulkan (Wayland + X11) |
+| Android | works | Vulkan (NativeActivity) |
 
 What works:
 
@@ -102,11 +124,21 @@ What works:
   display enumeration.
 - SF Symbols on macOS, with a bundled Lucide fallback. Over 100 icon names
   resolve on either path.
+- Android: the same kit renders through Vulkan with touch input and a soft
+  keyboard, and a native-API surface (notifications, toasts, clipboard, haptics,
+  battery and connectivity, brightness and orientation, links and share, file
+  picker, biometric prompt, accessibility, notification listener, broadcasts, and
+  SMS) reaches the platform through a shipped Java shell - the app writes no Java.
+  Plus off-UI-thread background work and headless background events (a Zig handler
+  runs on a notification or a manifest broadcast even when the app is closed).
 
 ## Limitations
 
 - On Windows, native file dialogs and the detached-panel helpers aren't there yet.
 - On Linux, fractional display scaling falls back to the nearest integer factor.
+- On Android there is one fullscreen surface: no extra windows, no custom chrome,
+  and `app.run` hands the loop to the framework rather than blocking, so the app
+  state must outlive `main`. See [docs/android.md](docs/android.md).
 - No accessibility. Nothing wires up VoiceOver or NSAccessibility roles and
   labels.
 - Text is BMP only. No IME composition (so no CJK input), no emoji or colour

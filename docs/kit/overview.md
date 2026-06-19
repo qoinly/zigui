@@ -98,5 +98,5 @@ Everything else is stateless. (`input` is the plain stateless field - you pass
 - [Inputs](inputs.md) - input, text_input, text_editable, textarea, checkbox, radio, toggle, toggle_group, slider, select, tabs
 - [Display](display.md) - text, badge, avatar, icon, separator, skeleton, kbd
 - [Feedback](feedback.md) - progress, spinner, alert, toasts, tooltip_overlay
-- [Containers / overlays](containers.md) - dialog, sidebar, tabbar, menu_overlay, select_overlay, popover_overlay, sheet
+- [Containers / overlays](containers.md) - dialog, sidebar, tabbar, bottom_bar, menu_overlay, select_overlay, popover_overlay, sheet
 - [Charts](charts.md) - line_chart, bar_chart, donut

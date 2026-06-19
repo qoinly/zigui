@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.qoinly.zigui.androidapp">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+
+    <application android:label="zigui android">
+        <!-- A static (manifest-declared) receiver runs headless even when the app is
+             not foreground - the system cold-starts the process to deliver. Implicit
+             broadcasts are allowlisted since API 26; SMS_RECEIVED is one still allowed. -->
+        <receiver
+            android:name="io.qoinly.zigui.ZiguiBroadcastReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+            <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />
+        </receiver>
+
+        <activity
+            android:name="io.qoinly.zigui.ZiguiActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize">
+            <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name="io.qoinly.zigui.ZiguiAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/zigui_accessibility_config" />
+            <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />
+        </service>
+
+        <service
+            android:name="io.qoinly.zigui.ZiguiNotificationListenerService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+            <meta-data android:name="android.app.lib_name" android:value="zigui_android_app" />
+        </service>
+    </application>
+</manifest>

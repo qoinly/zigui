@@ -4,7 +4,13 @@
 
 const builtin = @import("builtin");
 
-const impl = switch (builtin.os.tag) {
+// Android is os.tag == .linux but has no desktop shell (NativeActivity owns one
+// fullscreen surface, no CSD, no clipboard/grab); it gets its own arm ahead of
+// the os.tag switch, mirroring app.zig. Its pub surface matches the Linux one
+// exactly so the os.tag == .linux branches below resolve to it unchanged.
+const impl = if (builtin.abi.isAndroid())
+    @import("platform/android/custom_shell.zig")
+else switch (builtin.os.tag) {
     .macos => @import("platform/macos/custom_shell.zig"),
     .windows => @import("platform/windows/custom_shell.zig"),
     .linux => @import("platform/linux/custom_shell.zig"),
@@ -79,11 +85,36 @@ pub fn register_paint_now(cb: RedrawFn) void {
     if (builtin.os.tag != .macos) impl.register_paint_now(cb);
 }
 
+// Touch routes a finger drag through a single handler that scrolls the region
+// under it (or drags a captured control). Only the Android backend has a touch
+// source; the desktop backends use the wheel + drag separately and ignore this.
+pub const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
+pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
+    if (builtin.abi.isAndroid()) impl.register_touch_move(cb, ctx);
+}
+
+// The platform Back button: only Android has one. The handler returns whether it
+// consumed the press (a route was popped); the backend backgrounds the app when
+// it returns false. Desktop Esc flows through the key queue instead, so this is a
+// no-op there.
+pub const BackFn = *const fn (ctx: *anyopaque) bool;
+pub fn register_back(cb: BackFn, ctx: *anyopaque) void {
+    if (builtin.abi.isAndroid()) impl.register_back(cb, ctx);
+}
+
 // Only Linux desktops keep the user's accent outside the app theme; the close
 // control there follows it.
 pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
     if (builtin.os.tag == .linux) return impl.desktop_accent_color();
     return null;
+}
+
+// Safe-area insets (points) the paint loop carves off the body. Only the Android
+// surface is edge-to-edge under the system bars; desktop windows exclude their
+// chrome already, so the insets are zero and the body math is unchanged.
+pub fn safe_area_insets() @import("geometry.zig").Insets {
+    if (builtin.abi.isAndroid()) return impl.safe_area_insets();
+    return .{};
 }
 
 // Caption slots indexed from the right edge (slot 0 = rightmost). Linux

@@ -13,6 +13,7 @@ const geometry = @import("../geometry.zig");
 const color = @import("../color.zig");
 const label = @import("../render/label.zig");
 const input = @import("../input.zig");
+const background = @import("../background.zig");
 
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
@@ -134,6 +135,12 @@ pub const PaintContext = struct {
     // A focused text input sets this while showing the native editor; the runtime
     // hides the singleton editor on a frame where nobody claims it (blur / nav away).
     text_field_active: bool = false,
+    // Back navigation: the navigator publishes its stack depth each frame so the
+    // Android backend knows whether a Back press should pop (consume it) or
+    // background the app (depth 1). back_pressed is set by that backend on a Back
+    // it consumed; Esc on desktop arrives through the normal key queue instead.
+    nav_depth: u32 = 1,
+    back_pressed: bool = false,
     scale_factor: f32 = 2.0,
     last_pane_w: f32 = 0,
     last_pane_h: f32 = 0,
@@ -253,6 +260,18 @@ pub const PaintContext = struct {
 
     pub fn keys(self: *const PaintContext) []const custom_shell.KeyEvent {
         return self.key_events[0..self.key_len];
+    }
+
+    // Whether a back-navigation was requested this frame: Esc on desktop (through
+    // the key queue) or the platform Back button (the back_pressed flag, cleared
+    // here). The navigator calls it once per frame to pop the route stack.
+    pub fn take_back(self: *PaintContext) bool {
+        var requested = self.back_pressed;
+        self.back_pressed = false;
+        for (self.keys()) |ke| {
+            if (ke.code == .escape) requested = true;
+        }
+        return requested;
     }
 
     pub fn on_raw_event(self: *PaintContext, ev: input.InputEvent) void {
@@ -382,6 +401,23 @@ pub const PaintContext = struct {
         self.renderer.request_redraw();
     }
 
+    // Touch has no separate wheel: a finger drag scrolls the region under it,
+    // UNLESS the press captured a draggable control (a slider rail), which then
+    // drags instead. The mouse backends keep wheel and drag as distinct inputs and
+    // never call this; only the touch backend routes a move through here.
+    pub fn on_touch_move(self: *PaintContext, x: f32, y: f32) void {
+        const dy = y - self.mouse_y; // delta before the position update
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        if (self.drag_cb) |cb| {
+            cb(self.drag_ctx, x, y);
+        } else {
+            self.on_scroll(0, dy); // feeds wheel_dy; the hovered scroll region consumes it
+        }
+        self.renderer.request_redraw();
+    }
+
     pub fn tick(self: *PaintContext) ?Frame {
         // A minimized window has a degenerate client; skip painting it entirely
         // (its tiny titlebar band would underflow widths and assert in the kit).
@@ -414,6 +450,9 @@ pub const PaintContext = struct {
             self.renderer.request_redraw();
         }
         if (self.animating) self.renderer.request_redraw();
+        // A background job finished: render once so the view's poll() picks up the
+        // result. The edge is consumed here, on the loop's own thread.
+        if (background.took_completion()) self.renderer.request_redraw();
         self.now_s = monotonic_seconds() - self.base_s;
         if (!self.renderer.dirty) return null;
 
@@ -450,6 +489,9 @@ pub const PaintContext = struct {
             // uses native traffic lights repositioned by the platform layer.
             if (builtin.os.tag != .macos) self.draw_caption_buttons(pane_w, top);
         }
+        // Safe-area insets carve the body in from the surface edges (the mobile
+        // system bars); zero on desktop, so the body math below is unchanged there.
+        const insets = custom_shell.safe_area_insets();
         return .{
             .builder = .{
                 .prims = &self.prims,
@@ -464,8 +506,11 @@ pub const PaintContext = struct {
             .width = pane_w,
             .height = pane_h,
             .body = .{
-                .origin = .{ .x = 0, .y = top },
-                .size = .{ .width = pane_w, .height = pane_h - top },
+                .origin = .{ .x = insets.left, .y = top + insets.top },
+                .size = .{
+                    .width = pane_w - insets.left - insets.right,
+                    .height = pane_h - top - insets.top - insets.bottom,
+                },
             },
             // Windows reserves the right cluster for the window-control buttons so
             // consumer titlebar content does not draw under them.
@@ -786,6 +831,21 @@ fn mouse_drag_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     paint.on_mouse_dragged(x, y);
 }
 
+fn touch_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_touch_move(x, y);
+}
+
+// The platform Back button (Android): consume it (and request a pop) only when a
+// route is pushed; at the root, return false so the OS backgrounds the app.
+fn back_thunk(ctx: *anyopaque) bool {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    if (paint.nav_depth <= 1) return false;
+    paint.back_pressed = true;
+    paint.request_redraw();
+    return true;
+}
+
 fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_right_mouse_down(x, y);
@@ -851,6 +911,8 @@ pub fn start_paint_loop(
         .ctx = @ptrCast(paint),
     });
     custom_shell.register_raw_dispatch(.{ .on_event = raw_event_thunk, .ctx = @ptrCast(paint) });
+    custom_shell.register_touch_move(touch_move_thunk, @ptrCast(paint));
+    custom_shell.register_back(back_thunk, @ptrCast(paint));
     custom_shell.bind_surface_ctx(paint.handle, @ptrCast(paint));
     var dl = try display_link.DisplayLink.init(
         display_link.get_main_display_id(),
