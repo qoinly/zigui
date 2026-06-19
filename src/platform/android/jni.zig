@@ -103,9 +103,12 @@ pub const JNINativeInterface = extern struct {
     GetStaticMethodID: LookupFn, // 113
     _r12: [2]?*const anyopaque, // 114..115
     CallStaticObjectMethodA: CallObjectAFn, // 116
-    _r13: [14]?*const anyopaque, // 117..130
+    _r13a: [2]?*const anyopaque, // 117..118
+    CallStaticBooleanMethodA: CallBoolAFn, // 119
+    _r13b: [11]?*const anyopaque, // 120..130
     CallStaticIntMethodA: CallIntAFn, // 131
-    _r14: [12]?*const anyopaque, // 132..143
+    _r14: [11]?*const anyopaque, // 132..142
+    CallStaticVoidMethodA: CallVoidAFn, // 143
     GetStaticFieldID: LookupFn, // 144
     GetStaticObjectField: GetObjFieldFn, // 145
     _r15: [4]?*const anyopaque, // 146..149

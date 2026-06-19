@@ -79,6 +79,39 @@ pub fn system_service(env: JNIEnv, activity: jni.jobject, name: []const u8) ?jni
     return t.CallObjectMethodA(env, activity, mid, &arg);
 }
 
+// FindClass on a native thread resolves against the system classloader and cannot see
+// app classes, so load an app class through the activity's own classloader. `name` is
+// the dotted form ("io.qoinly.zigui.X"). Null when the class is not bundled (a
+// ClassNotFoundException, cleared). The caller owns the returned local ref.
+pub fn load_app_class(env: JNIEnv, activity: jni.jobject, name: []const u8) jni.jclass {
+    std.debug.assert(name.len > 0);
+    const t = env.*;
+    const act_cls = t.GetObjectClass(env, activity) orelse return null;
+    defer t.DeleteLocalRef(env, act_cls);
+    const get_loader = t.GetMethodID(
+        env,
+        act_cls,
+        "getClassLoader",
+        "()Ljava/lang/ClassLoader;",
+    ) orelse return null;
+    const loader = t.CallObjectMethodA(env, activity, get_loader, null) orelse return null;
+    defer t.DeleteLocalRef(env, loader);
+    const loader_cls = t.GetObjectClass(env, loader) orelse return null;
+    defer t.DeleteLocalRef(env, loader_cls);
+    const load = t.GetMethodID(
+        env,
+        loader_cls,
+        "loadClass",
+        "(Ljava/lang/String;)Ljava/lang/Class;",
+    ) orelse return null;
+    const jname = jstr(env, name) orelse return null;
+    defer t.DeleteLocalRef(env, jname);
+    var a = [_]jni.jvalue{.{ .l = jname }};
+    const cls = t.CallObjectMethodA(env, loader, load, &a);
+    if (cls == null) t.ExceptionClear(env); // ClassNotFoundException = the app did not bundle it
+    return cls;
+}
+
 pub fn start_activity(env: JNIEnv, activity: jni.jobject, intent: jni.jobject) void {
     std.debug.assert(intent != null);
     const t = env.*;

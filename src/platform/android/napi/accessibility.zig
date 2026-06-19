@@ -1,8 +1,8 @@
 // AccessibilityService control: inject gestures and read the foreground node tree.
-// The system-bound service lives in the app (ZiguiAccessibilityService); native
-// reaches it through generic activity methods (the show_keyboard pattern), so the
-// library never names the app package. request_enable opens the system settings
-// where the user toggles the service on - an app cannot enable it itself.
+// The service (ZiguiAccessibilityService) is OPTIONAL: native calls its static methods
+// directly, so an app that does not bundle the service carries none of this code and
+// every call here no-ops. request_enable opens the system settings where the user
+// toggles the service on - an app cannot enable it itself.
 
 const std = @import("std");
 const jni = @import("../jni.zig");
@@ -11,16 +11,17 @@ const utf8 = @import("utf8.zig");
 
 const JNIEnv = util.JNIEnv;
 
-// Whether the service is connected (the activity reads its static instance). Inject
-// and read are no-ops until this is true.
+const A11Y_CLASS = "io.qoinly.zigui.ZiguiAccessibilityService";
+
+// Whether the service is connected (its static flag). Inject and read no-op until true.
 pub fn enabled() bool {
     const c = util.ctx() orelse return false;
     const env = c.env;
     const t = env.*;
-    const cls = t.GetObjectClass(env, c.activity) orelse return false;
+    const cls = util.load_app_class(env, c.activity, A11Y_CLASS) orelse return false;
     defer t.DeleteLocalRef(env, cls);
-    const m = t.GetMethodID(env, cls, "a11yEnabled", "()Z") orelse return false;
-    return t.CallBooleanMethodA(env, c.activity, m, null) != 0;
+    const m = t.GetStaticMethodID(env, cls, "isEnabled", "()Z") orelse return false;
+    return t.CallStaticBooleanMethodA(env, cls, m, null) != 0;
 }
 
 // Opens the system accessibility settings so the user can enable the service.
@@ -42,7 +43,7 @@ pub fn request_enable() void {
 // Inject a tap at screen-pixel (x, y) through dispatchGesture.
 pub fn tap(x: f32, y: f32) void {
     var a = [_]jni.jvalue{ .{ .f = x }, .{ .f = y } };
-    activity_void("a11yTap", "(FF)V", &a);
+    service_void("injectTap", "(FF)V", &a);
 }
 
 // Inject a swipe from (x1, y1) to (x2, y2) over duration_ms through dispatchGesture.
@@ -50,13 +51,13 @@ pub fn swipe(x1: f32, y1: f32, x2: f32, y2: f32, duration_ms: jni.jint) void {
     var a = [_]jni.jvalue{
         .{ .f = x1 }, .{ .f = y1 }, .{ .f = x2 }, .{ .f = y2 }, .{ .i = duration_ms },
     };
-    activity_void("a11ySwipe", "(FFFFI)V", &a);
+    service_void("injectSwipe", "(FFFFI)V", &a);
 }
 
 // performGlobalAction(code): the facade maps a GlobalAction to the GLOBAL_ACTION_* code.
 pub fn global_action(code: jni.jint) void {
     var a = [_]jni.jvalue{.{ .i = code }};
-    activity_void("a11yGlobalAction", "(I)V", &a);
+    service_void("globalAction", "(I)V", &a);
 }
 
 // Reads the foreground window's node tree as text (one "x,y,w,h\ttext" line per
@@ -66,10 +67,11 @@ pub fn read(buf: []u8) ?[]const u8 {
     const c = util.ctx() orelse return null;
     const env = c.env;
     const t = env.*;
-    const cls = t.GetObjectClass(env, c.activity) orelse return null;
+    const cls = util.load_app_class(env, c.activity, A11Y_CLASS) orelse return null;
     defer t.DeleteLocalRef(env, cls);
-    const m = t.GetMethodID(env, cls, "a11yReadScreen", "()Ljava/lang/String;") orelse return null;
-    const s = t.CallObjectMethodA(env, c.activity, m, null) orelse return null;
+    const m = t.GetStaticMethodID(env, cls, "readScreen", "()Ljava/lang/String;") orelse
+        return null;
+    const s = t.CallStaticObjectMethodA(env, cls, m, null) orelse return null;
     defer t.DeleteLocalRef(env, s);
     const chars = t.GetStringUTFChars(env, s, null) orelse return null;
     defer t.ReleaseStringUTFChars(env, s, chars);
@@ -85,7 +87,7 @@ pub fn read(buf: []u8) ?[]const u8 {
 // latest forwarded event.
 pub fn subscribe_event(type_bit: jni.jint) void {
     var a = [_]jni.jvalue{.{ .i = type_bit }};
-    activity_void("a11ySubscribeEvent", "(I)V", &a);
+    service_void("subscribeEvent", "(I)V", &a);
 }
 
 // The latest subscribed event, "type\tpackage\ttext", awaiting one take. Filled on
@@ -127,16 +129,16 @@ pub fn take_event(buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-// Calls a no-arg-class activity method that returns void (the inject path). A miss
-// at any JNI step degrades to no-op, like the other activity-method bridges.
-fn activity_void(name: [*:0]const u8, sig: [*:0]const u8, args: [*]const jni.jvalue) void {
+// Calls a static void method on the service class (the inject path). A miss at any JNI
+// step - including the app not bundling the service - degrades to no-op.
+fn service_void(name: [*:0]const u8, sig: [*:0]const u8, args: [*]const jni.jvalue) void {
     const c = util.ctx() orelse return;
     const env = c.env;
     const t = env.*;
-    const cls = t.GetObjectClass(env, c.activity) orelse return;
+    const cls = util.load_app_class(env, c.activity, A11Y_CLASS) orelse return;
     defer t.DeleteLocalRef(env, cls);
-    const m = t.GetMethodID(env, cls, name, sig) orelse return;
-    t.CallVoidMethodA(env, c.activity, m, args);
+    const m = t.GetStaticMethodID(env, cls, name, sig) orelse return;
+    t.CallStaticVoidMethodA(env, cls, m, args);
 }
 
 // Appends a Java String's modified-UTF8 to g_buf, clamped to what is left, with a

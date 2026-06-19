@@ -198,38 +198,9 @@ public class ZiguiActivity extends NativeActivity {
         });
     }
 
-    // Accessibility bridge: native reaches the system-bound service through these
-    // delegators, so the library names only the activity (the showKeyboard pattern),
-    // never the service's package.
-    public boolean a11yEnabled() {
-        return ZiguiAccessibilityService.isEnabled();
-    }
-
-    public void a11yTap(float x, float y) {
-        ZiguiAccessibilityService.injectTap(x, y);
-    }
-
-    public void a11ySwipe(float x1, float y1, float x2, float y2, int durationMs) {
-        ZiguiAccessibilityService.injectSwipe(x1, y1, x2, y2, durationMs);
-    }
-
-    public void a11yGlobalAction(int action) {
-        ZiguiAccessibilityService.globalAction(action);
-    }
-
-    public String a11yReadScreen() {
-        return ZiguiAccessibilityService.readScreen();
-    }
-
-    public void a11ySubscribeEvent(int type) {
-        ZiguiAccessibilityService.subscribeEvent(type);
-    }
-
-    // Notification-listener bridge: native reads connection state through this
-    // delegator (the shell forwards posted notifications straight to native).
-    public boolean notifEnabled() {
-        return ZiguiNotificationListenerService.isEnabled();
-    }
+    // The optional accessibility + notification-listener services are reached by
+    // native through their own static methods (FindClass on the service), so the
+    // shell carries no reference to them - an app bundles a service only if it uses it.
 
     // Broadcast subscription: one context-registered receiver, its filter growing as
     // native subscribes actions. onReceive runs on the main thread (no Handler given),
