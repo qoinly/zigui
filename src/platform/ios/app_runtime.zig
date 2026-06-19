@@ -1,30 +1,36 @@
 // The high-level iOS App: zigui.App on iOS (root.zig picks it ahead of the
-// desktop app_runtime.App). It reuses the desktop Views/Frame contract and forks
-// only the lifecycle: init stores the config, run registers a surface delegate
-// and hands control to UIApplicationMain, which owns the loop and never returns.
-// When the surface is ready the delegate fires, and build stands up the shared
-// Metal renderer on the view's CAMetalLayer and clears it to the theme color.
+// desktop app_runtime.App). It reuses the desktop render bridge and paint
+// machinery verbatim - the per-window Window bundle, WindowRunner.cb, and
+// start_paint_loop - and forks only the lifecycle: the surface arrives async via
+// the delegate and UIApplicationMain owns the run loop, so run registers a surface
+// delegate and then blocks instead of opening a window itself.
+//
+// App.run stores the erased render callback + state and registers the delegate;
+// when the surface is ready the delegate builds the Window (renderer, paint
+// context, CADisplayLink-driven paint loop), torn down on surface loss.
 
 const std = @import("std");
 const app_runtime = @import("../../app_runtime.zig");
 const custom_shell = @import("../../custom_shell.zig");
-const renderer = @import("../../renderer.zig");
+const paint = @import("../../window/paint.zig");
+const layout = @import("../../layout.zig");
 const types = @import("../../window/types.zig");
 const ios_app = @import("app.zig");
 const native = @import("native.zig");
 
 pub const Views = app_runtime.Views;
 pub const Frame = app_runtime.Frame;
+const Window = app_runtime.Window;
 
 pub const App = struct {
     rt: ios_app.App,
     alloc: std.mem.Allocator,
     opts: Options,
-    user_state: ?*anyopaque = null,
-    closed_cb: ?*const fn (?*anyopaque, u32) void = null,
     // Built on surface ready, torn down on surface loss; null in between.
-    handle: ?custom_shell.CustomShellHandle = null,
-    renderer: ?renderer.Renderer = null,
+    win: ?Window = null,
+    user_state: ?*anyopaque = null,
+    paint_cb: ?paint.PaintCallback = null,
+    closed_cb: ?*const fn (?*anyopaque, u32) void = null,
 
     pub const Options = struct {
         title: []const u8 = "",
@@ -49,14 +55,15 @@ pub const App = struct {
         return self;
     }
 
-    // Registers for the surface, then blocks in UIApplicationMain. The state must
-    // outlive this call (the delegate fires later), so an example uses a
-    // container-scoped var, the one shape difference from a desktop main.
+    // Stores the comptime render bridge + state, then registers for the surface and
+    // blocks in UIApplicationMain. The state must outlive this call (the delegate
+    // fires later), so an example uses a container-scoped var, the one shape
+    // difference from a desktop main.
     pub fn run(self: *App, state: anytype, comptime views: Views(@TypeOf(state))) !void {
         const StateArg = @TypeOf(state);
         comptime std.debug.assert(StateArg == void or @typeInfo(StateArg) == .pointer);
-        _ = views;
         self.user_state = if (StateArg == void) null else @ptrCast(state);
+        self.paint_cb = app_runtime.WindowRunner(StateArg, views).cb;
         ios_app.set_surface_delegate(.{
             .ctx = @ptrCast(self),
             .on_ready = on_surface_ready,
@@ -100,11 +107,12 @@ pub const App = struct {
         self.teardown();
     }
 
-    // Stand up the Metal renderer on the surface's CAMetalLayer and clear it to the
-    // theme background. A failure leaves no half-built state (the handle is dropped
-    // on a renderer-init failure); the surface is re-offered on the next ready.
+    // Now that the surface exists, stand up the renderer, paint context, and
+    // CADisplayLink-driven paint loop. A failure here leaves no half-built window
+    // (teardown unwinds); the surface is re-offered on the next ready.
     fn build(self: *App) void {
-        std.debug.assert(self.handle == null);
+        std.debug.assert(self.win == null);
+        const cb = self.paint_cb orelse return; // run() sets it before any surface event
         const theme = types.Theme.default_dark();
         const handle = custom_shell.open(.{
             .title = self.opts.title,
@@ -113,26 +121,41 @@ pub const App = struct {
             .chrome = .custom,
             .theme = theme,
         }) catch return;
-        self.renderer = renderer.Renderer.init(handle.metal_layer) catch {
-            handle.deinit();
+        self.win = .{
+            .handle = handle,
+            .pc = undefined,
+            .eng = layout.LayoutEngine.init(self.alloc),
+            .arena = std.heap.ArenaAllocator.init(self.alloc),
+            .theme = theme,
+            .alloc = self.alloc,
+            .user_state = self.user_state,
+            .id = 1,
+        };
+        const w = &self.win.?;
+        // pc is the last undefined field; on its init failure free only what is
+        // live (handle/eng/arena), then drop the window.
+        w.pc.init(w.handle, self.alloc) catch {
+            w.eng.deinit();
+            w.arena.deinit();
+            w.handle.deinit();
+            self.win = null;
             return;
         };
-        self.handle = handle;
-        const bg = theme.background;
-        self.renderer.?.draw_frame(
-            renderer.ClearColor.init(bg.r, bg.g, bg.b, 1),
-            &.{},
-            &.{},
-            null,
-            &.{},
-            null,
-        );
+        w.pc.icon_system.set_source(.bundled);
+        w.dl = paint.start_paint_loop(&w.run_state, &w.pc, @ptrCast(w), cb) catch {
+            self.teardown();
+            return;
+        };
+        w.pc.request_redraw();
     }
 
     fn teardown(self: *App) void {
-        if (self.renderer) |*r| r.deinit();
-        self.renderer = null;
-        if (self.handle) |h| h.deinit();
-        self.handle = null;
+        const w = if (self.win) |*win| win else return;
+        if (w.dl) |*dl| dl.deinit();
+        w.pc.deinit();
+        w.eng.deinit();
+        w.arena.deinit();
+        w.handle.deinit();
+        self.win = null;
     }
 };
