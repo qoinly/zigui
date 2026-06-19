@@ -5,7 +5,7 @@ const std = @import("std");
 const doctor = @import("doctor.zig");
 const create = @import("create.zig");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 // Threaded into every command: the IO backend, an arena for the run, the process
 // environment, and the two streams. A command writes user output to `out` and
