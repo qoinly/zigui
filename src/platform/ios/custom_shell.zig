@@ -34,8 +34,8 @@ pub const ContentSize = shell_types.ContentSize;
 // size/scale and the layer.
 var g_window: ?*native.IOSWindow = null;
 
-// The paint loop registers a MouseDispatch (ctx = the PaintContext); the input
-// layer reads it back to route touch. Cleared on surface loss.
+// The paint loop registers a MouseDispatch here; with no iOS touch source wired,
+// it is stored but unread.
 var g_dispatch: ?MouseDispatch = null;
 
 pub fn set_window(window: *native.IOSWindow) void {
@@ -44,6 +44,28 @@ pub fn set_window(window: *native.IOSWindow) void {
 
 pub fn mouse_dispatch() ?MouseDispatch {
     return g_dispatch;
+}
+
+const UIEdgeInsets = extern struct {
+    top: objc.CGFloat,
+    left: objc.CGFloat,
+    bottom: objc.CGFloat,
+    right: objc.CGFloat,
+};
+
+// Insets the paint loop carves off the body for the status bar, dynamic island,
+// and home indicator. UIKit computes UIView.safeAreaInsets per device in points,
+// so they are read live (they change with rotation and device), never hardcoded.
+pub fn safe_area_insets() geometry.Insets {
+    const w = g_window orelse return .{};
+    const view = w.view orelse return .{};
+    const e = objc.msg_send(UIEdgeInsets, view, "safeAreaInsets", .{});
+    return .{
+        .left = @floatCast(e.left),
+        .top = @floatCast(e.top),
+        .right = @floatCast(e.right),
+        .bottom = @floatCast(e.bottom),
+    };
 }
 
 pub const CustomShellHandle = struct {
@@ -127,9 +149,8 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     };
 }
 
-// Touch routes through this dispatch (the input layer reads it back via
-// mouse_dispatch); the other registrations have no iOS source, so the paint loop
-// registers them and they are accepted and dropped.
+// The paint loop registers a MouseDispatch and the other input hooks here; iOS
+// has no touch source wired, so they are stored or accepted and dropped.
 pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_dispatch = d;
 }
