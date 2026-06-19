@@ -1,0 +1,29 @@
+const zigui = @import("zigui");
+
+// The Android backend owns the run loop (App.run returns immediately), so the state
+// must outlive main() - a container-scoped var, not a stack local, and no deinit.
+const App = struct { taps: u32 = 0 };
+var state: App = .{};
+
+fn view(f: *zigui.Frame, app: *App) *zigui.Node {
+    _ = f;
+    _ = app;
+    return zigui.col(.{ .pad = .lg, .gap = .md, .grow = 1 }, &.{
+        zigui.text("Hello, {{display}}.", .{ .size = 28 }),
+        zigui.button("Tap me", .{ .on_click = zigui.on(App, on_tap) }),
+    });
+}
+
+fn on_tap(app: *App) void {
+    app.taps += 1;
+}
+
+pub fn main() !void {
+    var window = try zigui.App.init(.{ .title = "{{display}}", .size = .{ 400, 800 } });
+    try window.run(&state, .{ .body = view });
+}
+
+// Keeps ANativeActivity_onCreate reachable in the Android .so; a no-op elsewhere.
+comptime {
+    _ = zigui.App;
+}
