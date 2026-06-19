@@ -31,6 +31,7 @@ pub const resizable = @import("resizable.zig");
 pub const radio = @import("radio.zig");
 pub const tabs = @import("tabs.zig");
 pub const tabbar = @import("tabbar.zig");
+pub const bottom_bar = @import("bottom_bar.zig");
 pub const spinner = @import("spinner.zig");
 pub const chart = @import("chart.zig");
 pub const progress = @import("progress.zig");
