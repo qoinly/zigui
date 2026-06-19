@@ -1,17 +1,23 @@
 // The iOS app entry and lifecycle. Unlike the desktop backend there is no run
 // loop to call: UIApplicationMain owns it and never returns, so run_main blocks
 // like the desktop run. The surface is not handed over by the framework either -
-// the delegate's didFinishLaunching builds the UIWindow + view, records them in
-// g_window, and notifies the surface delegate the high-level App registered.
+// the delegate's didFinishLaunching builds the UIWindow and a CAMetalLayer-backed
+// view, records them in g_window, and notifies the registered surface delegate.
 //
-// The delegate class is built at runtime through the Objective-C runtime (the
-// macOS custom-shell precedent), so the backend ships no .m and no bridge VM.
+// The delegate and the metal view are both built at runtime through the
+// Objective-C runtime (the macOS custom-shell precedent), so the backend ships no
+// .m and no bridge VM.
 
 const std = @import("std");
 const objc = @import("../macos/objc.zig");
 const native = @import("native.zig");
+const custom_shell = @import("custom_shell.zig");
 
 const Id = objc.Id;
+
+// UIViewAutoresizing bits: the metal layer tracks the view through rotation.
+const autoresize_flexible_width: objc.NSUInteger = 1 << 1;
+const autoresize_flexible_height: objc.NSUInteger = 1 << 4;
 
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 pub const Error = error{InitFailed};
@@ -115,9 +121,11 @@ fn build_surface() void {
     std.debug.assert(!g_window.in_use); // launch fires once
     if (!make_window()) return;
     std.debug.assert(g_window.window != null);
+    std.debug.assert(g_window.layer != null);
     g_window.in_use = true;
     g_window.sync_extent();
     std.debug.assert(g_window.width_pt >= 1);
+    custom_shell.set_window(&g_window);
     if (g_delegate) |d| d.on_ready(d.ctx, &g_window);
 }
 
@@ -128,39 +136,59 @@ fn make_window() bool {
     const scale = objc.msg_send(objc.CGFloat, screen, "scale", .{});
     std.debug.assert(scale >= 1);
 
-    const vc = make_root_controller() orelse return false;
+    const vc = make_root_controller(bounds, scale) orelse return false;
     const UIWindow = objc.get_class("UIWindow") orelse return false;
     const window = objc.msg_send(Id, objc.alloc(UIWindow), "initWithFrame:", .{bounds});
     objc.msg_send(void, window, "setRootViewController:", .{vc});
     objc.msg_send(void, window, "makeKeyAndVisible", .{});
 
     g_window.window = window;
-    g_window.view = objc.msg_send(Id, vc, "view", .{});
     g_window.scale = @intFromFloat(scale);
     return true;
 }
 
-fn make_root_controller() ?Id {
+// The root controller's view is the CAMetalLayer-backed surface the renderer
+// draws into; record both the view and its layer for the shell to read.
+fn make_root_controller(bounds: native.CGRect, scale: objc.CGFloat) ?Id {
     const UIViewController = objc.get_class("UIViewController") orelse return null;
     const vc = objc.msg_send(Id, objc.alloc(UIViewController), "init", .{});
-    const view = objc.msg_send(Id, vc, "view", .{});
-    std.debug.assert(@intFromPtr(view) != 0);
-    set_background(view);
+    std.debug.assert(@intFromPtr(vc) != 0);
+    const view = make_metal_view(bounds, scale) orelse return null;
+    objc.msg_send(void, vc, "setView:", .{view});
+    g_window.view = view;
+    g_window.layer = objc.msg_send(Id, view, "layer", .{});
+    std.debug.assert(g_window.layer != null);
     return vc;
 }
 
-// A visible fill so a launched-but-not-yet-drawing bundle reads as alive on a
-// screenshot rather than a black screen the renderer has not taken over yet.
-fn set_background(view: Id) void {
+fn make_metal_view(bounds: native.CGRect, scale: objc.CGFloat) ?Id {
+    const cls = ensure_metal_view_class() orelse return null;
+    const view = objc.msg_send(Id, objc.alloc(cls), "initWithFrame:", .{bounds});
     std.debug.assert(@intFromPtr(view) != 0);
-    const UIColor = objc.get_class("UIColor") orelse return;
-    const fill = objc.msg_send(Id, UIColor, "colorWithRed:green:blue:alpha:", .{
-        @as(objc.CGFloat, 0.10),
-        @as(objc.CGFloat, 0.12),
-        @as(objc.CGFloat, 0.18),
-        @as(objc.CGFloat, 1.0),
-    });
-    objc.msg_send(void, view, "setBackgroundColor:", .{fill});
+    objc.msg_send(void, view, "setContentScaleFactor:", .{scale});
+    const mask = autoresize_flexible_width | autoresize_flexible_height;
+    objc.msg_send(void, view, "setAutoresizingMask:", .{mask});
+    return view;
+}
+
+var g_metal_view_class: ?objc.Class = null;
+
+// A UIView subclass whose +layerClass is CAMetalLayer, so the view's own backing
+// layer is the drawable - it resizes with the view, no manual sublayer to track.
+fn ensure_metal_view_class() ?objc.Class {
+    if (g_metal_view_class) |c| return c;
+    const UIView = objc.get_class("UIView") orelse return null;
+    const cls = objc.objc_allocateClassPair(UIView, "ZiguiMetalView", 0) orelse return null;
+    const meta = objc.object_getClass(@ptrCast(cls)) orelse return null;
+    _ = objc.class_addMethod(meta, objc.sel("layerClass"), @ptrCast(&metal_layer_class), "#@:");
+    objc.objc_registerClassPair(cls);
+    g_metal_view_class = cls;
+    return cls;
+}
+
+fn metal_layer_class(_: objc.Class, _: objc.Sel) callconv(.c) objc.Class {
+    // CAMetalLayer is always present (QuartzCore is linked); the lookup cannot fail.
+    return objc.get_class("CAMetalLayer").?;
 }
 
 fn ns_string(s: [:0]const u8) Id {

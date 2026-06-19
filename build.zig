@@ -97,6 +97,7 @@ fn link_ios(b: *std.Build, zigui: *std.Build.Module) void {
     zigui.linkFramework("Foundation", .{});
     zigui.linkFramework("Metal", .{});
     zigui.linkFramework("QuartzCore", .{});
+    zigui.linkFramework("CoreVideo", .{}); // CVMetalTextureCache (zero-copy frames)
     zigui.linkFramework("CoreText", .{});
     zigui.linkFramework("CoreGraphics", .{});
     zigui.link_libc = true;

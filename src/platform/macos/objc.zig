@@ -60,6 +60,10 @@ pub extern "c" fn object_setInstanceVariable(
     value: ?*anyopaque,
 ) *opaque {};
 
+// For a class object, returns its metaclass - where a class method (e.g. an iOS
+// view subclass's +layerClass) is registered.
+pub extern "c" fn object_getClass(obj: ?*anyopaque) ?Class;
+
 pub extern "c" fn objc_msgSend() void;
 
 fn MsgSendFn(comptime ReturnType: type, comptime ArgTypes: []const type) type {
