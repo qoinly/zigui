@@ -27,6 +27,7 @@ const editable_kit = @import("kit/editable.zig");
 const textarea_kit = @import("kit/textarea.zig");
 const alert_kit = @import("kit/alert.zig");
 const tabs_kit = @import("kit/tabs.zig");
+const bottom_bar_kit = @import("kit/bottom_bar.zig");
 const toggle_group_kit = @import("kit/toggle_group.zig");
 const slider_kit = @import("kit/slider.zig");
 const select_kit = @import("kit/select.zig");
@@ -876,6 +877,67 @@ pub fn tabs(
     const spec = a.create(TabsSpec) catch @panic("node arena oom");
     spec.* = .{ .theme = theme, .labels = labels, .state = state, .o = o };
     return node.leaf(a, TabsSpec.measure, TabsSpec.draw, spec);
+}
+
+pub const BottomBar = struct {
+    active: usize = 0,
+    style: bottom_bar_kit.Style = .standard,
+    indicator: bool = true,
+    safe_bottom: f32 = 0,
+    surface: ?bottom_bar_kit.Rgba = null,
+    active_color: ?bottom_bar_kit.Rgba = null,
+    inactive_color: ?bottom_bar_kit.Rgba = null,
+    indicator_color: ?bottom_bar_kit.Rgba = null,
+    paint: ?*custom_paint.PaintContext = null,
+    on_select: ?callbacks.SelectFn = null,
+    ctx: ?*anyopaque = null,
+};
+
+const BottomBarSpec = struct {
+    theme: *const Theme,
+    items: []const bottom_bar_kit.Item,
+    state: *bottom_bar_kit.State,
+    o: BottomBar,
+    fn opts(self: *const BottomBarSpec) bottom_bar_kit.Options {
+        return .{
+            .items = self.items,
+            .active = self.o.active,
+            .style = self.o.style,
+            .indicator = self.o.indicator,
+            .safe_bottom = self.o.safe_bottom,
+            .surface = self.o.surface,
+            .active_color = self.o.active_color,
+            .inactive_color = self.o.inactive_color,
+            .indicator_color = self.o.indicator_color,
+            .theme = self.theme,
+            .paint = self.o.paint,
+            .on_select = self.o.on_select,
+            .ctx = self.o.ctx,
+        };
+    }
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        const self: *BottomBarSpec = @ptrCast(@alignCast(ctx));
+        return SizeF.init(0, bottom_bar_kit.height(self.o.style));
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *BottomBarSpec = @ptrCast(@alignCast(ctx));
+        if (r.size.width <= 0) return;
+        const r0 = r.origin;
+        _ = try bottom_bar_kit.render(b, r0.x, r0.y, r.size.width, self.state, self.opts());
+    }
+};
+
+pub fn bottom_bar(
+    a: A,
+    theme: *const Theme,
+    items: []const bottom_bar_kit.Item,
+    state: *bottom_bar_kit.State,
+    o: BottomBar,
+) *Node {
+    const spec = a.create(BottomBarSpec) catch @panic("node arena oom");
+    spec.* = .{ .theme = theme, .items = items, .state = state, .o = o };
+    return node.leaf(a, BottomBarSpec.measure, BottomBarSpec.draw, spec);
 }
 
 pub const ToggleGrp = struct {

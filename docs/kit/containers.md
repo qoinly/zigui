@@ -8,6 +8,7 @@ Containers group and stack content (`card`), switch between views (`tabs`,
 - [Tabs](#tabs) - switch between related views
 - [Sidebar](#sidebar) - a nav tree with disclosure + resize
 - [Tab bar](#tab-bar) - closeable, reorderable page tabs
+- [Bottom bar](#bottom-bar) - a mobile bottom navigation bar
 - [Overlays](#overlays) - dialog, sheet, menu, popover
 
 ## Card
@@ -219,6 +220,74 @@ zigui.tabbar(.{
 The kit reports a proposed move/close/pin index - you mutate your own list. Keep
 pinned tabs grouped at the front and clamp `on_move` so they stay grouped.
 Re-exported: `TabItem`, `TabBarState`.
+
+## Bottom bar
+
+A bottom navigation bar: a persistent row of 3-5 top-level destinations (icon +
+label) pinned to the screen bottom. A tap fires `on_select` with the index; the
+active destination is highlighted. It is platform-agnostic - you describe the
+destinations and the engine renders the host platform's bottom-nav idiom (a
+Material-style bar on Android, the tab bar on iOS), so one definition feels
+native on each. You own the selected index and a `BottomBarState` (it must keep
+a stable address - hitboxes back-point into it). Two layouts:
+
+- `.standard` - a full-width bar flush at the bottom edge.
+- `.floating` - a detached, rounded bar inset from the edges, lifted on a shadow.
+
+```zig
+const App = struct {
+    nav: zigui.BottomBarState = .{},
+    tab: usize = 0,
+};
+
+const ITEMS = [_]zigui.BottomBarItem{
+    .{ .icon = .grid, .label = "Home" },
+    .{ .icon = .search, .label = "Search" },
+    .{ .icon = .bell, .label = "Alerts" },
+    .{ .icon = .person, .label = "Profile" },
+};
+
+fn on_select(app: *App, i: usize) void { app.tab = i; }
+
+// The real system nav inset, from the safe-area body (device-specific, not a
+// guess): the standard surface fills down into it to the screen edge.
+const inset = f.size.height - (f.body.origin.y + f.body.size.height);
+
+zigui.bottom_bar(&ITEMS, &app.nav, .{
+    .active = app.tab,
+    .style = .standard,
+    .safe_bottom = inset,
+    .on_select = zigui.on_index(App, on_select),
+})
+```
+
+`bottom_bar(items, state, o)` - `items` is the destinations (borrowed for the
+frame; keep it static), `state` is a `*BottomBarState`, `o` is:
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `active` | `usize` | `0` | active destination index |
+| `style` | `BottomBarStyle` | `.standard` | `.standard` full-width bar or `.floating` detached bar |
+| `indicator` | `bool` | `true` | highlight the active destination (the platform picks the treatment) |
+| `safe_bottom` | `f32` | `0` | system nav inset; extends the standard surface down to the screen edge |
+| `surface` | `?Rgba` | `null` | band / capsule fill (`null` = `theme.secondary`) |
+| `active_color` | `?Rgba` | `null` | active icon + label (`null` = `theme.foreground`) |
+| `inactive_color` | `?Rgba` | `null` | inactive icon + label (`null` = `theme.muted_foreground`) |
+| `indicator_color` | `?Rgba` | `null` | the pill fill (`null` = a translucent `foreground`) |
+| `on_select` | `?SelectFn` | `null` | wrap with `zigui.on_index(State, f)` (`fn(*State, usize)`) |
+
+`BottomBarItem`: `icon: Icon`, `label: []const u8`.
+
+`safe_bottom` is the bottom system-nav inset, derived from the frame, not
+hardcoded - so it adapts to any device. The `.standard` bar's *surface* fills
+down through it to the physical screen edge (behind the gesture handle) while
+the icons + labels stay in the safe area above it; `.floating` floats clear of
+the nav and ignores it. The default `surface` is `theme.secondary` (a distinct
+elevated tone) because some themes set `card == background`; override any color
+to match your palette. `bottom_bar` only draws the bar - render the body per
+`active` yourself. The `state` and the `items` slice must outlive the frame -
+store `items` as a module-level constant. Re-exported: `BottomBarItem`,
+`BottomBarState`, `BottomBarStyle`, `BottomBarOpts`.
 
 ## Overlays
 

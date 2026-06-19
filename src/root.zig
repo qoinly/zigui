@@ -330,6 +330,24 @@ pub fn tabs(
     oo.ctx = fc.state;
     return kit_nodes.tabs(fc.arena, fc.theme, labels, state, oo);
 }
+// A bottom navigation bar: a persistent icon+label row that switches top-level
+// sections. `state` is caller-owned (the tab hitboxes outlive the frame); pass
+// `safe_bottom` the bottom inset so the band reaches the screen edge under the nav.
+pub fn bottom_bar(
+    items: []const kit.bottom_bar.Item,
+    state: *kit.bottom_bar.State,
+    o: kit_nodes.BottomBar,
+) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    oo.ctx = fc.state;
+    return kit_nodes.bottom_bar(fc.arena, fc.theme, items, state, oo);
+}
+pub const BottomBarState = kit.bottom_bar.State;
+pub const BottomBarItem = kit.bottom_bar.Item;
+pub const BottomBarStyle = kit.bottom_bar.Style;
+pub const BottomBarOpts = kit_nodes.BottomBar;
 pub fn toggle_group(
     items: []const kit.toggle_group.ToggleGroupItem,
     o: kit_nodes.ToggleGrp,

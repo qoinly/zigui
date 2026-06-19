@@ -19,6 +19,9 @@ pub const App = struct {
     list_scroll: zigui.ScrollState = .{},
     field: zigui.TextField = .{},
     onboarding: zigui.CarouselState = .{},
+    bottom_nav: zigui.BottomBarState = .{},
+    tab: usize = 0, // active bottom-bar destination
+    bb_style: zigui.BottomBarStyle = .floating, // bottom-bar style, toggled in the demo
 
     clicks: u32 = 0,
     focus: u32 = 0, // id of the focused text field, 0 = none

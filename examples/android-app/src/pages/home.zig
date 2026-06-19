@@ -13,6 +13,7 @@ const background = @import("background.zig");
 const headless = @import("headless.zig");
 const onboarding = @import("onboarding.zig");
 const permissions = @import("permissions.zig");
+const bottombar = @import("bottombar.zig");
 
 // A tap adds a dot, capped so the row never overflows the surface. With no font the
 // label does not render, so the dot row is the visible proof a touch reached the kit.
@@ -77,6 +78,7 @@ pub fn view(f: *Frame, app: *App) *Node {
         zigui.button("Notif listener", .{ .on_click = zigui.on(App, notif.open) }),
         zigui.button("Broadcasts", .{ .on_click = zigui.on(App, broadcasts.open) }),
         zigui.button("Kit UI", .{ .on_click = zigui.on(App, kit.open) }),
+        zigui.button("Bottom bar", .{ .on_click = zigui.on(App, bottombar.open) }),
         zigui.button("Background", .{ .on_click = zigui.on(App, background.open) }),
         zigui.button("Headless", .{ .on_click = zigui.on(App, headless.open) }),
         zigui.button("Onboarding", .{ .on_click = zigui.on(App, onboarding.open) }),
