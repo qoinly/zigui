@@ -14,6 +14,16 @@ pub fn build(b: *std.Build) void {
 
     link_platform(zigui, target);
 
+    // Android capability opt-in: each flag gates whether its JNI bridge (and so the
+    // napi code that bridge pulls in) compiles into the .so. Off by default; androidApk
+    // turns on what the app declares, so a minimal app carries none of them.
+    const android_caps = b.addOptions();
+    android_cap(b, android_caps, "accessibility", "android_accessibility");
+    android_cap(b, android_caps, "notification_listener", "android_notification_listener");
+    android_cap(b, android_caps, "broadcast", "android_broadcast");
+    android_cap(b, android_caps, "biometric", "android_biometric");
+    zigui.addOptions("android_caps", android_caps);
+
     const zigui_tests = b.addTest(.{ .root_module = zigui });
     const run_zigui_tests = b.addRunArtifact(zigui_tests);
 
@@ -23,6 +33,25 @@ pub fn build(b: *std.Build) void {
     add_examples(b, zigui, target, optimize);
     add_icongen(b);
     add_shadergen(b);
+    add_cli(b);
+}
+
+// The zigui CLI (`zig-out/bin/zigui`): scaffolds apps and checks the toolchain.
+// `zig build cli` installs it; `zig build cli-run -- <args>` runs it in place.
+fn add_cli(b: *std.Build) void {
+    const cli_root = b.createModule(.{
+        .root_source_file = b.path("tools/cli/main.zig"),
+        .target = b.graph.host, // a host tool: it runs on the developer's machine
+        .optimize = .ReleaseSafe,
+    });
+    const cli_exe = b.addExecutable(.{ .name = "zigui", .root_module = cli_root });
+    const cli_step = b.step("cli", "Build the zigui CLI -> zig-out/bin/zigui");
+    cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
+
+    const run = b.addRunArtifact(cli_exe);
+    if (b.args) |args| run.addArgs(args);
+    const run_step = b.step("cli-run", "Run the zigui CLI: zig build cli-run -- <args>");
+    run_step.dependOn(&run.step);
 }
 
 // Recompiles the Linux GLSL to the committed SPIR-V (the icongen pattern: a
@@ -199,6 +228,9 @@ pub const AndroidApkOptions = struct {
     // Dex zigui's static broadcast receiver (for headless / cold-start broadcasts the
     // app declares in its manifest, e.g. SMS_RECEIVED).
     include_broadcast_receiver: bool = false,
+    // Compile the biometric bridge (native callback). The authenticate call lives on
+    // the activity; this gates only the native result-callback code.
+    include_biometric: bool = false,
 };
 
 pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
@@ -231,8 +263,9 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
     _ = tree.addCopyFile(lib_x86.getEmittedBin(), b.fmt("lib/x86_64/lib{s}.so", .{opts.name}));
     _ = tree.addCopyFile(lib_arm.getEmittedBin(), b.fmt("lib/arm64-v8a/lib{s}.so", .{opts.name}));
 
-    // zigui's shipped Java, staged into a package-tree dir so javac compiles whatever
-    // is present (activity always; the service only when accessibility is on).
+    // zigui's shipped Java, staged so javac compiles whatever is present: the activity
+    // always; an optional service only when the app opts in. The activity no longer
+    // references the services, so a minimal app dexes neither.
     const zigui_files = b.dependency("zigui", .{
         .target = b.graph.host,
         .optimize = opts.optimize,
@@ -359,7 +392,14 @@ fn android_lib(
     , .{ sysroot, sysroot, lib_dir }));
 
     const target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .android });
-    const zigui_dep = b.dependency("zigui", .{ .target = target, .optimize = opts.optimize });
+    const zigui_dep = b.dependency("zigui", .{
+        .target = target,
+        .optimize = opts.optimize,
+        .android_accessibility = opts.include_accessibility,
+        .android_notification_listener = opts.include_notification_listener,
+        .android_broadcast = opts.include_broadcast_receiver,
+        .android_biometric = opts.include_biometric,
+    });
     const zigui = zigui_dep.module("zigui");
     const lib = b.addLibrary(.{
         .name = opts.name,
@@ -382,6 +422,13 @@ fn android_lib(
 
 fn android_env(b: *std.Build, name: []const u8) ?[]const u8 {
     return b.graph.environ_map.get(name);
+}
+
+// Declares one android-capability dependency option and records it in the options
+// module the library imports as `android_caps`. Off unless a consumer opts in.
+fn android_cap(b: *std.Build, o: *std.Build.Step.Options, name: []const u8, flag: []const u8) void {
+    const on = b.option(bool, flag, "android capability bridge (opt-in)") orelse false;
+    o.addOption(bool, name, on);
 }
 
 fn add_icongen(b: *std.Build) void {

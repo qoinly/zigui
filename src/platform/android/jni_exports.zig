@@ -4,6 +4,13 @@
 // library, not the app, so a consumer writes no Java and no JNI glue - referencing
 // zigui.App pulls app.zig, which references this file, emitting the symbols. This
 // file is reached only through the android backend, so the exports are android-only.
+//
+// The optional bridges (accessibility, notification listener, broadcast, biometric)
+// are gated by android_caps: a comptime-false cap drops its @export, and since nothing
+// else references that bridge, Zig leaves the whole napi module out of the .so. So an
+// app that does not declare a capability carries none of its code.
+
+const caps = @import("android_caps");
 
 const ime = @import("ime.zig");
 const custom_shell = @import("custom_shell.zig");
@@ -46,11 +53,7 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFile(
 }
 
 // The BiometricPrompt callback forwards the terminal outcome (1 ok, 2 failed) here.
-export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBiometric(
-    env: *anyopaque,
-    this: *anyopaque,
-    result: i32,
-) callconv(.c) void {
+fn on_biometric(env: *anyopaque, this: *anyopaque, result: i32) callconv(.c) void {
     _ = env;
     _ = this;
     biometric.on_native_biometric(result);
@@ -58,7 +61,7 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBiometric(
 
 // The shipped notification listener forwards each posted notification's package,
 // title, and text here.
-export fn Java_io_qoinly_zigui_ZiguiNotificationListenerService_nativeOnNotification(
+fn on_notification(
     env: *anyopaque,
     this: *anyopaque,
     pkg: ?*anyopaque,
@@ -69,9 +72,9 @@ export fn Java_io_qoinly_zigui_ZiguiNotificationListenerService_nativeOnNotifica
     notification_listener.on_native_notification(env, pkg, title, text);
 }
 
-// A subscribed broadcast receiver forwards each match's action + a String[] of
-// alternating key, value extras here.
-export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBroadcast(
+// A subscribed (runtime) broadcast receiver forwards each match's action + a String[]
+// of alternating key, value extras here.
+fn on_broadcast(
     env: *anyopaque,
     this: *anyopaque,
     action: ?*anyopaque,
@@ -83,7 +86,7 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBroadcast(
 
 // The manifest-declared (static) receiver forwards each broadcast here for the
 // headless path (may run on a cold-started process).
-export fn Java_io_qoinly_zigui_ZiguiBroadcastReceiver_nativeOnBroadcast(
+fn on_static_broadcast(
     env: *anyopaque,
     this: *anyopaque,
     action: ?*anyopaque,
@@ -94,7 +97,7 @@ export fn Java_io_qoinly_zigui_ZiguiBroadcastReceiver_nativeOnBroadcast(
 }
 
 // The accessibility service forwards each subscribed event's type, package, and text.
-export fn Java_io_qoinly_zigui_ZiguiAccessibilityService_nativeOnA11yEvent(
+fn on_a11y_event(
     env: *anyopaque,
     this: *anyopaque,
     event_type: i32,
@@ -103,4 +106,22 @@ export fn Java_io_qoinly_zigui_ZiguiAccessibilityService_nativeOnA11yEvent(
 ) callconv(.c) void {
     _ = this;
     accessibility.on_native_a11y_event(env, event_type, pkg, text);
+}
+
+comptime {
+    if (caps.biometric) @export(&on_biometric, .{
+        .name = "Java_io_qoinly_zigui_ZiguiActivity_nativeOnBiometric",
+    });
+    if (caps.notification_listener) @export(&on_notification, .{
+        .name = "Java_io_qoinly_zigui_ZiguiNotificationListenerService_nativeOnNotification",
+    });
+    if (caps.broadcast) @export(&on_broadcast, .{
+        .name = "Java_io_qoinly_zigui_ZiguiActivity_nativeOnBroadcast",
+    });
+    if (caps.broadcast) @export(&on_static_broadcast, .{
+        .name = "Java_io_qoinly_zigui_ZiguiBroadcastReceiver_nativeOnBroadcast",
+    });
+    if (caps.accessibility) @export(&on_a11y_event, .{
+        .name = "Java_io_qoinly_zigui_ZiguiAccessibilityService_nativeOnA11yEvent",
+    });
 }

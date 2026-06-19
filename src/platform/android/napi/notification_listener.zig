@@ -23,15 +23,18 @@ var g_len: usize = 0;
 // the one line being copied, but it stays in-bounds and the next take is clean.
 var g_valid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-// Whether the listener is connected (the activity reads the service's static flag).
+const NOTIF_CLASS = "io.qoinly.zigui.ZiguiNotificationListenerService";
+
+// Whether the listener is connected (its static flag). The optional service is reached
+// by its static methods (loaded via the activity classloader), not via the activity.
 pub fn enabled() bool {
     const c = util.ctx() orelse return false;
     const env = c.env;
     const t = env.*;
-    const cls = t.GetObjectClass(env, c.activity) orelse return false;
+    const cls = util.load_app_class(env, c.activity, NOTIF_CLASS) orelse return false;
     defer t.DeleteLocalRef(env, cls);
-    const m = t.GetMethodID(env, cls, "notifEnabled", "()Z") orelse return false;
-    return t.CallBooleanMethodA(env, c.activity, m, null) != 0;
+    const m = t.GetStaticMethodID(env, cls, "isEnabled", "()Z") orelse return false;
+    return t.CallStaticBooleanMethodA(env, cls, m, null) != 0;
 }
 
 // Opens the notification-access settings so the user can enable the listener.

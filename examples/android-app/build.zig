@@ -21,5 +21,6 @@ pub fn build(b: *std.Build) void {
         .include_accessibility = true,
         .include_notification_listener = true,
         .include_broadcast_receiver = true,
+        .include_biometric = true,
     });
 }
