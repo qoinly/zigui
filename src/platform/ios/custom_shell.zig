@@ -219,8 +219,41 @@ pub fn hovered_caption_button() CaptionButton {
     return .none;
 }
 
-// No native text field is shown, so a focused input degrades to a non-editing
-// draw with an empty editor value.
+// A native UITextField floats over the kit-drawn box (text_field_native_paint is
+// true on iOS, as on macOS), so the OS owns caret placement, selection, the
+// long-press edit menu, the magnifier, autocorrect, and dictation - editing a
+// custom kit can't match by hand. The kit draws the box; this control draws the
+// text + caret. It stays hidden until the kit focuses a field, so the first tap
+// falls through to the kit (a hidden view is not hit-tested), which focuses and
+// raises it; a re-seed runs only on a field change, keyed by id, so live typing is
+// never clobbered. setFrame runs every frame so the control tracks the box (a field
+// inside a scroll moves with it).
+var g_field: ?objc.Id = null;
+var g_visible: bool = false;
+var g_active_id: u32 = 0;
+
+const border_style_none: objc.NSInteger = 0;
+const keyboard_type_default: objc.NSInteger = 0;
+const keyboard_type_number_pad: objc.NSInteger = 4;
+const field_buf_max: usize = 256;
+
+fn ensure_field(view: objc.Id) ?objc.Id {
+    std.debug.assert(@intFromPtr(view) != 0);
+    if (g_field) |f| return f;
+    const cls = objc.get_class("UITextField") orelse return null;
+    const f = objc.msg_send(objc.Id, objc.alloc(cls), "init", .{});
+    std.debug.assert(@intFromPtr(f) != 0);
+    objc.msg_send(void, f, "setBorderStyle:", .{border_style_none}); // the kit draws the box
+    if (objc.get_class("UIColor")) |UIColor| {
+        const clear = objc.msg_send(objc.Id, UIColor, "clearColor", .{});
+        objc.msg_send(void, f, "setBackgroundColor:", .{clear});
+    }
+    objc.msg_send(void, f, "setHidden:", .{objc.YES});
+    objc.msg_send(void, view, "addSubview:", .{f});
+    g_field = f;
+    return f;
+}
+
 pub fn show_text_field(
     handle: CustomShellHandle,
     x: f32,
@@ -234,27 +267,91 @@ pub fn show_text_field(
     numeric: bool,
     id: u32,
 ) bool {
-    _ = handle;
-    _ = x;
-    _ = y;
-    _ = w;
-    _ = h;
-    _ = initial;
-    _ = font_size;
-    _ = color;
-    _ = secure;
-    _ = numeric;
     std.debug.assert(id != 0);
-    return false;
+    const view = handle.win().view orelse return false;
+    std.debug.assert(@intFromPtr(view) != 0);
+    const f = ensure_field(view) orelse return false;
+    objc.msg_send(void, f, "setFrame:", .{native.CGRect{
+        .origin = .{ .x = x, .y = y },
+        .size = .{ .width = w, .height = h },
+    }});
+    if (!g_visible or g_active_id != id) {
+        seed_field(f, initial, font_size, color, secure, numeric);
+        objc.msg_send(void, f, "setHidden:", .{objc.NO});
+        _ = objc.msg_send(bool, f, "becomeFirstResponder", .{});
+        g_visible = true;
+        g_active_id = id;
+    }
+    return true;
+}
+
+// Font, colour, and the secure/numeric traits hold steady while a field is focused,
+// so apply them (and seed the text) only on a field change; the per-frame path in
+// show_text_field just tracks the box.
+fn seed_field(
+    f: objc.Id,
+    initial: []const u8,
+    font_size: f32,
+    color: types.Rgba,
+    secure: bool,
+    numeric: bool,
+) void {
+    std.debug.assert(@intFromPtr(f) != 0);
+    std.debug.assert(font_size > 0);
+    std.debug.assert(initial.len <= field_buf_max); // a field value never exceeds the buffer
+    if (objc.get_class("UIFont")) |UIFont| {
+        const fs = @as(objc.CGFloat, font_size);
+        const font = objc.msg_send(objc.Id, UIFont, "systemFontOfSize:", .{fs});
+        objc.msg_send(void, f, "setFont:", .{font});
+    }
+    if (objc.get_class("UIColor")) |UIColor| {
+        const col = objc.msg_send(objc.Id, UIColor, "colorWithRed:green:blue:alpha:", .{
+            @as(objc.CGFloat, color.r),
+            @as(objc.CGFloat, color.g),
+            @as(objc.CGFloat, color.b),
+            @as(objc.CGFloat, color.a),
+        });
+        objc.msg_send(void, f, "setTextColor:", .{col});
+    }
+    objc.msg_send(void, f, "setSecureTextEntry:", .{if (secure) objc.YES else objc.NO});
+    const kb = if (numeric) keyboard_type_number_pad else keyboard_type_default;
+    objc.msg_send(void, f, "setKeyboardType:", .{kb});
+    var buf: [field_buf_max]u8 = undefined;
+    objc.msg_send(void, f, "setText:", .{ns_string_stack(&buf, initial)});
 }
 
 pub fn hide_text_field(handle: CustomShellHandle) void {
     _ = handle;
+    if (!g_visible) return;
+    std.debug.assert(g_field != null); // visible implies the field was created
+    if (g_field) |f| {
+        objc.msg_send(void, f, "setHidden:", .{objc.YES});
+        _ = objc.msg_send(bool, f, "resignFirstResponder", .{});
+    }
+    g_visible = false;
 }
 
 pub fn text_field_value(buf: []u8) []const u8 {
-    _ = buf;
-    return "";
+    std.debug.assert(buf.len > 0);
+    const f = g_field orelse return "";
+    const s = objc.msg_send(objc.Id, f, "text", .{});
+    if (@intFromPtr(s) == 0) return ""; // an empty UITextField hands back nil
+    const cstr = objc.msg_send([*:0]const u8, s, "UTF8String", .{});
+    var i: usize = 0;
+    while (i < buf.len and cstr[i] != 0) : (i += 1) buf[i] = cstr[i];
+    std.debug.assert(i <= buf.len); // the copy never ran past the caller's buffer
+    return buf[0..i];
+}
+
+fn ns_string_stack(buf: []u8, s: []const u8) objc.Id {
+    std.debug.assert(buf.len > 0);
+    const NSString = objc.get_class("NSString") orelse unreachable;
+    const n = @min(s.len, buf.len - 1);
+    std.debug.assert(n < buf.len);
+    @memcpy(buf[0..n], s[0..n]);
+    buf[n] = 0;
+    const cstr: [*:0]const u8 = @ptrCast(buf.ptr);
+    return objc.msg_send(objc.Id, NSString, "stringWithUTF8String:", .{cstr});
 }
 
 pub fn pasteboard_read_into(buf: []u8) []const u8 {

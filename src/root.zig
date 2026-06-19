@@ -465,6 +465,10 @@ pub fn app_bar(title: []const u8, o: kit_nodes.AppBar) *node.Node {
 }
 pub const AppBarOpts = kit_nodes.AppBar;
 
+// The app-bar's fixed height in points; content placed below the bar sizes against
+// it (a full-height scroll page subtracts it from the body height).
+pub const app_bar_height = kit.navigator.BAR_H;
+
 // Call once a frame from the body that hosts the navigator: pops the stack on a
 // back request (Esc / Android Back / the app-bar chevron) and publishes the depth.
 pub fn handle_back(stack: *NavStack) void {
