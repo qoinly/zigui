@@ -110,11 +110,11 @@ pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
     return null;
 }
 
-// Safe-area insets (points) the paint loop carves off the body. Only the Android
-// surface is edge-to-edge under the system bars; desktop windows exclude their
-// chrome already, so the insets are zero and the body math is unchanged.
+// Safe-area insets (points) the paint loop carves off the body. The Android and
+// iOS surfaces are edge-to-edge under the system bars; desktop windows exclude
+// their chrome already, so the insets are zero and the body math is unchanged.
 pub fn safe_area_insets() @import("geometry.zig").Insets {
-    if (builtin.abi.isAndroid()) return impl.safe_area_insets();
+    if (builtin.abi.isAndroid() or builtin.os.tag == .ios) return impl.safe_area_insets();
     return .{};
 }
 

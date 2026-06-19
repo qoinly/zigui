@@ -9,6 +9,7 @@ const AtlasTile = text_system.AtlasTile;
 
 pub const ColorAtlas = switch (builtin.os.tag) {
     .macos => @import("platform/macos/mono_atlas.zig").MetalColorAtlas,
+    .ios => @import("platform/macos/mono_atlas.zig").MetalColorAtlas,
     .windows => @import("platform/windows/atlas.zig").WinColorAtlas,
     .linux => @import("platform/linux/atlas.zig").LinuxColorAtlas,
     else => @compileError("zigui: AppIconResolver requires macOS or Windows"),
@@ -55,6 +56,7 @@ pub const PlatformAppIcons = struct {
 
 const NativeImpl = switch (builtin.os.tag) {
     .macos => @import("platform/macos/app_icon.zig").MacAppIcons,
+    .ios => @import("platform/ios/app_icon.zig").IOSAppIcons,
     .windows => @import("platform/windows/app_icon.zig").WinAppIcons,
     .linux => @import("platform/linux/app_icon.zig").LinuxAppIcons,
     else => @compileError("zigui: AppIconResolver requires macOS or Windows"),
