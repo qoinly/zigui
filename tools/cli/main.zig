@@ -5,7 +5,7 @@ const std = @import("std");
 const doctor = @import("doctor.zig");
 const create = @import("create.zig");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 // Threaded into every command: the IO backend, an arena for the run, the process
 // environment, and the two streams. A command writes user output to `out` and
@@ -42,7 +42,10 @@ pub fn main(startup: std.process.Init) !void {
         .err = &ew.interface,
     };
 
-    var args = std.process.Args.Iterator.init(startup.minimal.args);
+    // initAllocator, not init: on Windows the process gets no argv vector, so the
+    // iterator decodes GetCommandLineW through the arena; on POSIX it wraps argv as-is.
+    var args = try std.process.Args.Iterator.initAllocator(startup.minimal.args, ctx.gpa);
+    defer args.deinit();
     _ = args.next(); // argv[0]
 
     run(ctx, &args) catch |e| {

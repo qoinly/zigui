@@ -1,32 +1,41 @@
 // Interactive terminal prompts (select / multiselect / text / confirm), the way a
 // framework scaffolder asks its questions. POSIX raw mode + ANSI redraw; ASCII only,
-// no box-drawing. The caller checks isTty first and falls back to flags when piped.
+// no box-drawing. The caller checks is_tty first and falls back to flags when piped.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("main.zig");
 
+const is_windows = builtin.os.tag == .windows;
 const esc = "\x1b";
 const fd_in = std.posix.STDIN_FILENO;
 
 pub const Error = error{Aborted}; // the user pressed Ctrl-C
 
-// Terminal in raw mode for the lifetime of one prompt; restores on leave().
+// Terminal in raw mode for the lifetime of one prompt; restores on leave(). The
+// Windows arms are unreachable (is_tty gates entry) but must still compile, so the
+// comptime branch keeps the POSIX termios calls out of the Windows build.
 const Raw = struct {
-    saved: std.posix.termios,
+    saved: if (is_windows) void else std.posix.termios,
 
     fn enter() !Raw {
-        const saved = try std.posix.tcgetattr(fd_in);
-        var raw = saved;
-        raw.lflag.ECHO = false; // no key echo - we render the selection ourselves
-        raw.lflag.ICANON = false; // byte at a time, not line at a time
-        raw.lflag.ISIG = false; // Ctrl-C is a byte we handle, not a signal that skips cleanup
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-        try std.posix.tcsetattr(fd_in, .FLUSH, raw);
-        return .{ .saved = saved };
+        if (is_windows) {
+            return .{ .saved = {} };
+        } else {
+            const saved = try std.posix.tcgetattr(fd_in);
+            var raw = saved;
+            raw.lflag.ECHO = false; // no key echo - we render the selection ourselves
+            raw.lflag.ICANON = false; // byte at a time, not line at a time
+            raw.lflag.ISIG = false; // Ctrl-C is a byte we handle, not a signal that skips cleanup
+            raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+            raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+            try std.posix.tcsetattr(fd_in, .FLUSH, raw);
+            return .{ .saved = saved };
+        }
     }
 
     fn leave(self: Raw) void {
+        if (is_windows) return;
         std.posix.tcsetattr(fd_in, .FLUSH, self.saved) catch {};
     }
 };
@@ -34,9 +43,13 @@ const Raw = struct {
 const Key = union(enum) { up, down, enter, space, backspace, ctrl_c, char: u8, other };
 
 fn read_byte() !?u8 {
-    var b: [1]u8 = undefined;
-    const n = try std.posix.read(fd_in, &b);
-    return if (n == 0) null else b[0];
+    if (is_windows) {
+        return null;
+    } else {
+        var b: [1]u8 = undefined;
+        const n = try std.posix.read(fd_in, &b);
+        return if (n == 0) null else b[0];
+    }
 }
 
 fn read_key() !Key {
@@ -218,5 +231,6 @@ fn abort(ctx: cli.Ctx) Error {
 }
 
 pub fn is_tty(ctx: cli.Ctx) bool {
+    if (is_windows) return false; // no POSIX raw mode here: drive create through flags
     return std.Io.File.stdin().isTty(ctx.io) catch false;
 }
