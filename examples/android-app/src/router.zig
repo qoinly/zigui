@@ -14,6 +14,7 @@ const kit = @import("pages/kit.zig");
 const background = @import("pages/background.zig");
 const headless = @import("pages/headless.zig");
 const permissions = @import("pages/permissions.zig");
+const bottombar = @import("pages/bottombar.zig");
 
 // Dispatch by the nav stack's current route; nav_page calls this (twice during a
 // slide, once otherwise). An unknown route falls through to the home root.
@@ -29,5 +30,6 @@ pub fn dispatch(f: *Frame, app: *App, route: []const u8) *Node {
     if (eql(u8, route, "work")) return background.view(f, app);
     if (eql(u8, route, "headless")) return headless.view(f, app);
     if (eql(u8, route, "perms")) return permissions.view(f, app);
+    if (eql(u8, route, "bottombar")) return bottombar.view(f, app);
     return home.view(f, app);
 }
