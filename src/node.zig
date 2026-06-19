@@ -17,6 +17,7 @@
 // box bg/border are explicit Rgba (the caller already holds the theme).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const layout = @import("layout.zig");
 const tokens = @import("theme.zig");
 const styles = @import("style.zig");
@@ -230,7 +231,12 @@ pub fn spacer(a: A) *Node {
 
 // Caller-owned scroll position; the scroll node clamps it to the content each
 // frame. Keep one per scroll region in your state, like the other kit states.
-pub const ScrollState = struct { y: f32 = 0 };
+// vel/t back the iOS flick momentum + rubber-band spring (unused elsewhere).
+pub const ScrollState = struct {
+    y: f32 = 0,
+    vel: f32 = 0, // points/sec, the coast velocity a flick leaves behind
+    t_prev_s: f32 = 0, // previous frame's time, for the momentum/spring dt
+};
 
 // hidden: wheel-scrollable but no thumb drawn. auto: thumb shows while overflowing.
 pub const ScrollBar = enum { hidden, auto };
@@ -467,6 +473,73 @@ fn clip_isect(a: [4]f32, c: [4]f32) [4]f32 {
     return .{ x0, y0, @max(0, x1 - x0), @max(0, y1 - y0) };
 }
 
+// iOS scroll feel tuning (points, seconds), named like the SCROLLBAR_* chrome
+// constants below since they are tuned together.
+const SCROLL_DT_MAX: f32 = 0.1; // a stalled frame falls back to one 60Hz step
+const SCROLL_RUBBER_STIFFNESS: f32 = 4.0; // higher = the edge resists harder
+const SCROLL_VEL_SMOOTH: f32 = 0.6; // EMA weight kept from the prior velocity
+const SCROLL_SPRING_RATE: f32 = 16.0; // per-second pull back to the edge
+const SCROLL_COAST_MIN_VEL: f32 = 12.0; // below this the coast stops (points/sec)
+const SCROLL_FLICK_DECEL: f32 = 5.0; // per-second exponential decay of the coast
+const SCROLL_SNAP_EPS: f32 = 0.5; // within this of the edge, snap and stop
+
+fn scroll_overscroll(y: f32, max_y: f32) f32 {
+    std.debug.assert(max_y >= 0);
+    if (y < 0) return y;
+    if (y > max_y) return y - max_y;
+    return 0;
+}
+
+// iOS scroll feel: a flick coasts (momentum) and the edges rubber-band, then
+// spring back. Run per frame off pc.now_s and the drag delta (-wheel_dy);
+// animating is re-armed so the loop keeps ticking through the coast and spring.
+// Other platforms keep the plain clamped drag.
+fn scroll_step_ios(
+    p: *paint.PaintContext,
+    st: *ScrollState,
+    max_y: f32,
+    vh: f32,
+    view: [4]f32,
+) void {
+    std.debug.assert(max_y >= 0);
+    std.debug.assert(vh >= 0);
+    const now: f32 = @floatCast(p.now_s);
+    var dt = now - st.t_prev_s;
+    if (!(dt > 0) or dt > SCROLL_DT_MAX) dt = 1.0 / 60.0; // first frame or a stall
+    st.t_prev_s = now;
+    std.debug.assert(dt > 0);
+
+    if (p.is_hovered(view[0], view[1], view[2], view[3])) {
+        const delta = -p.wheel_dy;
+        const over = scroll_overscroll(st.y, max_y);
+        // Past an edge the finger meets rising resistance (the rubber band).
+        const damp: f32 = if (over == 0)
+            1.0
+        else
+            1.0 / (1.0 + @abs(over) / @max(vh, 1) * SCROLL_RUBBER_STIFFNESS);
+        st.y += delta * damp;
+        st.vel = st.vel * SCROLL_VEL_SMOOTH + (delta / dt) * (1.0 - SCROLL_VEL_SMOOTH);
+        st.y = std.math.clamp(st.y, -vh, max_y + vh); // backstop the rubber band
+        return;
+    }
+
+    // Released: spring back from an overscroll, else coast on the flick velocity.
+    const over = scroll_overscroll(st.y, max_y);
+    if (over != 0) {
+        const target = st.y - over;
+        st.y += (target - st.y) * @min(@as(f32, 1.0), dt * SCROLL_SPRING_RATE);
+        st.vel = 0;
+        if (@abs(st.y - target) > SCROLL_SNAP_EPS) p.animating = true else st.y = target;
+    } else if (@abs(st.vel) >= SCROLL_COAST_MIN_VEL) {
+        st.y += st.vel * dt;
+        st.vel *= @exp(-dt * SCROLL_FLICK_DECEL);
+        st.y = std.math.clamp(st.y, -vh, max_y + vh);
+        p.animating = true;
+    } else {
+        st.vel = 0;
+    }
+}
+
 // The child kept its natural height (flex_shrink 0), so its laid-out height is
 // the real content extent to clamp the scroll against.
 fn draw_scroll(
@@ -489,10 +562,14 @@ fn draw_scroll(
     std.debug.assert(vh >= 0);
     const content_h = eng.get_bounds(n.children[0].id).size.height;
     const max_y = @max(0, content_h - vh);
-    if (pc) |p| if (p.is_hovered(view[0], view[1], vw, vh)) {
-        st.y -= p.wheel_dy;
-    };
-    st.y = std.math.clamp(st.y, 0, max_y);
+    if (builtin.os.tag == .ios) {
+        if (pc) |p| scroll_step_ios(p, st, max_y, vh, view);
+    } else {
+        if (pc) |p| if (p.is_hovered(view[0], view[1], vw, vh)) {
+            st.y -= p.wheel_dy;
+        };
+        st.y = std.math.clamp(st.y, 0, max_y);
+    }
 
     const prim0 = b.prims.items.len;
     const spr0 = b.sprites.items.len;
