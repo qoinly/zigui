@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    link_platform(zigui, target);
+    link_platform(b, zigui, target);
 
     // Android capability opt-in: each flag gates whether its JNI bridge (and so the
     // napi code that bridge pulls in) compiles into the .so. Off by default; androidApk
@@ -82,13 +82,39 @@ fn add_shadergen(b: *std.Build) void {
     }
 }
 
-fn link_platform(zigui: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn link_platform(b: *std.Build, zigui: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     switch (target.result.os.tag) {
         .macos => link_macos(zigui),
+        .ios => link_ios(b, zigui),
         .windows => link_windows(zigui),
         .linux => link_linux(zigui),
         else => @panic("zigui: unsupported target OS"),
     }
+}
+
+fn link_ios(b: *std.Build, zigui: *std.Build.Module) void {
+    zigui.linkFramework("UIKit", .{});
+    zigui.linkFramework("Foundation", .{});
+    zigui.linkFramework("Metal", .{});
+    zigui.linkFramework("QuartzCore", .{});
+    zigui.linkFramework("CoreText", .{});
+    zigui.linkFramework("CoreGraphics", .{});
+    zigui.link_libc = true;
+    ios_sim_paths(b, zigui);
+}
+
+// Cross-compiling to iOS, Zig does not auto-detect the SDK the way it does for the
+// native target, so point framework/lib/include search at the simulator SDK.
+fn ios_sim_paths(b: *std.Build, mod: *std.Build.Module) void {
+    const sdk = ios_sim_sdk(b);
+    mod.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+    mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+    mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+}
+
+fn ios_sim_sdk(b: *std.Build) []const u8 {
+    const out = b.run(&.{ "xcrun", "--sdk", "iphonesimulator", "--show-sdk-path" });
+    return std.mem.trimEnd(u8, out, " \r\n");
 }
 
 fn link_linux(zigui: *std.Build.Module) void {
@@ -429,6 +455,67 @@ fn android_env(b: *std.Build, name: []const u8) ?[]const u8 {
 fn android_cap(b: *std.Build, o: *std.Build.Step.Options, name: []const u8, flag: []const u8) void {
     const on = b.option(bool, flag, "android capability bridge (opt-in)") orelse false;
     o.addOption(bool, name, on);
+}
+
+// ---- iOS bundle helper (consumer build-time API) ----
+// A consumer's build.zig reaches this via `@import("zigui")` and calls iosApp
+// once: it cross-compiles the app for the iOS Simulator, assembles a .app from
+// the executable plus the app's Info.plist, and (on `zig build run`) installs and
+// launches it on the booted simulator. The simulator needs no code signing; a
+// real device build + signing is a separate path. Mirrors androidApk.
+pub const IOSAppOptions = struct {
+    // The bundle + executable base name; must match Info.plist CFBundleExecutable.
+    name: []const u8,
+    // The app's root Zig source (imports the "zigui" module).
+    source: std.Build.LazyPath,
+    // The app's Info.plist.
+    info_plist: std.Build.LazyPath,
+    // The bundle identifier, for `zig build run`'s simctl launch.
+    bundle_id: []const u8,
+    optimize: std.builtin.OptimizeMode,
+};
+
+pub fn iosApp(b: *std.Build, opts: IOSAppOptions) void {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = b.graph.host.result.cpu.arch,
+        .os_tag = .ios,
+        .abi = .simulator,
+    });
+    const zigui_dep = b.dependency("zigui", .{ .target = target, .optimize = opts.optimize });
+    const exe = b.addExecutable(.{
+        .name = opts.name,
+        .root_module = b.createModule(.{
+            .root_source_file = opts.source,
+            .target = target,
+            .optimize = opts.optimize,
+            .imports = &.{.{ .name = "zigui", .module = zigui_dep.module("zigui") }},
+        }),
+    });
+    ios_sim_paths(b, exe.root_module);
+
+    // Assemble <name>.app: the executable plus the Info.plist at the bundle root.
+    const app_dir = b.fmt("{s}.app", .{opts.name});
+    const bundle = b.addWriteFiles();
+    _ = bundle.addCopyFile(exe.getEmittedBin(), b.fmt("{s}/{s}", .{ app_dir, opts.name }));
+    _ = bundle.addCopyFile(opts.info_plist, b.fmt("{s}/Info.plist", .{app_dir}));
+    const app_path = bundle.getDirectory().path(b, app_dir);
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = app_path,
+        .install_dir = .bin,
+        .install_subdir = app_dir,
+    });
+    b.getInstallStep().dependOn(&install.step);
+
+    // `zig build run`: install onto the booted simulator and launch.
+    const sim_install = b.addSystemCommand(&.{ "xcrun", "simctl", "install", "booted" });
+    sim_install.addDirectoryArg(app_path);
+    const sim_launch = b.addSystemCommand(&.{
+        "xcrun", "simctl", "launch", "booted", opts.bundle_id,
+    });
+    sim_launch.step.dependOn(&sim_install.step);
+    const run_step = b.step("run", "Install and launch the app on the booted iOS Simulator");
+    run_step.dependOn(&sim_launch.step);
 }
 
 fn add_icongen(b: *std.Build) void {

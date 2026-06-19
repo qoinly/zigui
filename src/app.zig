@@ -7,6 +7,7 @@ const impl = if (builtin.abi.isAndroid())
     @import("platform/android/app.zig")
 else switch (builtin.os.tag) {
     .macos => @import("platform/macos/app.zig"),
+    .ios => @import("platform/ios/app.zig"),
     .windows => @import("platform/windows/app.zig"),
     .linux => @import("platform/linux/app.zig"),
     else => @compileError("zigui: unsupported OS for app"),

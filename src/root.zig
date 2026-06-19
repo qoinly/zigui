@@ -765,10 +765,12 @@ pub const app = @import("app.zig");
 // binary.
 const app_runtime_impl = if (builtin.abi.isAndroid())
     @import("platform/android/app_runtime.zig")
+else if (builtin.os.tag == .ios)
+    @import("platform/ios/app_runtime.zig")
 else
     app_runtime;
 pub const App = app_runtime_impl.App;
-pub const WindowOptions = app_runtime.App.WindowOptions;
+pub const WindowOptions = app_runtime_impl.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const Theme = window.Theme;
 pub const ActivationPolicy = app.ActivationPolicy;
