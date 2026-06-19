@@ -85,7 +85,8 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 - **Feedback** - `alert`, `toasts` (auto-dismiss stack), `tooltip_overlay`
 - **Containers / overlays** - `dialog`, `sheet` (edge slide),
   `popover_overlay`, `menu_overlay` (submenus), `sidebar` (disclosure tree,
-  resize), `tabbar` (closeable, reorderable, pinnable)
+  resize), `tabbar` (closeable, reorderable, pinnable), `bottom_bar` (mobile
+  nav, standard + floating)
 - **Charts** - `line_chart` (curve, fill, gradient, stacked, dots),
   `bar_chart` (grouped, stacked), `donut`
 
