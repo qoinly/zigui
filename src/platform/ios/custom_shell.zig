@@ -34,8 +34,9 @@ pub const ContentSize = shell_types.ContentSize;
 // size/scale and the layer.
 var g_window: ?*native.IOSWindow = null;
 
-// The paint loop registers a MouseDispatch here; with no iOS touch source wired,
-// it is stored but unread.
+// The paint loop registers a MouseDispatch (ctx = the PaintContext) once at surface
+// start; the view's touch methods read it back to route a tap. Never cleared - one
+// surface per app, so it stays valid for the app's life.
 var g_dispatch: ?MouseDispatch = null;
 
 pub fn set_window(window: *native.IOSWindow) void {
@@ -44,6 +45,21 @@ pub fn set_window(window: *native.IOSWindow) void {
 
 pub fn mouse_dispatch() ?MouseDispatch {
     return g_dispatch;
+}
+
+// A finger drag the input layer routes through this handler: it scrolls the region
+// under the touch (or drags a captured control). The paint loop registers it; the
+// view's touch methods read it back.
+const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
+const TouchMove = struct { cb: TouchMoveFn, ctx: *anyopaque };
+var g_touch: ?TouchMove = null;
+
+pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
+    g_touch = .{ .cb = cb, .ctx = ctx };
+}
+
+pub fn touch_move() ?TouchMove {
+    return g_touch;
 }
 
 const UIEdgeInsets = extern struct {
@@ -149,8 +165,9 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     };
 }
 
-// The paint loop registers a MouseDispatch and the other input hooks here; iOS
-// has no touch source wired, so they are stored or accepted and dropped.
+// The paint loop registers a MouseDispatch here; the view's touch methods read it
+// back to route a tap. The raw/grab/cursor hooks below have no iOS source and are
+// accepted and dropped.
 pub fn register_mouse_dispatch(d: MouseDispatch) void {
     g_dispatch = d;
 }

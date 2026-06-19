@@ -87,11 +87,12 @@ pub fn register_paint_now(cb: RedrawFn) void {
 }
 
 // Touch routes a finger drag through a single handler that scrolls the region
-// under it (or drags a captured control). Only the Android backend has a touch
-// source; the desktop backends use the wheel + drag separately and ignore this.
+// under it (or drags a captured control). Only the touch backends (Android, iOS)
+// have a touch source; the desktop backends use the wheel + drag separately and
+// ignore this.
 pub const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
 pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
-    if (builtin.abi.isAndroid()) impl.register_touch_move(cb, ctx);
+    if (builtin.abi.isAndroid() or builtin.os.tag == .ios) impl.register_touch_move(cb, ctx);
 }
 
 // The platform Back button: only Android has one. The handler returns whether it

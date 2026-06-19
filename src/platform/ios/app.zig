@@ -181,6 +181,7 @@ fn ensure_metal_view_class() ?objc.Class {
     const cls = objc.objc_allocateClassPair(UIView, "ZiguiMetalView", 0) orelse return null;
     const meta = objc.object_getClass(@ptrCast(cls)) orelse return null;
     _ = objc.class_addMethod(meta, objc.sel("layerClass"), @ptrCast(&metal_layer_class), "#@:");
+    add_touch_methods(cls);
     objc.objc_registerClassPair(cls);
     g_metal_view_class = cls;
     return cls;
@@ -189,6 +190,49 @@ fn ensure_metal_view_class() ?objc.Class {
 fn metal_layer_class(_: objc.Class, _: objc.Sel) callconv(.c) objc.Class {
     // CAMetalLayer is always present (QuartzCore is linked); the lookup cannot fail.
     return objc.get_class("CAMetalLayer").?;
+}
+
+fn add_touch_methods(cls: objc.Class) void {
+    add_method(cls, "touchesBegan:withEvent:", @ptrCast(&touches_began));
+    add_method(cls, "touchesMoved:withEvent:", @ptrCast(&touches_moved));
+    add_method(cls, "touchesEnded:withEvent:", @ptrCast(&touches_ended));
+    add_method(cls, "touchesCancelled:withEvent:", @ptrCast(&touches_cancelled));
+}
+
+// "v@:@@" = void return; self, _cmd, NSSet* touches, UIEvent* - the signature all
+// four touch selectors share, so one helper installs them.
+fn add_method(cls: objc.Class, name: [:0]const u8, imp: *const anyopaque) void {
+    _ = objc.class_addMethod(cls, objc.sel(name), imp, "v@:@@");
+}
+
+// A touch down hit-tests and presses the control under the finger; the engine fires
+// the click on the matching up. iOS view coords are top-left, y-down - the same
+// space the engine hit-tests in - so the point passes through unscaled.
+fn touches_began(self: Id, _: objc.Sel, touches: Id, _: Id) callconv(.c) void {
+    const p = touch_point(self, touches) orelse return;
+    if (custom_shell.mouse_dispatch()) |d| d.on_down(d.ctx, @floatCast(p.x), @floatCast(p.y));
+}
+
+fn touches_moved(self: Id, _: objc.Sel, touches: Id, _: Id) callconv(.c) void {
+    const p = touch_point(self, touches) orelse return;
+    if (custom_shell.touch_move()) |tm| tm.cb(tm.ctx, @floatCast(p.x), @floatCast(p.y));
+}
+
+fn touches_ended(_: Id, _: objc.Sel, _: Id, _: Id) callconv(.c) void {
+    const d = custom_shell.mouse_dispatch() orelse return;
+    d.on_up(d.ctx);
+    d.on_exit(d.ctx); // touch has no hover, so the release also clears pressed state
+}
+
+fn touches_cancelled(_: Id, _: objc.Sel, _: Id, _: Id) callconv(.c) void {
+    const d = custom_shell.mouse_dispatch() orelse return;
+    d.on_up(d.ctx);
+    d.on_exit(d.ctx);
+}
+
+fn touch_point(view: Id, touches: Id) ?native.CGPoint {
+    const touch = objc.msg_send(?Id, touches, "anyObject", .{}) orelse return null;
+    return objc.msg_send(native.CGPoint, touch, "locationInView:", .{view});
 }
 
 fn ns_string(s: [:0]const u8) Id {
