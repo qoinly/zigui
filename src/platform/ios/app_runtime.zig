@@ -2,10 +2,14 @@
 // desktop app_runtime.App). It reuses the desktop Views/Frame contract and forks
 // only the lifecycle: init stores the config, run registers a surface delegate
 // and hands control to UIApplicationMain, which owns the loop and never returns.
-// The surface delegate fires once the window is up.
+// When the surface is ready the delegate fires, and build stands up the shared
+// Metal renderer on the view's CAMetalLayer and clears it to the theme color.
 
 const std = @import("std");
 const app_runtime = @import("../../app_runtime.zig");
+const custom_shell = @import("../../custom_shell.zig");
+const renderer = @import("../../renderer.zig");
+const types = @import("../../window/types.zig");
 const ios_app = @import("app.zig");
 const native = @import("native.zig");
 
@@ -18,6 +22,9 @@ pub const App = struct {
     opts: Options,
     user_state: ?*anyopaque = null,
     closed_cb: ?*const fn (?*anyopaque, u32) void = null,
+    // Built on surface ready, torn down on surface loss; null in between.
+    handle: ?custom_shell.CustomShellHandle = null,
+    renderer: ?renderer.Renderer = null,
 
     pub const Options = struct {
         title: []const u8 = "",
@@ -77,16 +84,55 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.teardown();
         self.rt.deinit();
         self.alloc.destroy(self);
     }
 
     fn on_surface_ready(ctx: *anyopaque, window: *native.IOSWindow) void {
-        std.debug.assert(@intFromPtr(ctx) != 0);
         std.debug.assert(window.in_use);
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.build();
     }
 
     fn on_surface_lost(ctx: *anyopaque) void {
-        std.debug.assert(@intFromPtr(ctx) != 0);
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.teardown();
+    }
+
+    // Stand up the Metal renderer on the surface's CAMetalLayer and clear it to the
+    // theme background. A failure leaves no half-built state (the handle is dropped
+    // on a renderer-init failure); the surface is re-offered on the next ready.
+    fn build(self: *App) void {
+        std.debug.assert(self.handle == null);
+        const theme = types.Theme.default_dark();
+        const handle = custom_shell.open(.{
+            .title = self.opts.title,
+            .width = @floatCast(self.opts.size[0]),
+            .height = @floatCast(self.opts.size[1]),
+            .chrome = .custom,
+            .theme = theme,
+        }) catch return;
+        self.renderer = renderer.Renderer.init(handle.metal_layer) catch {
+            handle.deinit();
+            return;
+        };
+        self.handle = handle;
+        const bg = theme.background;
+        self.renderer.?.draw_frame(
+            renderer.ClearColor.init(bg.r, bg.g, bg.b, 1),
+            &.{},
+            &.{},
+            null,
+            &.{},
+            null,
+        );
+    }
+
+    fn teardown(self: *App) void {
+        if (self.renderer) |*r| r.deinit();
+        self.renderer = null;
+        if (self.handle) |h| h.deinit();
+        self.handle = null;
     }
 };

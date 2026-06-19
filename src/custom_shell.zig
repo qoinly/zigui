@@ -12,6 +12,7 @@ const impl = if (builtin.abi.isAndroid())
     @import("platform/android/custom_shell.zig")
 else switch (builtin.os.tag) {
     .macos => @import("platform/macos/custom_shell.zig"),
+    .ios => @import("platform/ios/custom_shell.zig"),
     .windows => @import("platform/windows/custom_shell.zig"),
     .linux => @import("platform/linux/custom_shell.zig"),
     else => @compileError("zigui: unsupported OS for custom shell"),
