@@ -35,6 +35,16 @@ exe.root_module.addImport("zigui", zigui.module("zigui"));
 const zigui = @import("zigui");
 ```
 
+Or scaffold a fresh project (desktop, android, or both) with the CLI - it writes the
+build files and a starter `main.zig` for you:
+
+```sh
+zig build cli                          # builds zig-out/bin/zigui
+zigui create myapp --target desktop
+```
+
+See [docs/cli.md](docs/cli.md).
+
 For Android, the same module builds into a signed APK through the `zigui.androidApk`
 build helper - the app writes no Java (zigui ships its own activity and services
 under `io.qoinly.zigui`). See [docs/android.md](docs/android.md) for the toolchain
@@ -45,7 +55,7 @@ setup and the build wiring.
 The API docs live in [docs/](docs/README.md) - app & window, layout, theming, the
 kit, rendering, plus external frames, input capture, and system integration
 (clipboard, fullscreen, displays). [docs/android.md](docs/android.md) covers the
-Android backend.
+Android backend, and [docs/cli.md](docs/cli.md) the project-scaffolding CLI.
 
 ## Build from source
 

@@ -76,9 +76,15 @@ them), aligns, and signs.
 | `build_tools` | `36.0.0` | build-tools version |
 | `api` | `36` | the compile/target API |
 | `min_api` | `26` | the minimum API |
-| `include_accessibility` | `false` | dex the accessibility service + its config resource |
-| `include_notification_listener` | `false` | dex the notification-listener service |
-| `include_broadcast_receiver` | `false` | dex the static broadcast receiver (headless broadcasts) |
+| `include_accessibility` | `false` | the accessibility service (Java + native) + its config resource |
+| `include_notification_listener` | `false` | the notification-listener service (Java + native) |
+| `include_broadcast_receiver` | `false` | the static broadcast receiver (headless broadcasts) |
+| `include_biometric` | `false` | the biometric result-callback bridge (native) |
+
+These four are the capability opt-in. Each off (the default) means the app compiles
+**neither** the Java **nor** the native code for that capability - a minimal app
+carries zero accessibility / notification-listener / broadcast / biometric code. The
+matching `napi.*` calls degrade to a safe no-op when the capability is not opted in.
 
 ### Manifest
 
@@ -251,8 +257,10 @@ withholds broadcasts from it until the user relaunches.
 ## Optional services
 
 The accessibility service and the notification listener are system-bound services
-that call back into native code. They are off by default; turn them on at the
-build (to dex the Java) and declare them in the manifest.
+that call back into native code. They are off by default - off means neither the
+Java nor the native code is compiled in, so a minimal app ships none of it. Turn one
+on at the build (the `include_*` option above) and declare it in the manifest; until
+then the matching `napi.*` calls are no-ops.
 
 ```zig
 zigui.androidApk(b, .{

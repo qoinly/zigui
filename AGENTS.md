@@ -10,6 +10,8 @@ A file for [guiding coding agents](https://agents.md/).
 - **Showcase** (demo + visual reference): `cd examples/showcase && zig build run`
 - **Android APK:** `cd examples/android-app && zig build` (needs the Android SDK +
   NDK + JDK; see `docs/android.md`)
+- **CLI:** `zig build cli` (builds `zig-out/bin/zigui`: scaffolds projects with
+  `zigui create`, checks the toolchain with `zigui doctor`; see `docs/cli.md`)
 - **Regenerate icons:** `zig build icongen -Dlucide-dir=<path to the Lucide icons>`
   — only when changing the icon set; it rewrites `src/icon_lucide_data.zig`.
 - **Recompile Linux shaders:** `zig build shadergen` (needs `glslang` on PATH)

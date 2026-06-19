@@ -76,3 +76,4 @@ Variants exist for callbacks that carry an argument: `zigui.on_id` (an id),
 - [Input capture](input.md) - grab raw mouse + keyboard
 - [System integration](system.md) - clipboard, fullscreen, displays
 - [Android](android.md) - the Vulkan backend, the APK build, the native-API surface
+- [CLI](cli.md) - scaffold a project, check the Android toolchain
