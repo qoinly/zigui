@@ -67,6 +67,23 @@ pub const MTLStorageMode = struct {
 const BLUR_SIGMA: f32 = 12.0;
 const MPSImageEdgeModeClamp: NSUInteger = 1;
 
+// Matches FrostUniform in ../ios/shaders.metal (48 bytes; the instanced array stride
+// must agree, so the float4 leaves the struct at 48 with the padding).
+const FrostUniform = extern struct {
+    rect: [4]f32,
+    viewport: [2]f32,
+    corner: f32,
+    tint: f32,
+    strength: f32,
+    pad0: f32 = 0,
+    pad1: f32 = 0,
+    pad2: f32 = 0,
+};
+
+// The frosted regions drawn in one instanced pass: a nav bg + its circle buttons + a
+// tab bar, with slack.
+const MAX_FROST = 6;
+
 pub const MTLClearColor = extern struct {
     red: f64,
     green: f64,
@@ -153,6 +170,8 @@ pub const Renderer = struct {
     frame_offset: usize = 0,
     dirty: bool = true,
     blit_pipeline_state: ?Id = null,
+    frost_pipeline_state: ?Id = null,
+    frost_buffer: Id,
     frame_pipeline_state: ?Id = null,
     frame_nv12_pipeline_state: ?Id = null,
     metal_texture_cache: ?*anyopaque = null,
@@ -231,6 +250,11 @@ pub const Renderer = struct {
             MTLResourceOptions.StorageModeShared,
         });
 
+        const frost_buffer = objc.msg_send(Id, device, "newBufferWithLength:options:", .{
+            @as(NSUInteger, MAX_FROST * @sizeOf(FrostUniform)),
+            MTLResourceOptions.StorageModeShared,
+        });
+
         var renderer = Renderer{
             .device = device,
             .command_queue = command_queue,
@@ -251,6 +275,7 @@ pub const Renderer = struct {
             .ring_buffer = ring_buffer,
             .viewport_buffer = viewport_buffer,
             .frame_buffer = frame_buffer,
+            .frost_buffer = frost_buffer,
             .sampler_state = null,
         };
 
@@ -283,6 +308,7 @@ pub const Renderer = struct {
             "blit_vertex",
             "blit_fragment",
         );
+        renderer.frost_pipeline_state = renderer.create_frost_pipeline();
         renderer.frame_pipeline_state = renderer.create_pipeline_state(
             "frame_vertex",
             "frame_fragment",
@@ -456,6 +482,38 @@ pub const Renderer = struct {
             0,
             0,
             0,
+            &[_][6]f32{},
+        );
+    }
+
+    // Like draw_frame, but frosts the backdrop under a capsule at `frost` (x, y, w, h
+    // in points): the content behind it blurs, the bar's items draw crisp on top.
+    pub fn draw_frame_frost(
+        self: *Renderer,
+        clear_color: MTLClearColor,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        mono_atlas_texture: ?*anyopaque,
+        color_sprites: []const PolychromeSprite,
+        color_atlas_texture: ?*anyopaque,
+        split_prims: usize,
+        split_sprites: usize,
+        split_color: usize,
+        frosts: []const [6]f32,
+    ) void {
+        self.draw_frame_impl(
+            clear_color,
+            prims,
+            sprites,
+            mono_atlas_texture,
+            color_sprites,
+            color_atlas_texture,
+            false,
+            split_prims,
+            split_sprites,
+            split_color,
+            0,
+            frosts,
         );
     }
 
@@ -487,6 +545,7 @@ pub const Renderer = struct {
             split_sprites,
             split_color,
             crisp_top,
+            &[_][6]f32{},
         );
     }
 
@@ -503,6 +562,7 @@ pub const Renderer = struct {
         split_sprites: usize,
         split_color: usize,
         crisp_top: f32,
+        frosts: []const [6]f32,
     ) void {
         const mono_atlas_id: ?Id = if (mono_atlas_texture) |p| @ptrCast(p) else null;
         const color_atlas_id: ?Id = if (color_atlas_texture) |p| @ptrCast(p) else null;
@@ -551,12 +611,16 @@ pub const Renderer = struct {
         self.ring_offset = 0;
         self.frame_offset = 0;
 
-        const want_blur = blur and self.blit_pipeline_state != null and
-            split_prims <= prims.len and split_sprites <= sprites.len and
+        const splits_ok = split_prims <= prims.len and split_sprites <= sprites.len and
             split_color <= color_sprites.len;
-        if (want_blur) self.ensure_offscreen(new_width, new_height);
-        const do_blur = want_blur and self.offscreen_tex != null and
+        const want_blur = blur and self.blit_pipeline_state != null and splits_ok;
+        const want_frost = frosts.len > 0 and self.blit_pipeline_state != null and
+            self.frost_pipeline_state != null and splits_ok;
+        if (want_blur or want_frost) self.ensure_offscreen(new_width, new_height);
+        const blur_ok = self.offscreen_tex != null and
             self.offscreen_blur_tex != null and self.ensure_blur();
+        const do_blur = want_blur and blur_ok;
+        const do_frost = want_frost and blur_ok;
 
         if (do_blur) {
             const off = self.offscreen_tex.?;
@@ -592,6 +656,42 @@ pub const Renderer = struct {
                 self.encode_blit(enc2, off);
                 objc.msg_send(void, enc2, "setScissorRect:", .{full});
             }
+            self.encode_scene(
+                enc2,
+                prims[split_prims..],
+                sprites[split_sprites..],
+                color_sprites[split_color..],
+                mono_atlas_id,
+                color_atlas_id,
+            );
+            objc.msg_send(void, enc2, "endEncoding", .{});
+        } else if (do_frost) {
+            // Inverse of the modal blur: the backdrop stays crisp everywhere; only the
+            // bar's capsule samples a blurred copy, so the content frosts under it.
+            const off = self.offscreen_tex.?;
+            const blurred = self.offscreen_blur_tex.?;
+            const enc1 = self.begin_pass(command_buffer, off, clear_color) orelse return;
+            self.encode_scene(
+                enc1,
+                prims[0..split_prims],
+                sprites[0..split_sprites],
+                color_sprites[0..split_color],
+                mono_atlas_id,
+                color_atlas_id,
+            );
+            objc.msg_send(void, enc1, "endEncoding", .{});
+            objc.msg_send(
+                void,
+                self.blur_kernel.?,
+                "encodeToCommandBuffer:sourceTexture:destinationTexture:",
+                .{ command_buffer, off, blurred },
+            );
+            const enc2 = self.begin_pass(command_buffer, texture, clear_color) orelse return;
+            self.encode_blit(enc2, off); // the crisp backdrop, fullscreen
+            const sf: f32 = @floatCast(scale);
+            const vw: f32 = @floatCast(new_width);
+            const vh: f32 = @floatCast(new_height);
+            self.encode_frosts(enc2, blurred, frosts, sf, vw, vh);
             self.encode_scene(
                 enc2,
                 prims[split_prims..],
@@ -672,6 +772,43 @@ pub const Renderer = struct {
         objc.msg_send(void, encoder, "setFragmentTexture:atIndex:", .{ tex, @as(NSUInteger, 0) });
         objc.msg_send(void, encoder, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{
             MTLPrimitiveType.Triangle, @as(NSUInteger, 0), @as(NSUInteger, 6), @as(NSUInteger, 1),
+        });
+    }
+
+    // Draw the frosted bars: one instanced quad per rect (x, y, w, h, corner in points),
+    // each sampling the pre-blurred backdrop via ../ios/shaders.metal, masked to its own
+    // rounded rect. The shader indexes the per-instance uniform by instance_id.
+    fn encode_frosts(
+        self: *Renderer,
+        enc: Id,
+        blurred: Id,
+        frosts: []const [6]f32,
+        scale: f32,
+        vw: f32,
+        vh: f32,
+    ) void {
+        const pipeline = self.frost_pipeline_state orelse return;
+        std.debug.assert(frosts.len <= MAX_FROST);
+        const n = frosts.len;
+        if (n == 0) return;
+        const ptr = objc.msg_send(*anyopaque, self.frost_buffer, "contents", .{});
+        const slots: [*]FrostUniform = @ptrCast(@alignCast(ptr));
+        for (frosts[0..n], 0..) |fr, i| {
+            slots[i] = .{
+                .rect = .{ fr[0] * scale, fr[1] * scale, fr[2] * scale, fr[3] * scale },
+                .viewport = .{ vw, vh },
+                .corner = fr[4] * scale,
+                .tint = 0.6,
+                .strength = fr[5],
+            };
+        }
+        objc.msg_send(void, enc, "setRenderPipelineState:", .{pipeline});
+        const z: NSUInteger = 0;
+        objc.msg_send(void, enc, "setVertexBuffer:offset:atIndex:", .{ self.frost_buffer, z, z });
+        objc.msg_send(void, enc, "setFragmentBuffer:offset:atIndex:", .{ self.frost_buffer, z, z });
+        objc.msg_send(void, enc, "setFragmentTexture:atIndex:", .{ blurred, z });
+        objc.msg_send(void, enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{
+            MTLPrimitiveType.Triangle, z, @as(NSUInteger, 6), @as(NSUInteger, n),
         });
     }
 
@@ -787,8 +924,25 @@ pub const Renderer = struct {
         vertex_name: [:0]const u8,
         fragment_name: [:0]const u8,
     ) ?Id {
-        const shader_source = @embedFile("shaders.metal");
+        return self.create_pipeline_src(@embedFile("shaders.metal"), vertex_name, fragment_name);
+    }
 
+    // iOS keeps its frosted-glass shader in its own platform dir; build that pipeline
+    // from that source rather than the shared one.
+    fn create_frost_pipeline(self: *Renderer) ?Id {
+        return self.create_pipeline_src(
+            @embedFile("../ios/shaders.metal"),
+            "frost_vertex",
+            "frost_fragment",
+        );
+    }
+
+    fn create_pipeline_src(
+        self: *Renderer,
+        shader_source: [:0]const u8,
+        vertex_name: [:0]const u8,
+        fragment_name: [:0]const u8,
+    ) ?Id {
         const NSString = objc.get_class("NSString") orelse return null;
         const source_str = objc.msg_send(Id, NSString, "stringWithUTF8String:", .{
             shader_source.ptr,
