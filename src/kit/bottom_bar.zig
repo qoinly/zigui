@@ -10,6 +10,7 @@
 // the screen edge under the system nav.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../window/types.zig");
 const builder = @import("../render/builder.zig");
 const RenderError = builder.RenderError;
@@ -81,6 +82,9 @@ pub const Options = struct {
 // band, into the inset, so the bar fills to the screen edge while the items stay in
 // the top BAR_H above the system nav. The items sit at the bottom of the safe area.
 pub fn height(style: Style) f32 {
+    // The iOS capsule overlays the content (so the frost has something to blur);
+    // render_ios floats it above this zero-height slot, reserving no flow space.
+    if (builtin.os.tag == .ios) return 0;
     return BAR_H + if (style == .floating) FLOAT_MARGIN else 0;
 }
 
@@ -101,6 +105,7 @@ pub fn render(
     std.debug.assert(w > 0);
     std.debug.assert(opts.items.len > 0);
     std.debug.assert(opts.items.len <= MAX_ITEMS);
+    if (builtin.os.tag == .ios) return render_ios(b, x, y, w, state, opts);
 
     const fg = theme.foreground;
     const surface = opts.surface orelse theme.secondary;
@@ -197,4 +202,114 @@ pub fn render(
         _ = try label.render(b, cx - lm.width / 2, label_top, item.label, sty);
     }
     return SizeF.init(w, height(opts.style));
+}
+
+// iOS floating capsule metrics + colors: a light frosted pill, iOS-blue active, dimmed
+// inactive, with a soft selection pill behind the active destination.
+const IOS_BAR_H: f32 = 60;
+const IOS_INSET: f32 = 16;
+const IOS_GAP: f32 = 18; // the capsule's gap above the bottom screen edge
+const ios_blue = Rgba{ .r = 0.0, .g = 0.478, .b = 1.0, .a = 1 };
+const ios_dim = Rgba{ .r = 0.92, .g = 0.92, .b = 0.96, .a = 1 }; // near-white on the dark frost
+
+// The iOS pass: a detached, fully rounded capsule inset from the edges (the native tab
+// bar idiom), drawn entirely by the kit so the demo's Lucide icons carry through.
+fn render_ios(
+    b: *RenderBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    state: *State,
+    opts: Options,
+) RenderError!SizeF {
+    std.debug.assert(opts.items.len > 0);
+    std.debug.assert(opts.items.len <= MAX_ITEMS);
+    const bx = x + IOS_INSET;
+    const bw = w - IOS_INSET * 2;
+    std.debug.assert(bw > 0);
+    // The slot sits at the surface bottom (edge-to-edge); float the capsule a fixed gap
+    // above the bottom edge, clearing the home indicator without a large margin.
+    const bar_y = y - IOS_BAR_H - IOS_GAP;
+    // Mark the frosted capsule + the backdrop split: everything drawn so far blurs
+    // under it; the items below draw crisp on top. The renderer paints the capsule.
+    if (opts.paint) |p| {
+        // The first frosted bar in the frame marks the split (everything so far blurs
+        // under the bars); this capsule appends its own frost rect.
+        if (p.frost_count == 0) {
+            p.backdrop_prims = @intCast(b.prims.items.len);
+            p.backdrop_sprites = @intCast(b.sprites.items.len);
+            p.backdrop_color = @intCast(b.color_sprites.items.len);
+        }
+        if (p.frost_count < p.frost_rects.len) {
+            p.frost_rects[p.frost_count] = .{ bx, bar_y, bw, IOS_BAR_H, IOS_BAR_H / 2, 1.0 };
+            p.frost_count += 1;
+        }
+    }
+    state.shim_len = 0;
+    const seg = bw / @as(f32, @floatFromInt(opts.items.len));
+    std.debug.assert(seg > 0);
+    for (opts.items, 0..) |item, i| {
+        const sx = bx + @as(f32, @floatFromInt(i)) * seg;
+        if (opts.paint) |p| {
+            std.debug.assert(state.shim_len < state.shims.len);
+            state.shims[state.shim_len] = .{
+                .on_select = opts.on_select,
+                .ctx = opts.ctx,
+                .index = i,
+            };
+            try p.add_hitbox(.{
+                .x = sx,
+                .y = bar_y,
+                .w = seg,
+                .h = IOS_BAR_H,
+                .on_click = shim_click,
+                .ctx = @ptrCast(&state.shims[state.shim_len]),
+            });
+            state.shim_len += 1;
+        }
+        try draw_ios_item(b, item, sx, seg, bar_y, i == opts.active);
+    }
+    return SizeF.init(w, height(opts.style));
+}
+
+fn draw_ios_item(
+    b: *RenderBuilder,
+    item: Item,
+    sx: f32,
+    seg: f32,
+    y: f32,
+    active: bool,
+) RenderError!void {
+    std.debug.assert(seg > 0);
+    const cx = sx + seg / 2;
+    const icon_size: f32 = 28;
+    const gap: f32 = 3;
+    const tint = if (active) ios_blue else ios_dim;
+    const sty = label.Style{
+        .font_size = 11,
+        .weight = if (active) .semi_bold else .medium,
+        .color = tint,
+    };
+    const lm = label.measure(b, item.label, sty);
+    const group_h = icon_size + gap + lm.ascent + lm.descent;
+    std.debug.assert(group_h > 0);
+    const icon_top = y + (IOS_BAR_H - group_h) / 2;
+    if (active) {
+        // A large rounded pill around the whole destination (icon + label): a lighter
+        // frosted fill plus a bright rim, the glassy lip of the native selection.
+        const content_w = @max(lm.width, icon_size);
+        const pill_w = @max(0, @min(seg - 8, @max(content_w + 36, 76)));
+        const pill_h = group_h + 12;
+        var pill = Quad.init(cx - pill_w / 2, icon_top - 6, pill_w, pill_h);
+        _ = pill.set_background(.{ .r = 1, .g = 1, .b = 1, .a = 0.28 });
+        _ = pill.set_corner_radius(pill_h / 2); // a full stadium, like the native pill
+        _ = pill.set_border_width(1);
+        _ = pill.set_border_color(.{ .r = 1, .g = 1, .b = 1, .a = 0.5 });
+        try b.append_quad(pill);
+    }
+    _ = try icon_render.render_icon_centered_xy(b, sx, icon_top, seg, icon_size, item.icon, .{
+        .point_size = 27,
+        .color = tint,
+    });
+    _ = try label.render(b, cx - lm.width / 2, icon_top + icon_size + gap, item.label, sty);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const platform_app = @import("app.zig");
 const window = @import("window.zig");
 const paint = @import("window/paint.zig");
@@ -128,6 +129,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             w.eng.clear();
             _ = w.arena.reset(.retain_capacity);
             pc.blur_modal = false; // an overlay re-arms it each frame while open
+            pc.frost_count = 0; // the bars append their frost rects each frame
             pc.text_field_active = false; // a focused input re-arms it below
             // Clear the redraw-again flag too: whatever still needs continuous
             // frames (animate(), a focused editor) re-arms it during the build, so
@@ -166,7 +168,14 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 try node.render_at(&w.eng, &builder, &w.theme, tb_root, raw.titlebar, pc);
             }
             const body_root = views.body(&f, st);
-            try node.render_at(&w.eng, &builder, &w.theme, body_root, raw.body, pc);
+            // iOS content is edge-to-edge per Apple's HIG: render the body into the full
+            // surface and let the consumer inset with f.body (the safe-area rect). The
+            // other platforms keep the body carved to the safe area.
+            const body_bounds = if (builtin.os.tag == .ios)
+                geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size }
+            else
+                raw.body;
+            try node.render_at(&w.eng, &builder, &w.theme, body_root, body_bounds, pc);
             if (ov_root) |root| {
                 pc.block_hover = false; // the modal layer itself is live
                 const full = geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size };

@@ -348,6 +348,16 @@ pub const BottomBarState = kit.bottom_bar.State;
 pub const BottomBarItem = kit.bottom_bar.Item;
 pub const BottomBarStyle = kit.bottom_bar.Style;
 pub const BottomBarOpts = kit_nodes.BottomBar;
+// A frosted top navigation bar (iOS): a centered title over content scrolling under it.
+pub fn top_bar(title: []const u8, o: kit_nodes.TopBar) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    oo.ctx = fc.state;
+    return kit_nodes.top_bar(fc.arena, fc.theme, title, oo);
+}
+pub const TopBarOpts = kit_nodes.TopBar;
+pub const TopBarStyle = kit_nodes.TopBarStyle;
 pub fn toggle_group(
     items: []const kit.toggle_group.ToggleGroupItem,
     o: kit_nodes.ToggleGrp,
@@ -468,6 +478,9 @@ pub const AppBarOpts = kit_nodes.AppBar;
 // The app-bar's fixed height in points; content placed below the bar sizes against
 // it (a full-height scroll page subtracts it from the body height).
 pub const app_bar_height = kit.navigator.BAR_H;
+// The height a bottom bar reserves: style-dependent on desktop/Android, the floating
+// capsule + its bottom gap on iOS. Consumers subtract it to size the body above it.
+pub const bottom_bar_height = kit.bottom_bar.height;
 
 // Call once a frame from the body that hosts the navigator: pops the stack on a
 // back request (Esc / Android Back / the app-bar chevron) and publishes the depth.
