@@ -348,6 +348,16 @@ pub const BottomBarState = kit.bottom_bar.State;
 pub const BottomBarItem = kit.bottom_bar.Item;
 pub const BottomBarStyle = kit.bottom_bar.Style;
 pub const BottomBarOpts = kit_nodes.BottomBar;
+// A frosted top navigation bar (iOS): a centered title over content scrolling under it.
+pub fn top_bar(title: []const u8, o: kit_nodes.TopBar) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    oo.ctx = fc.state;
+    return kit_nodes.top_bar(fc.arena, fc.theme, title, oo);
+}
+pub const TopBarOpts = kit_nodes.TopBar;
+pub const TopBarStyle = kit_nodes.TopBarStyle;
 pub fn toggle_group(
     items: []const kit.toggle_group.ToggleGroupItem,
     o: kit_nodes.ToggleGrp,
