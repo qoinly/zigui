@@ -538,6 +538,48 @@ pub fn nav_page(
     return node.slide(fc.arena, .{ .width = w, .dx = -eased * w }, &kids);
 }
 
+// Caller-owned push-transition state: the live progress plus the running tween.
+pub const PushState = struct {
+    anim: f32 = 0, // 0 = base fully shown, 1 = pushed fully shown
+    to: f32 = 0, // the tween's target (the last seen `shown`)
+    from: f32 = 0, // the tween's start value
+    t0: f64 = 0, // the tween's start time on the paint clock
+};
+
+// Slides `pushed` in over `base` from the right (the native iOS push), reversing on a
+// pop, driven by `shown` (true = the pushed page is up). Place the result above a fixed
+// bottom bar. Builds the slide only mid-transition; the loop idles once it settles. A
+// tap that flips `shown` mid-slide retargets the tween from where it is, so it never
+// jumps. Allocation-free beyond the per-frame arena.
+pub fn push_slide(
+    f: *Frame,
+    st: *PushState,
+    shown: bool,
+    base: *node.Node,
+    pushed: *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    const target: f32 = if (shown) 1 else 0;
+    // A new push/pop: retarget the tween from the current position.
+    if (target != st.to) {
+        st.from = st.anim;
+        st.to = target;
+        st.t0 = fc.paint.now_s;
+    }
+    if (st.anim != st.to) {
+        const PUSH_S: f64 = 0.34;
+        const t = @min((fc.paint.now_s - st.t0) / PUSH_S, 1.0);
+        std.debug.assert(t >= 0); // the start is never in the future
+        const inv: f32 = 1 - @as(f32, @floatCast(t));
+        st.anim = st.from + (st.to - st.from) * (1 - inv * inv * inv); // ease-out cubic
+        if (t >= 1) st.anim = st.to else fc.paint.animating = true;
+    }
+    if (st.anim <= 0.001) return base; // settled on the base page
+    if (st.anim >= 0.999) return pushed; // settled on the pushed page
+    std.debug.assert(f.size.width > 0); // the parallax offsets scale by the page width
+    return node.parallax(fc.arena, f.size.width, st.anim, base, pushed);
+}
+
 // Caller-owned carousel state: one per carousel, holds the slide index + drag offset.
 pub const CarouselState = kit.carousel.CarouselState;
 

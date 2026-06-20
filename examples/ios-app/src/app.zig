@@ -5,7 +5,8 @@ const Frame = zigui.Frame;
 // Bottom-bar navigation, edge-to-edge per Apple's HIG: content scrolls under the top
 // nav bar and the floating tab bar. Each tab demos a large-title style (collapse to a
 // small title, stay while a frost ramps in, or hide on scroll). A button pushes a
-// detail page whose nav bar shows a circle glass back button. Icons are builtin Lucide.
+// detail page (sliding in from the right) with a circle glass back button. Icons are
+// builtin Lucide.
 const tabs = [_]zigui.BottomBarItem{
     .{ .icon = .doc, .label = "Today" },
     .{ .icon = .bolt, .label = "Games" },
@@ -24,45 +25,19 @@ const palette = [_]zigui.Rgba{
 pub const App = struct {
     tab: usize = 0,
     detail: bool = false,
+    push: zigui.PushState = .{},
     bottom_nav: zigui.BottomBarState = .{},
     list: zigui.ScrollState = .{},
     detail_list: zigui.ScrollState = .{},
 
     pub fn render(f: *Frame, app: *App) *Node {
         const safe_top = f.body.origin.y;
-        if (app.detail) return detail_page(f, app, safe_top);
-        // Item 0 is a button that pushes a detail page; the rest are plain rows, so a
-        // tab scrolls cleanly (only a real navigation shows a back button).
-        const items = f.arena.alloc(*Node, 41) catch return zigui.text("oom", .{});
-        items[0] = zigui.button("Open a detail page", .{ .on_click = zigui.on(App, open_detail) });
-        for (items[1..], 0..) |*r, i| {
-            const bg = palette[(i + app.tab) % palette.len];
-            r.* = zigui.col(.{ .height = 48, .radius = 12, .bg = bg }, &.{});
-        }
-        const content = zigui.col(.{}, &.{
-            // clears the status bar, the large title, and the search row
-            zigui.col(.{ .height = safe_top + 96 }, &.{}),
-            zigui.col(.{ .pad = .lg, .gap = .md }, items),
-            zigui.col(.{ .height = 86 }, &.{}), // clears the floating tab bar at the end
-        });
-        // Each tab demos a large-title style: collapse-to-small, sticky (frost ramps in on
-        // scroll), then hide (the whole bar fades away as you scroll down).
-        const styles = [_]zigui.TopBarStyle{
-            .large, // Today
-            .large_sticky, // Games
-            .large_hide, // Apps
-            .large, // Arcade
-            .large_sticky, // Search
-        };
-        const style = styles[app.tab];
+        // The tab page and the pushed detail page slide past each other; the tab bar
+        // stays fixed above the slide.
+        const base = tab_body(f, app, safe_top);
+        const pushed = detail_body(f, app, safe_top);
         return zigui.col(.{}, &.{
-            zigui.scroll(&app.list, .{ .height = f.size.height }, content),
-            zigui.top_bar(tabs[app.tab].label, .{
-                .style = style,
-                .scroll = &app.list,
-                .search = "Search",
-                .frost = style != .large_hide,
-            }),
+            zigui.push_slide(f, &app.push, app.detail, base, pushed),
             zigui.bottom_bar(&tabs, &app.bottom_nav, .{
                 .active = app.tab,
                 .style = .floating,
@@ -72,9 +47,46 @@ pub const App = struct {
     }
 };
 
-fn detail_page(f: *Frame, app: *App, safe_top: f32) *Node {
-    // A pushed page: no full-width nav frost, just circle glass back + action buttons
-    // sticky over the content; the page's own title scrolls in the body.
+// The active tab's page body (scroll + the floating top bar). Item 0 is a button that
+// pushes the detail page; the rest are plain rows, so a tab scrolls cleanly (only a real
+// navigation shows a back button).
+fn tab_body(f: *Frame, app: *App, safe_top: f32) *Node {
+    const items = f.arena.alloc(*Node, 41) catch return zigui.text("oom", .{});
+    items[0] = zigui.button("Open a detail page", .{ .on_click = zigui.on(App, open_detail) });
+    for (items[1..], 0..) |*r, i| {
+        const bg = palette[(i + app.tab) % palette.len];
+        r.* = zigui.col(.{ .height = 48, .radius = 12, .bg = bg }, &.{});
+    }
+    const content = zigui.col(.{}, &.{
+        // clears the status bar, the large title, and the search row
+        zigui.col(.{ .height = safe_top + 96 }, &.{}),
+        zigui.col(.{ .pad = .lg, .gap = .md }, items),
+        zigui.col(.{ .height = 86 }, &.{}), // clears the floating tab bar at the end
+    });
+    // Each tab demos a large-title style: collapse-to-small, sticky (frost ramps in on
+    // scroll), then hide (the whole bar fades away as you scroll down).
+    const styles = [_]zigui.TopBarStyle{
+        .large, // Today
+        .large_sticky, // Games
+        .large_hide, // Apps
+        .large, // Arcade
+        .large_sticky, // Search
+    };
+    const style = styles[app.tab];
+    return zigui.col(.{}, &.{
+        zigui.scroll(&app.list, .{ .height = f.size.height }, content),
+        zigui.top_bar(tabs[app.tab].label, .{
+            .style = style,
+            .scroll = &app.list,
+            .search = "Search",
+            .frost = style != .large_hide,
+        }),
+    });
+}
+
+// The pushed page body: no full-width nav frost, just circle glass back + action buttons
+// over the content; the page's own title scrolls in the body.
+fn detail_body(f: *Frame, app: *App, safe_top: f32) *Node {
     const items = f.arena.alloc(*Node, 13) catch return zigui.text("oom", .{});
     items[0] = zigui.text("Detail", .{ .size = 32 });
     for (items[1..], 0..) |*r, i| {
@@ -93,11 +105,6 @@ fn detail_page(f: *Frame, app: *App, safe_top: f32) *Node {
             .on_back = zigui.on(App, go_back),
             .on_action = zigui.on(App, share),
             .action_icon = .share,
-        }),
-        zigui.bottom_bar(&tabs, &app.bottom_nav, .{
-            .active = app.tab,
-            .style = .floating,
-            .on_select = zigui.on_index(App, select_tab),
         }),
     });
 }

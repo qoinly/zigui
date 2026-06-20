@@ -19,6 +19,7 @@ const icon_render = @import("../render/icon.zig");
 const primitives = @import("../primitives.zig");
 const custom_paint = @import("../window/paint.zig");
 const callbacks = @import("../callbacks.zig");
+const theme_resolve = @import("theme_resolve.zig");
 
 pub const RenderBuilder = builder.RenderBuilder;
 pub const Theme = types.Theme;
@@ -48,6 +49,13 @@ const Shim = struct { on_select: ?callbacks.SelectFn, ctx: ?*anyopaque, index: u
 pub const State = struct {
     shims: [MAX_ITEMS]Shim = undefined,
     shim_len: usize = 0,
+    // The iOS selection pill slides to the active tab instead of jumping: `pill` is its
+    // live fractional position, tweened from `pill_from` to `pill_to` since `pill_t0`.
+    pill: f32 = 0,
+    pill_from: f32 = 0,
+    pill_to: f32 = 0,
+    pill_t0: f64 = 0,
+    pill_started: bool = false,
 };
 
 pub const Item = struct {
@@ -211,6 +219,8 @@ const IOS_INSET: f32 = 16;
 const IOS_GAP: f32 = 18; // the capsule's gap above the bottom screen edge
 const ios_blue = Rgba{ .r = 0.0, .g = 0.478, .b = 1.0, .a = 1 };
 const ios_dim = Rgba{ .r = 0.92, .g = 0.92, .b = 0.96, .a = 1 }; // near-white on the dark frost
+const IOS_ICON: f32 = 28; // the destination icon size
+const IOS_GROUP_GAP: f32 = 3; // between the icon and its label
 
 // The iOS pass: a detached, fully rounded capsule inset from the edges (the native tab
 // bar idiom), drawn entirely by the kit so the demo's Lucide icons carry through.
@@ -248,6 +258,10 @@ fn render_ios(
     state.shim_len = 0;
     const seg = bw / @as(f32, @floatFromInt(opts.items.len));
     std.debug.assert(seg > 0);
+    // Slide the selection pill toward the active tab; draw it behind the items, then each
+    // item with its tint crossfading blue<->dim by how near the pill is.
+    const pos = advance_pill(state, opts.active, opts.paint);
+    try draw_ios_pill(b, opts.items, bx, seg, bar_y, pos);
     for (opts.items, 0..) |item, i| {
         const sx = bx + @as(f32, @floatFromInt(i)) * seg;
         if (opts.paint) |p| {
@@ -267,9 +281,42 @@ fn render_ios(
             });
             state.shim_len += 1;
         }
-        try draw_ios_item(b, item, sx, seg, bar_y, i == opts.active);
+        const near = std.math.clamp(1 - @abs(pos - @as(f32, @floatFromInt(i))), 0, 1);
+        const tint = theme_resolve.mix(ios_dim, ios_blue, near);
+        try draw_ios_item(b, item, sx, seg, bar_y, tint, near > 0.5);
     }
     return SizeF.init(w, height(opts.style));
+}
+
+// Slide the selection pill toward the active tab instead of jumping; returns its live
+// fractional position. A tap mid-slide retargets from where it is. Without a paint
+// context (host/measure) it snaps.
+fn advance_pill(state: *State, active: usize, paint: ?*custom_paint.PaintContext) f32 {
+    std.debug.assert(active < MAX_ITEMS);
+    const tgt: f32 = @floatFromInt(active);
+    const p = paint orelse {
+        state.pill = tgt;
+        return tgt;
+    };
+    if (!state.pill_started) {
+        state.pill = tgt;
+        state.pill_to = tgt;
+        state.pill_started = true;
+    }
+    if (tgt != state.pill_to) {
+        state.pill_from = state.pill;
+        state.pill_to = tgt;
+        state.pill_t0 = p.now_s;
+    }
+    if (state.pill != state.pill_to) {
+        const PILL_S: f64 = 0.26;
+        const t = @min((p.now_s - state.pill_t0) / PILL_S, 1.0);
+        std.debug.assert(t >= 0);
+        const inv: f32 = 1 - @as(f32, @floatCast(t));
+        state.pill = state.pill_from + (state.pill_to - state.pill_from) * (1 - inv * inv * inv);
+        if (t >= 1) state.pill = state.pill_to else p.animating = true;
+    }
+    return state.pill;
 }
 
 fn draw_ios_item(
@@ -278,38 +325,65 @@ fn draw_ios_item(
     sx: f32,
     seg: f32,
     y: f32,
-    active: bool,
+    tint: Rgba,
+    bold: bool,
 ) RenderError!void {
     std.debug.assert(seg > 0);
     const cx = sx + seg / 2;
-    const icon_size: f32 = 28;
-    const gap: f32 = 3;
-    const tint = if (active) ios_blue else ios_dim;
     const sty = label.Style{
         .font_size = 11,
-        .weight = if (active) .semi_bold else .medium,
+        .weight = if (bold) .semi_bold else .medium,
         .color = tint,
     };
     const lm = label.measure(b, item.label, sty);
-    const group_h = icon_size + gap + lm.ascent + lm.descent;
+    const group_h = IOS_ICON + IOS_GROUP_GAP + lm.ascent + lm.descent;
     std.debug.assert(group_h > 0);
     const icon_top = y + (IOS_BAR_H - group_h) / 2;
-    if (active) {
-        // A large rounded pill around the whole destination (icon + label): a lighter
-        // frosted fill plus a bright rim, the glassy lip of the native selection.
-        const content_w = @max(lm.width, icon_size);
-        const pill_w = @max(0, @min(seg - 8, @max(content_w + 36, 76)));
-        const pill_h = group_h + 12;
-        var pill = Quad.init(cx - pill_w / 2, icon_top - 6, pill_w, pill_h);
-        _ = pill.set_background(.{ .r = 1, .g = 1, .b = 1, .a = 0.28 });
-        _ = pill.set_corner_radius(pill_h / 2); // a full stadium, like the native pill
-        _ = pill.set_border_width(1);
-        _ = pill.set_border_color(.{ .r = 1, .g = 1, .b = 1, .a = 0.5 });
-        try b.append_quad(pill);
-    }
-    _ = try icon_render.render_icon_centered_xy(b, sx, icon_top, seg, icon_size, item.icon, .{
+    _ = try icon_render.render_icon_centered_xy(b, sx, icon_top, seg, IOS_ICON, item.icon, .{
         .point_size = 27,
         .color = tint,
     });
-    _ = try label.render(b, cx - lm.width / 2, icon_top + icon_size + gap, item.label, sty);
+    const ty = icon_top + IOS_ICON + IOS_GROUP_GAP;
+    _ = try label.render(b, cx - lm.width / 2, ty, item.label, sty);
+}
+
+// The frosted selection pill (sized to an icon + label), drawn once at the live
+// fractional position; its width morphs between the two tabs it straddles so it fits
+// each label as it slides. A lighter frosted fill plus a bright rim, the native lip.
+fn draw_ios_pill(
+    b: *RenderBuilder,
+    items: []const Item,
+    bx: f32,
+    seg: f32,
+    y: f32,
+    pos: f32,
+) RenderError!void {
+    std.debug.assert(items.len > 0);
+    std.debug.assert(seg > 0);
+    const last: f32 = @floatFromInt(items.len - 1);
+    const clamped = std.math.clamp(pos, 0, last);
+    const lo: usize = @intFromFloat(@floor(clamped));
+    const hi = @min(lo + 1, items.len - 1);
+    const frac = clamped - @floor(clamped);
+    const w0 = ios_pill_w(b, items[lo], seg);
+    const pill_w = w0 + (ios_pill_w(b, items[hi], seg) - w0) * frac;
+    // The label line is font-fixed, so any item gives the same group height.
+    const lm = label.measure(b, "Ag", .{ .font_size = 11 });
+    const group_h = IOS_ICON + IOS_GROUP_GAP + lm.ascent + lm.descent;
+    const icon_top = y + (IOS_BAR_H - group_h) / 2;
+    const pill_h = group_h + 12;
+    const cx = bx + (clamped + 0.5) * seg;
+    var pill = Quad.init(cx - pill_w / 2, icon_top - 6, pill_w, pill_h);
+    _ = pill.set_background(.{ .r = 1, .g = 1, .b = 1, .a = 0.28 });
+    _ = pill.set_corner_radius(pill_h / 2);
+    _ = pill.set_border_width(1);
+    _ = pill.set_border_color(.{ .r = 1, .g = 1, .b = 1, .a = 0.5 });
+    try b.append_quad(pill);
+}
+
+// The pill width that fits one destination's icon + label, clamped to its segment.
+fn ios_pill_w(b: *RenderBuilder, item: Item, seg: f32) f32 {
+    const lm = label.measure(b, item.label, .{ .font_size = 11, .weight = .semi_bold });
+    const content_w = @max(lm.width, IOS_ICON);
+    return @max(0, @min(seg - 8, @max(content_w + 36, 76)));
 }
