@@ -468,6 +468,9 @@ pub const AppBarOpts = kit_nodes.AppBar;
 // The app-bar's fixed height in points; content placed below the bar sizes against
 // it (a full-height scroll page subtracts it from the body height).
 pub const app_bar_height = kit.navigator.BAR_H;
+// The height a bottom bar reserves: style-dependent on desktop/Android, the floating
+// capsule + its bottom gap on iOS. Consumers subtract it to size the body above it.
+pub const bottom_bar_height = kit.bottom_bar.height;
 
 // Call once a frame from the body that hosts the navigator: pops the stack on a
 // back request (Esc / Android Back / the app-bar chevron) and publishes the depth.
