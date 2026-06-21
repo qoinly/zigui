@@ -128,6 +128,14 @@ pub fn took_completion() bool {
     return g_completion.swap(false, .acquire);
 }
 
+// Raise the same completion edge by hand, for an async result that arrives outside a
+// background job - a file pick delivered on the platform's UI thread - so the loop
+// renders once and the view's poll() lands it. Atomic, so a foreign-thread producer is
+// safe; the loop consumes it through took_completion.
+pub fn nudge() void {
+    g_completion.store(true, .release);
+}
+
 // Wait for in-flight jobs to finish. Desktop App.deinit calls this before tearing
 // down state a detached job might still write; Android leaves it to process teardown.
 pub fn drain() void {
