@@ -66,6 +66,36 @@ pub extern "c" fn object_getClass(obj: ?*anyopaque) ?Class;
 
 pub extern "c" fn objc_msgSend() void;
 
+// Minimal Blocks-runtime support for a no-capture global block: _NSConcreteGlobalBlock is
+// the global-block isa, and the layout matches clang's emission so an objc method can call
+// block.invoke(&block, args...). Lets napi callbacks (e.g. biometric's reply) be a block.
+pub extern "c" var _NSConcreteGlobalBlock: anyopaque;
+pub const BLOCK_IS_GLOBAL: c_int = 1 << 28;
+pub const BlockDescriptor = extern struct {
+    reserved: c_ulong = 0,
+    size: c_ulong,
+};
+pub const Block = extern struct {
+    isa: *const anyopaque,
+    flags: c_int,
+    reserved: c_int = 0,
+    invoke: *const anyopaque,
+    descriptor: *const BlockDescriptor,
+};
+
+// Build a no-capture global block wrapping `invoke`. The block storage and `desc` (sized
+// @sizeOf(Block)) must outlive the async call that holds the block.
+pub fn global_block(invoke: *const anyopaque, desc: *const BlockDescriptor) Block {
+    std.debug.assert(desc.size == @sizeOf(Block));
+    std.debug.assert(desc.reserved == 0);
+    return .{
+        .isa = &_NSConcreteGlobalBlock,
+        .flags = BLOCK_IS_GLOBAL,
+        .invoke = invoke,
+        .descriptor = desc,
+    };
+}
+
 fn MsgSendFn(comptime ReturnType: type, comptime ArgTypes: []const type) type {
     return switch (ArgTypes.len) {
         0 => *const fn (*anyopaque, Sel) callconv(.c) ReturnType,

@@ -100,6 +100,10 @@ fn link_ios(b: *std.Build, zigui: *std.Build.Module) void {
     zigui.linkFramework("CoreVideo", .{}); // CVMetalTextureCache (zero-copy frames)
     zigui.linkFramework("CoreText", .{});
     zigui.linkFramework("CoreGraphics", .{});
+    zigui.linkFramework("LocalAuthentication", .{}); // biometric (Face/Touch ID)
+    zigui.linkFramework("AVFoundation", .{}); // camera/microphone permission
+    zigui.linkFramework("Photos", .{}); // photo-library permission
+    zigui.linkFramework("UserNotifications", .{}); // notification permission
     zigui.link_libc = true;
     ios_sim_paths(b, zigui);
 }
