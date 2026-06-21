@@ -94,3 +94,46 @@ fn caps_has(env: JNIEnv, caps: jni.jobject, method: [*:0]const u8, code: jni.jin
     var a = [_]jni.jvalue{.{ .i = code }};
     return t.CallBooleanMethodA(env, caps, m, &a) != 0;
 }
+
+// PackageManager.getPackageInfo(packageName, 0).versionName copied into buf - the app's
+// own manifest versionName; empty when it is null (a build without one). Reading the
+// own package never throws NameNotFoundException, so no exception check is needed.
+pub fn app_version(buf: []u8) []const u8 {
+    const c = util.ctx() orelse return "";
+    const env = c.env;
+    const t = env.*;
+    const act_cls = t.GetObjectClass(env, c.activity) orelse return "";
+    defer t.DeleteLocalRef(env, act_cls);
+
+    const get_pm = t.GetMethodID(
+        env,
+        act_cls,
+        "getPackageManager",
+        "()Landroid/content/pm/PackageManager;",
+    ) orelse return "";
+    const pm = t.CallObjectMethodA(env, c.activity, get_pm, null) orelse return "";
+    defer t.DeleteLocalRef(env, pm);
+    const get_name = t.GetMethodID(env, act_cls, "getPackageName", "()Ljava/lang/String;") orelse
+        return "";
+    const pkg = t.CallObjectMethodA(env, c.activity, get_name, null) orelse return "";
+    defer t.DeleteLocalRef(env, pkg);
+
+    const pm_cls = t.GetObjectClass(env, pm) orelse return "";
+    defer t.DeleteLocalRef(env, pm_cls);
+    const get_info = t.GetMethodID(
+        env,
+        pm_cls,
+        "getPackageInfo",
+        "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",
+    ) orelse return "";
+    var ia = [_]jni.jvalue{ .{ .l = pkg }, .{ .i = 0 } };
+    const info = t.CallObjectMethodA(env, pm, get_info, &ia) orelse return "";
+    defer t.DeleteLocalRef(env, info);
+
+    const info_cls = t.GetObjectClass(env, info) orelse return "";
+    defer t.DeleteLocalRef(env, info_cls);
+    const fid = t.GetFieldID(env, info_cls, "versionName", "Ljava/lang/String;") orelse return "";
+    const vname = t.GetObjectField(env, info, fid) orelse return "";
+    defer t.DeleteLocalRef(env, vname);
+    return util.read_jstr(env, vname, buf);
+}

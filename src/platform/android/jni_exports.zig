@@ -42,14 +42,26 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBack(
     return @intFromBool(custom_shell.dispatch_back());
 }
 
-// The document picker's onActivityResult forwards the chosen file's text here.
+// The document picker's onActivityResult forwards the chosen file's display name +
+// local path here.
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFile(
     env: *anyopaque,
     this: *anyopaque,
-    content: ?*anyopaque,
+    name: ?*anyopaque,
+    path: ?*anyopaque,
 ) callconv(.c) void {
     _ = this;
-    picker.on_native_file(env, content);
+    picker.on_native_file(env, name, path);
+}
+
+// A dismissed picker or a failed import: clear the in-flight flag.
+export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFileCancel(
+    env: *anyopaque,
+    this: *anyopaque,
+) callconv(.c) void {
+    _ = env;
+    _ = this;
+    picker.on_native_cancel();
 }
 
 // The BiometricPrompt callback forwards the terminal outcome (1 ok, 2 failed) here.

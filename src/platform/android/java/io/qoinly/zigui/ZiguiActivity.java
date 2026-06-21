@@ -14,6 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
+import android.provider.OpenableColumns;
 import android.telephony.SmsManager;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -23,9 +24,9 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
-import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 
 // zigui's shipped activity shell. A thin shim over NativeActivity: the superclass
@@ -132,34 +133,71 @@ public class ZiguiActivity extends NativeActivity {
         }
     }
 
-    // The document picker (native pick_file -> startActivityForResult) returns here.
-    // Matches the picker's FILE_REQUEST_CODE; read the chosen file's text off the
-    // content URI and hand it to native, which exposes it through take_picked_file.
+    // The document picker (native open_file -> startActivityForResult) returns here.
+    // Matches the picker's FILE_REQUEST_CODE; the chosen content URI is not a path the
+    // native side can open, so import a private copy into cacheDir and hand native the
+    // display name + that copy's absolute path. A dismiss or failure cancels the pick.
     private static final int FILE_REQUEST_CODE = 0x5A16;
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req != FILE_REQUEST_CODE || res != RESULT_OK || data == null) {
+        if (req != FILE_REQUEST_CODE) {
             return;
         }
-        Uri uri = data.getData();
+        Uri uri = (res == RESULT_OK && data != null) ? data.getData() : null;
         if (uri == null) {
+            nativeOnFileCancel();
             return;
         }
-        String content;
-        try (InputStream is = getContentResolver().openInputStream(uri)) {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            byte[] tmp = new byte[4096];
+        String name = displayName(uri);
+        String path = importToCache(uri, name);
+        if (path == null) {
+            nativeOnFileCancel();
+            return;
+        }
+        nativeOnFile(name, path);
+    }
+
+    // The content URI's human display name (OpenableColumns.DISPLAY_NAME), or "file"
+    // when the provider does not supply one.
+    private String displayName(Uri uri) {
+        String name = "file";
+        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (i >= 0) {
+                    String v = c.getString(i);
+                    if (v != null && !v.isEmpty()) {
+                        name = v;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // keep the fallback name
+        }
+        return name;
+    }
+
+    // Copy the picked content into a readable cacheDir file; returns its absolute path,
+    // or null on failure. The display name may carry separators, so the leaf is
+    // sanitized for the filesystem.
+    private String importToCache(Uri uri, String name) {
+        File out = new File(getCacheDir(), "picked-" + name.replaceAll("[^A-Za-z0-9._-]", "_"));
+        try (InputStream is = getContentResolver().openInputStream(uri);
+             FileOutputStream os = new FileOutputStream(out)) {
+            if (is == null) {
+                return null;
+            }
+            byte[] tmp = new byte[8192];
             int n;
             while ((n = is.read(tmp)) != -1) {
-                bos.write(tmp, 0, n);
+                os.write(tmp, 0, n);
             }
-            content = new String(bos.toByteArray(), StandardCharsets.UTF_8);
         } catch (Exception e) {
-            return;
+            return null;
         }
-        nativeOnFile(content);
+        return out.getAbsolutePath();
     }
 
     // native authenticate() calls here: build and show a BiometricPrompt on the UI
@@ -351,7 +389,9 @@ public class ZiguiActivity extends NativeActivity {
 
     private native boolean nativeOnBack();
 
-    private native void nativeOnFile(String content);
+    private native void nativeOnFile(String name, String path);
+
+    private native void nativeOnFileCancel();
 
     private native void nativeOnBiometric(int result);
 

@@ -93,7 +93,8 @@ pub const JNINativeInterface = extern struct {
     CallVoidMethodA: CallVoidAFn, // 63
     _r8: [30]?*const anyopaque, // 64..93
     GetFieldID: LookupFn, // 94
-    _r9: [5]?*const anyopaque, // 95..99
+    GetObjectField: GetObjFieldFn, // 95
+    _r9: [4]?*const anyopaque, // 96..99
     GetIntField: GetIntFieldFn, // 100
     _r10: [1]?*const anyopaque, // 101
     GetFloatField: GetFloatFieldFn, // 102
