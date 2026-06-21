@@ -102,6 +102,9 @@ pub const App = struct {
     picked_len: usize = 0,
     picked_name: [128]u8 = undefined,
     picked_name_len: usize = 0,
+    awake: bool = false,
+    bright_slider: zigui.kit.slider.SliderState = .{},
+    bright_vals: [1]f32 = .{0.5},
     // Kit-tab widget state.
     kit_toggle: bool = true,
     kit_check: bool = false,
@@ -221,6 +224,8 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
     const bat = std.fmt.allocPrint(f.arena, "Battery {d}%{s}", .{ lvl, chg }) catch "Battery";
     const cl = app.clip[0..app.clip_len];
     const clip = std.fmt.allocPrint(f.arena, "Clipboard: {s}", .{cl}) catch "Clipboard";
+    const ext: []const u8 = if (zigui.napi.clipboard.changed()) "yes" else "no";
+    const ext_txt = std.fmt.allocPrint(f.arena, "External change: {s}", .{ext}) catch "?";
     const picking = zigui.napi.picker.pending();
     if (zigui.napi.picker.take_file()) |pf| store_pick(app, pf);
     const nm = app.picked_name[0..app.picked_name_len];
@@ -240,6 +245,7 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             section("CLIPBOARD"),
             zigui.button("Copy \"zigui\"", .{ .on_click = zigui.on(App, copy_text) }),
             zigui.text(clip, .{ .size = 14, .color = muted }),
+            zigui.text(ext_txt, .{ .size = 14, .color = muted }),
             section("LINKS"),
             zigui.button("Share text", .{ .on_click = zigui.on(App, share) }),
             zigui.button("Open ziglang.org", .{ .on_click = zigui.on(App, open_zig) }),
@@ -248,6 +254,12 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             zigui.text(pick_text, .{ .size = 14, .color = muted }),
             section("HAPTICS"),
             zigui.button("Buzz", .{ .on_click = zigui.on(App, buzz) }),
+            section("DISPLAY"),
+            zigui.toggle(app.awake, "Keep awake", .{ .on_change = zigui.on(App, set_awake) }),
+            zigui.text("Brightness", .{ .size = 14, .color = muted }),
+            zigui.slider(&app.bright_vals, &app.bright_slider, .{
+                .on_change = zigui.on_at(App, set_bright),
+            }),
         }),
         bottom_gap(),
     });
@@ -389,6 +401,14 @@ fn pick_file(app: *App) void {
 fn buzz(app: *App) void {
     _ = app;
     zigui.napi.haptics.vibrate(20);
+}
+fn set_awake(app: *App) void {
+    app.awake = !app.awake;
+    zigui.napi.display.keep_awake(app.awake);
+}
+fn set_bright(app: *App, i: usize, v: f32) void {
+    app.bright_vals[i] = v;
+    zigui.napi.display.brightness(v);
 }
 fn flip_toggle(app: *App) void {
     app.kit_toggle = !app.kit_toggle;
