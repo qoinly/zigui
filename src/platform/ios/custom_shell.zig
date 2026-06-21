@@ -186,10 +186,21 @@ pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
     _ = ctx;
 }
 
+// The paint loop's redraw callback + its PaintContext, stored so an async napi result
+// can wake an idle render loop (the CADisplayLink pauses when nothing is animating).
+var g_redraw_cb: ?RedrawFn = null;
+var g_redraw_ctx: ?*anyopaque = null;
+
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
     _ = hit_test_cb;
-    _ = redraw_cb;
-    _ = ctx;
+    g_redraw_cb = redraw_cb;
+    g_redraw_ctx = ctx;
+}
+
+// Force the paint loop to render the next vsync. The napi calls this to surface an async
+// result (e.g. a finished file pick) without the app polling while the loop idles.
+pub fn request_redraw() void {
+    if (g_redraw_cb) |cb| if (g_redraw_ctx) |c| cb(c);
 }
 
 pub fn register_paint_now(cb: RedrawFn) void {
