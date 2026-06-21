@@ -50,7 +50,11 @@ pub fn MetalAtlas(comptime fmt: NSUInteger, comptime bpp: u32) type {
 
         tiles: std.AutoHashMapUnmanaged(u64, AtlasTile) = .empty,
 
-        pub const INITIAL_SIZE: u32 = 1024;
+        // A persistent shelf-packed cache with no eviction, so it must hold every
+        // distinct (glyph, size, weight) and icon the app ever shows; once full,
+        // get_or_insert drops tiles and they render blank. 2048 gives a busy multi-page
+        // UI real headroom (a growing/evicting atlas is the proper long-term fix).
+        pub const INITIAL_SIZE: u32 = 2048;
         pub const PIXEL_FORMAT: NSUInteger = fmt;
         pub const BYTES_PER_PIXEL: u32 = bpp;
 
