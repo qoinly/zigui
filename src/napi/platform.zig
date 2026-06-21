@@ -7,6 +7,7 @@ pub const target = if (builtin.abi.isAndroid())
     @import("../platform/android/napi/root.zig")
 else switch (builtin.os.tag) {
     .macos => @import("../platform/macos/napi/root.zig"),
+    .ios => @import("../platform/ios/napi/root.zig"),
     .windows => @import("../platform/windows/napi/root.zig"),
     .linux => @import("../platform/linux/napi/root.zig"),
     else => @compileError("zigui: unsupported OS for native apis"),
