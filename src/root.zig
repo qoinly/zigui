@@ -538,6 +538,110 @@ pub fn nav_page(
     return node.slide(fc.arena, .{ .width = w, .dx = -eased * w }, &kids);
 }
 
+// Caller-owned push-transition state: the live progress plus the running tween.
+pub const PushState = struct {
+    anim: f32 = 0, // 0 = base fully shown, 1 = pushed fully shown
+    to: f32 = 0, // the tween's target
+    from: f32 = 0, // the tween's start value
+    t0: f64 = 0, // the tween's start time on the paint clock
+    // The interactive back-swipe (drag from the left edge to pop):
+    width: f32 = 0, // page width, snapshotted for the gesture handlers
+    dragging: bool = false,
+    drag_start: f32 = 0, // the press x
+    drag_x: f32 = 0, // how far right the finger has dragged
+    releasing: bool = false, // a drag just ended; the next frame stamps the settle tween
+    popped: bool = false, // the release crossed the threshold (complete the pop)
+};
+
+// The left-edge width that starts an interactive back-swipe.
+const EDGE_W: f32 = 30;
+
+// Slides `pushed` in over `base` from the right (the native iOS push), reversing on a pop,
+// driven by `shown` (true = the pushed page is up). A drag from the left edge pops it
+// interactively - the page follows the finger and, on release past a third of the width,
+// completes the pop (flipping `shown.*`) or springs back. Place the result above a fixed
+// bottom bar. Builds the slide only mid-transition; the loop idles once it settles.
+// Allocation-free beyond the per-frame arena.
+pub fn push_slide(
+    f: *Frame,
+    st: *PushState,
+    shown: *bool,
+    base: *node.Node,
+    pushed: *node.Node,
+) *node.Node {
+    const fc = frame_ctx.get();
+    std.debug.assert(f.size.width > 0);
+    st.width = f.size.width; // the gesture handlers map a raw drag against this
+    const w = st.width;
+    if (st.dragging) {
+        // Follow the finger: dragging right toward the page width pops it (anim -> 0).
+        st.anim = std.math.clamp(1 - st.drag_x / w, 0, 1);
+    } else {
+        if (st.releasing) {
+            st.releasing = false;
+            if (st.popped) shown.* = false; // the swipe crossed the threshold
+            st.from = st.anim;
+            st.to = if (shown.*) 1 else 0;
+            st.t0 = fc.paint.now_s;
+        } else {
+            const target: f32 = if (shown.*) 1 else 0;
+            if (target != st.to) { // a push/pop began: retarget from the current position
+                st.from = st.anim;
+                st.to = target;
+                st.t0 = fc.paint.now_s;
+            }
+        }
+        if (st.anim != st.to) {
+            const PUSH_S: f64 = 0.34;
+            const t = @min((fc.paint.now_s - st.t0) / PUSH_S, 1.0);
+            std.debug.assert(t >= 0); // the start is never in the future
+            const inv: f32 = 1 - @as(f32, @floatCast(t));
+            st.anim = st.from + (st.to - st.from) * (1 - inv * inv * inv); // ease-out cubic
+            if (t >= 1) st.anim = st.to else fc.paint.animating = true;
+        }
+    }
+    // The left-edge back-swipe region (only while the pushed page is up). Registered in
+    // the build phase so the page's own buttons (hitboxes at draw) win an overlapping tap.
+    if (shown.*) fc.paint.add_hitbox(.{
+        .x = 0,
+        .y = 0,
+        .w = EDGE_W,
+        .h = f.size.height,
+        .on_point = back_drag,
+        .on_drag_end = back_release,
+        .ctx = st,
+    }) catch {}; // a full hitbox list just drops the back-swipe region this frame
+    if (st.anim <= 0.001) return base; // settled on the base page
+    if (st.anim >= 0.999) return pushed; // settled on the pushed page
+    return node.parallax(fc.arena, w, st.anim, base, pushed);
+}
+
+// The back-swipe press + drag: record the start, then track how far right the finger has
+// moved (a back-swipe only dismisses, so leftward travel is clamped away).
+fn back_drag(ctx: ?*anyopaque, x: f32, y: f32) void {
+    _ = y;
+    const st: *PushState = @ptrCast(@alignCast(ctx orelse return));
+    std.debug.assert(st.width > 0); // a render snapshotted the geometry before any drag
+    if (!st.dragging) {
+        st.dragging = true;
+        st.drag_start = x;
+        st.drag_x = 0;
+        return;
+    }
+    st.drag_x = @max(0, x - st.drag_start);
+}
+
+// The back-swipe release: a drag past a third of the page width completes the pop, a
+// shorter one springs back. push_slide stamps the settle tween next frame.
+fn back_release(ctx: ?*anyopaque) void {
+    const st: *PushState = @ptrCast(@alignCast(ctx orelse return));
+    if (!st.dragging) return;
+    std.debug.assert(st.width > 0); // a render set the geometry before any release
+    st.dragging = false;
+    st.popped = st.drag_x > st.width / 3;
+    st.releasing = true;
+}
+
 // Caller-owned carousel state: one per carousel, holds the slide index + drag offset.
 pub const CarouselState = kit.carousel.CarouselState;
 

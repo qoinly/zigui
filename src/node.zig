@@ -93,6 +93,9 @@ pub const Node = struct {
     // and offsets them horizontally by slide_px. The children are a row of full-width
     // pages, so a negative slide_px reveals the next page. null = not a slide.
     slide_px: ?f32 = null,
+    // A push transition: two full-width pages [base, pushed]; the base parallaxes left and
+    // dims while pushed slides in over it. The eased progress 0..1. null = not a parallax.
+    parallax_t: ?f32 = null,
     // nil until register; a stray draw before register then reads benign-empty
     // bounds instead of UB.
     id: LayoutId = LayoutId.nil,
@@ -295,6 +298,24 @@ pub fn slide(a: A, o: SlideOpts, kids: []const *Node) *Node {
     });
 }
 
+// A push-transition viewport: two full-width pages [base, pushed] laid side by side (the
+// slide layout), but drawn with the native iOS push - the base parallaxes left and dims
+// while pushed slides in over it. `t` is the eased progress (0 = base, 1 = pushed).
+pub fn parallax(a: A, width: f32, t: f32, base: *Node, pushed: *Node) *Node {
+    std.debug.assert(width > 0);
+    std.debug.assert(t >= 0 and t <= 1);
+    base.style.width = .{ .px = width };
+    base.style.flex_shrink = 0;
+    pushed.style.width = .{ .px = width };
+    pushed.style.flex_shrink = 0;
+    return make(a, .{
+        .kind = .box,
+        .style = style_of(.{ .grow = 1, .width = width }, .row),
+        .parallax_t = t,
+        .children = own_kids(a, &.{ base, pushed }),
+    });
+}
+
 // ---- passes: shape (text intrinsics) -> register (build engine tree) -> draw ----
 // All three recurse over children; each carries a depth bounded by the engine's
 // own cap (release-safe return), single-sourced from layout.MAX_LAYOUT_DEPTH.
@@ -431,6 +452,11 @@ fn draw_tree(
         try draw_slide(b, eng, theme, n, depth, ox, oy, view, dx);
         return;
     }
+    if (n.parallax_t) |t| {
+        const view = [4]f32{ x, y, r.size.width, r.size.height };
+        try draw_parallax(b, eng, theme, n, depth, ox, oy, view, t);
+        return;
+    }
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
 }
 
@@ -456,6 +482,12 @@ fn draw_slide(
     const spr0 = b.sprites.items.len;
     const cspr0 = b.color_sprites.items.len;
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox + dx, oy, null);
+    clip_since(b, view, prim0, spr0, cspr0);
+}
+
+// Clip every primitive emitted since the given buffer lengths to `view` (a slide /
+// parallax viewport box), the way draw_scroll clips a scrolled child.
+fn clip_since(b: *RenderBuilder, view: [4]f32, prim0: usize, spr0: usize, cspr0: usize) void {
     for (b.prims.items[prim0..]) |*p| switch (p.*) {
         inline else => |*v| {
             v.clip_bounds = clip_isect(v.clip_bounds, view);
@@ -463,6 +495,51 @@ fn draw_slide(
     };
     for (b.sprites.items[spr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
     for (b.color_sprites.items[cspr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
+}
+
+// The push-transition draw (the native iOS feel): the leaving page parallaxes ~30% left
+// and dims while the arriving page slides in over it from the right, on an opaque backing
+// so it hides the page behind in the overlap. `t` is the eased progress (0 = base shown,
+// 1 = pushed shown). Input is suppressed mid-slide (pc = null); the settled page
+// re-renders with its hitboxes.
+fn draw_parallax(
+    b: *RenderBuilder,
+    eng: *LayoutEngine,
+    theme: *const Theme,
+    n: *Node,
+    depth: u32,
+    ox: f32,
+    oy: f32,
+    view: [4]f32,
+    t: f32,
+) RenderError!void {
+    std.debug.assert(depth <= MAX_DEPTH);
+    std.debug.assert(n.children.len == 2); // [base, pushed]
+    std.debug.assert(view[2] >= 0 and view[3] >= 0);
+    const tt = std.math.clamp(t, 0, 1);
+    const w = view[2];
+    // The leaving page: parallax left, then a dim deepening as the push completes.
+    const p0 = b.prims.items.len;
+    const s0 = b.sprites.items.len;
+    const c0 = b.color_sprites.items.len;
+    try draw_tree(b, eng, theme, n.children[0], depth + 1, ox - 0.3 * tt * w, oy, null);
+    if (tt > 0.001) {
+        var dim = Quad.init(view[0], view[1], w, view[3]);
+        _ = dim.set_background(.{ .r = 0, .g = 0, .b = 0, .a = 0.28 * tt });
+        try b.append_quad(dim);
+    }
+    clip_since(b, view, p0, s0, c0);
+    // The arriving page on an opaque backing (covers the page behind in the overlap),
+    // both sliding in from the right.
+    const p1 = b.prims.items.len;
+    const s1 = b.sprites.items.len;
+    const c1 = b.color_sprites.items.len;
+    const bg = theme.background;
+    var back = Quad.init(view[0] + (1 - tt) * w, view[1], w, view[3]);
+    _ = back.set_background(.{ .r = bg.r, .g = bg.g, .b = bg.b, .a = 1 });
+    try b.append_quad(back);
+    try draw_tree(b, eng, theme, n.children[1], depth + 1, ox - tt * w, oy, null);
+    clip_since(b, view, p1, s1, c1);
 }
 
 fn clip_isect(a: [4]f32, c: [4]f32) [4]f32 {
