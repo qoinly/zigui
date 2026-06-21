@@ -37,7 +37,7 @@ pub const App = struct {
         const base = tab_body(f, app, safe_top);
         const pushed = detail_body(f, app, safe_top);
         return zigui.col(.{}, &.{
-            zigui.push_slide(f, &app.push, app.detail, base, pushed),
+            zigui.push_slide(f, &app.push, &app.detail, base, pushed),
             zigui.bottom_bar(&tabs, &app.bottom_nav, .{
                 .active = app.tab,
                 .style = .floating,
