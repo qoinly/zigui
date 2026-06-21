@@ -224,6 +224,13 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
     const lvl = zigui.napi.device.battery_level();
     const chg: []const u8 = if (zigui.napi.device.charging()) " - charging" else "";
     const bat = std.fmt.allocPrint(f.arena, "Battery {d}%{s}", .{ lvl, chg }) catch "Battery";
+    const net: []const u8 = switch (zigui.napi.device.network()) {
+        .none => "none",
+        .wifi => "wifi",
+        .cellular => "cellular",
+        .other => "other",
+    };
+    const net_txt = std.fmt.allocPrint(f.arena, "Network: {s}", .{net}) catch "Network";
     const cl = app.clip[0..app.clip_len];
     const clip = std.fmt.allocPrint(f.arena, "Clipboard: {s}", .{cl}) catch "Clipboard";
     const ext: []const u8 = if (zigui.napi.clipboard.changed()) "yes" else "no";
@@ -250,6 +257,7 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
         zigui.col(.{ .pad = .lg, .gap = .md }, &.{
             section("DEVICE"),
             zigui.text(bat, .{ .size = 16 }),
+            zigui.text(net_txt, .{ .size = 16 }),
             section("CLIPBOARD"),
             zigui.button("Copy \"zigui\"", .{ .on_click = zigui.on(App, copy_text) }),
             zigui.text(clip, .{ .size = 14, .color = muted }),
@@ -281,6 +289,8 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
                 perm_text(f, "notifications", "Notifications"),
                 .{ .size = 14, .color = muted },
             ),
+            section("NOTIFICATIONS"),
+            zigui.button("Post notification", .{ .on_click = zigui.on(App, post_notif) }),
         }),
         bottom_gap(),
     });
@@ -446,6 +456,10 @@ fn req_photos(app: *App) void {
 fn req_notif(app: *App) void {
     _ = app;
     zigui.napi.permissions.request("notifications");
+}
+fn post_notif(app: *App) void {
+    _ = app;
+    zigui.napi.notifications.post("zigui", "Hello from the zigui demo!");
 }
 fn perm_text(f: *Frame, name: []const u8, label: []const u8) []const u8 {
     const w: []const u8 = switch (zigui.napi.permissions.status(name)) {

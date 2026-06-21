@@ -104,6 +104,7 @@ fn link_ios(b: *std.Build, zigui: *std.Build.Module) void {
     zigui.linkFramework("AVFoundation", .{}); // camera/microphone permission
     zigui.linkFramework("Photos", .{}); // photo-library permission
     zigui.linkFramework("UserNotifications", .{}); // notification permission
+    zigui.linkFramework("Network", .{}); // network reachability (NWPathMonitor)
     zigui.link_libc = true;
     ios_sim_paths(b, zigui);
 }
