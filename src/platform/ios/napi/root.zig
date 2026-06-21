@@ -6,3 +6,5 @@ pub const links = @import("links.zig");
 pub const device = @import("device.zig");
 pub const picker = @import("picker.zig");
 pub const display = @import("display.zig");
+pub const biometric = @import("biometric.zig");
+pub const permissions = @import("permissions.zig");

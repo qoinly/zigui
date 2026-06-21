@@ -36,5 +36,13 @@
     <array>
         <string>iPhoneSimulator</string>
     </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Demo: show the camera permission prompt.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Demo: show the microphone permission prompt.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Demo: authenticate with Face ID.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Demo: show the photos permission prompt.</string>
 </dict>
 </plist>

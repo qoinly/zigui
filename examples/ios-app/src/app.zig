@@ -78,6 +78,7 @@ const articles = [_]Article{
 };
 
 const ItemCtx = struct { app: *App, idx: usize };
+const Bio = enum { untried, success, failed }; // last biometric outcome
 
 const SegItem = zigui.kit.toggle_group.ToggleGroupItem;
 const donut_slices = [_]zigui.kit.chart.Slice{
@@ -105,6 +106,7 @@ pub const App = struct {
     awake: bool = false,
     bright_slider: zigui.kit.slider.SliderState = .{},
     bright_vals: [1]f32 = .{0.5},
+    bio: Bio = .untried,
     // Kit-tab widget state.
     kit_toggle: bool = true,
     kit_check: bool = false,
@@ -226,6 +228,12 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
     const clip = std.fmt.allocPrint(f.arena, "Clipboard: {s}", .{cl}) catch "Clipboard";
     const ext: []const u8 = if (zigui.napi.clipboard.changed()) "yes" else "no";
     const ext_txt = std.fmt.allocPrint(f.arena, "External change: {s}", .{ext}) catch "?";
+    if (zigui.napi.biometric.result()) |o| app.bio = if (o == .success) .success else .failed;
+    const bio_txt = switch (app.bio) {
+        .success => "Face ID: success",
+        .failed => "Face ID: failed",
+        .untried => "Face ID: not tried",
+    };
     const picking = zigui.napi.picker.pending();
     if (zigui.napi.picker.take_file()) |pf| store_pick(app, pf);
     const nm = app.picked_name[0..app.picked_name_len];
@@ -260,6 +268,19 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             zigui.slider(&app.bright_vals, &app.bright_slider, .{
                 .on_change = zigui.on_at(App, set_bright),
             }),
+            section("SECURITY"),
+            zigui.button("Authenticate", .{ .on_click = zigui.on(App, do_auth) }),
+            zigui.text(bio_txt, .{ .size = 14, .color = muted }),
+            section("PERMISSIONS"),
+            zigui.button("Request camera", .{ .on_click = zigui.on(App, req_camera) }),
+            zigui.text(perm_text(f, "camera", "Camera"), .{ .size = 14, .color = muted }),
+            zigui.button("Request photos", .{ .on_click = zigui.on(App, req_photos) }),
+            zigui.text(perm_text(f, "photos", "Photos"), .{ .size = 14, .color = muted }),
+            zigui.button("Request notifications", .{ .on_click = zigui.on(App, req_notif) }),
+            zigui.text(
+                perm_text(f, "notifications", "Notifications"),
+                .{ .size = 14, .color = muted },
+            ),
         }),
         bottom_gap(),
     });
@@ -409,6 +430,31 @@ fn set_awake(app: *App) void {
 fn set_bright(app: *App, i: usize, v: f32) void {
     app.bright_vals[i] = v;
     zigui.napi.display.brightness(v);
+}
+fn do_auth(app: *App) void {
+    _ = app;
+    zigui.napi.biometric.authenticate("Authenticate", "Unlock the zigui demo");
+}
+fn req_camera(app: *App) void {
+    _ = app;
+    zigui.napi.permissions.request("camera");
+}
+fn req_photos(app: *App) void {
+    _ = app;
+    zigui.napi.permissions.request("photos");
+}
+fn req_notif(app: *App) void {
+    _ = app;
+    zigui.napi.permissions.request("notifications");
+}
+fn perm_text(f: *Frame, name: []const u8, label: []const u8) []const u8 {
+    const w: []const u8 = switch (zigui.napi.permissions.status(name)) {
+        .granted => "granted",
+        .not_requested => "not requested",
+        .declined => "declined",
+        .declined_permanent => "denied",
+    };
+    return std.fmt.allocPrint(f.arena, "{s}: {s}", .{ label, w }) catch label;
 }
 fn flip_toggle(app: *App) void {
     app.kit_toggle = !app.kit_toggle;
