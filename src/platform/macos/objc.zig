@@ -42,6 +42,9 @@ pub extern "c" fn class_addMethod(
     imp: *const anyopaque,
     types: [*:0]const u8,
 ) bool;
+pub const Protocol = opaque {};
+pub extern "c" fn objc_getProtocol(name: [*:0]const u8) ?*Protocol;
+pub extern "c" fn class_addProtocol(cls: Class, protocol: *Protocol) bool;
 pub extern "c" fn class_addIvar(
     cls: Class,
     name: [*:0]const u8,

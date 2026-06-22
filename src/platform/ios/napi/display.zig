@@ -1,6 +1,6 @@
 // Display + chrome: keep the screen awake, override the brightness, and - via the root view
-// controller in app.zig - the status-bar style and visibility (immersive). Orientation lock
-// needs scene-managed window sizing (not wired), so the facade reports it unsupported on iOS.
+// controller in app.zig - the status-bar style/visibility (immersive) and the orientation
+// lock (the scene-owned window resizes, so the surface + safe-area follow the orientation).
 const objc = @import("../../macos/objc.zig");
 const app = @import("../app.zig");
 const Id = objc.Id;
@@ -29,4 +29,15 @@ pub fn status_bar_dark_icons(dark: bool) void {
 // Hide the status bar for an immersive page.
 pub fn immersive(on: bool) void {
     app.set_immersive(on);
+}
+
+// The facade's code: 0 landscape, 1 portrait, else (auto/sensor) = free rotation. Mapped to a
+// UIInterfaceOrientationMask the root controller enforces + the window scene adopts.
+pub fn set_orientation(code: i32) void {
+    const mask: objc.NSUInteger = switch (code) {
+        0 => 24, // landscape (left | right)
+        1 => 2, // portrait
+        else => 26, // all but upside-down
+    };
+    app.set_orientation(mask);
 }
