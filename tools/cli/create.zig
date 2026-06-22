@@ -17,6 +17,7 @@ pub const Config = struct {
     android: bool,
     ios: bool,
     force: bool,
+    local: bool, // depend on a sibling ../zigui checkout instead of pinning the release
 };
 
 pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
@@ -25,6 +26,7 @@ pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
     var out: ?[]const u8 = null;
     var target_flag: ?[]const u8 = null;
     var force = false;
+    var local = false;
 
     while (args.next()) |a| {
         if (cli.eql(a, "--help") or cli.eql(a, "-h")) return help(ctx.out);
@@ -38,6 +40,8 @@ pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
             target_flag = args.next() orelse return missing(ctx, "--target");
         } else if (cli.eql(a, "--force") or cli.eql(a, "-f")) {
             force = true;
+        } else if (cli.eql(a, "--local")) {
+            local = true;
         } else if (std.mem.startsWith(u8, a, "-")) {
             try ctx.err.print("zigui create: unknown flag '{s}'\n", .{a});
             return cli.Error.Reported;
@@ -53,6 +57,7 @@ pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
         try gather_flags(ctx, name, package, target_flag);
     if (out) |o| cfg.out = o;
     cfg.force = force;
+    cfg.local = local;
 
     if (!cfg.desktop and !cfg.android and !cfg.ios) {
         try ctx.err.print("zigui create: pick at least one target\n", .{});
@@ -83,6 +88,7 @@ fn gather_interactive(ctx: cli.Ctx, name_in: ?[]const u8, pkg_in: ?[]const u8) !
         .android = chosen[1],
         .ios = chosen[2],
         .force = false,
+        .local = false,
     };
 }
 
@@ -134,6 +140,7 @@ fn gather_flags(
         .android = android,
         .ios = ios,
         .force = false,
+        .local = false,
     };
 }
 
@@ -167,6 +174,7 @@ fn help(w: *std.Io.Writer) !void {
         \\  --target <a,b>         desktop, android, ios (required when piped)
         \\  --out <dir>            output dir (default <name>)
         \\  --force                overwrite files that already exist
+        \\  --local                use a sibling ../zigui checkout (for zigui dev)
         \\
     , .{});
 }
