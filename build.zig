@@ -246,6 +246,9 @@ pub const AndroidApkOptions = struct {
     // The app's package / applicationId, for `zig build run`'s am start.
     package_name: []const u8,
     optimize: std.builtin.OptimizeMode,
+    // Which device/emulator to install onto: a serial from `adb devices` (adb treats a real
+    // device and an emulator alike), or "" for the single connected one.
+    device: []const u8 = "",
     // The launch activity component (fully qualified); defaults to the shipped shell.
     activity: []const u8 = "io.qoinly.zigui.ZiguiActivity",
     // The installed APK file name under zig-out/bin.
@@ -267,14 +270,14 @@ pub const AndroidApkOptions = struct {
     include_biometric: bool = false,
 };
 
-pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
+pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) ?*std.Build.Step {
     const sdk = android_env(b, "ANDROID_HOME") orelse {
         std.debug.print("zigui.androidApk: set ANDROID_HOME to the Android SDK root\n", .{});
-        return;
+        return null;
     };
     const java_home = android_env(b, "JAVA_HOME") orelse {
         std.debug.print("zigui.androidApk: set JAVA_HOME (javac/apksigner need java)\n", .{});
-        return;
+        return null;
     };
     const ndk = android_env(b, "ANDROID_NDK_HOME") orelse
         b.fmt("{s}/ndk/{s}", .{ sdk, opts.ndk_version });
@@ -395,14 +398,20 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) void {
     const install_apk = b.addInstallBinFile(app_apk, opts.out_name);
     b.getInstallStep().dependOn(&install_apk.step);
 
-    // `zig build run`: install onto a connected device/emulator and launch.
-    const adb_install = b.addSystemCommand(&.{ adb, "install", "-r" });
+    // `zig build android` builds the APK; the returned launch step (adb install + am start)
+    // is what the consumer wires into the `run` dispatcher.
+    const build_step = b.step("android", "Build the Android APK");
+    build_step.dependOn(&install_apk.step);
+    const adb_install = b.addSystemCommand(&.{adb});
+    if (opts.device.len > 0) adb_install.addArgs(&.{ "-s", opts.device });
+    adb_install.addArgs(&.{ "install", "-r" });
     adb_install.addFileArg(app_apk);
     const component = b.fmt("{s}/{s}", .{ opts.package_name, opts.activity });
-    const adb_start = b.addSystemCommand(&.{ adb, "shell", "am", "start", "-n", component });
+    const adb_start = b.addSystemCommand(&.{adb});
+    if (opts.device.len > 0) adb_start.addArgs(&.{ "-s", opts.device });
+    adb_start.addArgs(&.{ "shell", "am", "start", "-n", component });
     adb_start.step.dependOn(&adb_install.step);
-    const run_step = b.step("run", "Install and launch the APK on a device/emulator");
-    run_step.dependOn(&adb_start.step);
+    return &adb_start.step;
 }
 
 // One dynamic .so for `triple`/`arch`, linking the app source against zigui through
@@ -481,9 +490,12 @@ pub const IOSAppOptions = struct {
     // The bundle identifier, for `zig build run`'s simctl launch.
     bundle_id: []const u8,
     optimize: std.builtin.OptimizeMode,
+    // Which simulator to install onto: a UDID from `xcrun simctl list`, or "booted" for the
+    // running one. Real-device install (devicectl + signing) is a separate path.
+    device: []const u8 = "booted",
 };
 
-pub fn iosApp(b: *std.Build, opts: IOSAppOptions) void {
+pub fn iosApp(b: *std.Build, opts: IOSAppOptions) *std.Build.Step {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = b.graph.host.result.cpu.arch,
         .os_tag = .ios,
@@ -515,15 +527,143 @@ pub fn iosApp(b: *std.Build, opts: IOSAppOptions) void {
     });
     b.getInstallStep().dependOn(&install.step);
 
-    // `zig build run`: install onto the booted simulator and launch.
-    const sim_install = b.addSystemCommand(&.{ "xcrun", "simctl", "install", "booted" });
+    // `zig build ios` builds the bundle; the returned launch step (install + launch on the
+    // booted simulator) is what the consumer wires into the `run` dispatcher.
+    const build_step = b.step("ios", "Build the iOS .app bundle");
+    build_step.dependOn(&install.step);
+    const sim_install = b.addSystemCommand(&.{ "xcrun", "simctl", "install", opts.device });
     sim_install.addDirectoryArg(app_path);
     const sim_launch = b.addSystemCommand(&.{
-        "xcrun", "simctl", "launch", "booted", opts.bundle_id,
+        "xcrun", "simctl", "launch", opts.device, opts.bundle_id,
     });
     sim_launch.step.dependOn(&sim_install.step);
-    const run_step = b.step("run", "Install and launch the app on the booted iOS Simulator");
-    run_step.dependOn(&sim_launch.step);
+    return &sim_launch.step;
+}
+
+// ---- run dispatcher (consumer build-time API) ----
+pub const RunTarget = struct {
+    name: []const u8,
+    // The platform's launch step; null when its toolchain is unconfigured (e.g. androidApk
+    // with no ANDROID_HOME), so that target is skipped.
+    step: ?*std.Build.Step,
+};
+
+// Wires one `run` step that dispatches on the first `--` arg: `zig build run -- ios` runs the
+// "ios" target. With no arg, the first target runs. The device id (the second arg) is read by
+// the caller and passed to the build helper, so it reaches the install/launch command.
+pub fn runStep(b: *std.Build, targets: []const RunTarget) void {
+    std.debug.assert(targets.len > 0);
+    const run = b.step("run", "Run a target on a device: zig build run -- <target> [device]");
+    const which = if (b.args) |a| (if (a.len > 0) a[0] else targets[0].name) else targets[0].name;
+    for (targets) |t| {
+        if (std.mem.eql(u8, t.name, which)) {
+            if (t.step) |s| run.dependOn(s);
+            return;
+        }
+    }
+    run.dependOn(&b.addFail(b.fmt("run: unknown target '{s}'", .{which})).step);
+}
+
+// ---- high-level app() (the consumer build-time API the CLI scaffolds) ----
+pub const DesktopTarget = struct { name: []const u8 };
+pub const AndroidTarget = struct {
+    name: []const u8,
+    manifest: std.Build.LazyPath,
+    package_name: []const u8,
+    out_name: []const u8 = "app.apk",
+    activity: []const u8 = "io.qoinly.zigui.ZiguiActivity",
+    include_accessibility: bool = false,
+    include_notification_listener: bool = false,
+    include_broadcast_receiver: bool = false,
+    include_biometric: bool = false,
+};
+pub const IOSTarget = struct {
+    name: []const u8,
+    info_plist: std.Build.LazyPath,
+    bundle_id: []const u8,
+};
+pub const AppOptions = struct {
+    // The shared root source (src/main.zig); every selected target builds it.
+    source: std.Build.LazyPath,
+    desktop: ?DesktopTarget = null,
+    android: ?AndroidTarget = null,
+    ios: ?IOSTarget = null,
+};
+
+// Declare the targets; zigui wires the per-platform build steps (`zig build desktop|android|
+// ios`) plus one `run` dispatcher (`zig build run -- ios [udid]`) that reads the platform and
+// device from the `--` args. The low-level desktopExe/androidApk/iosApp stay for finer control.
+pub fn app(b: *std.Build, opts: AppOptions) void {
+    const optimize = b.standardOptimizeOption(.{});
+    const device = if (b.args) |a| (if (a.len > 1) a[1] else "") else "";
+    var targets: [3]RunTarget = undefined;
+    var n: u8 = 0;
+    if (opts.desktop) |d| {
+        targets[n] = .{ .name = "desktop", .step = desktopExe(b, opts.source, d.name, optimize) };
+        n += 1;
+    }
+    if (opts.android) |a| {
+        const run = androidApk(b, .{
+            .name = a.name,
+            .source = opts.source,
+            .manifest = a.manifest,
+            .package_name = a.package_name,
+            .optimize = optimize,
+            .device = device,
+            .out_name = a.out_name,
+            .activity = a.activity,
+            .include_accessibility = a.include_accessibility,
+            .include_notification_listener = a.include_notification_listener,
+            .include_broadcast_receiver = a.include_broadcast_receiver,
+            .include_biometric = a.include_biometric,
+        });
+        targets[n] = .{ .name = "android", .step = run };
+        n += 1;
+    }
+    if (opts.ios) |i| {
+        // A Debug iOS build pulls a simulator-absent symbol; force at least ReleaseSmall.
+        const ios_optimize = if (optimize == .Debug) .ReleaseSmall else optimize;
+        const run = iosApp(b, .{
+            .name = i.name,
+            .source = opts.source,
+            .info_plist = i.info_plist,
+            .bundle_id = i.bundle_id,
+            .optimize = ios_optimize,
+            .device = if (device.len > 0) device else "booted",
+        });
+        targets[n] = .{ .name = "ios", .step = run };
+        n += 1;
+    }
+    if (n > 0) runStep(b, targets[0..n]);
+}
+
+// The desktop executable + a `desktop` build step; returns its run step for the dispatcher.
+pub fn desktopExe(
+    b: *std.Build,
+    source: std.Build.LazyPath,
+    name: []const u8,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step {
+    const target = b.standardTargetOptions(.{});
+    const zigui_dep = b.dependency("zigui", .{ .target = target, .optimize = optimize });
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = source,
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zigui", .module = zigui_dep.module("zigui") }},
+        }),
+    });
+    // Depend on this exe's own install (not the global one), so `run -- desktop` does not drag
+    // in a sibling iOS/Android build.
+    const install = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install.step);
+    const build_step = b.step("desktop", "Build the desktop app");
+    build_step.dependOn(&install.step);
+    const run = b.addRunArtifact(exe);
+    run.step.dependOn(&install.step);
+    return &run.step;
 }
 
 fn add_icongen(b: *std.Build) void {
