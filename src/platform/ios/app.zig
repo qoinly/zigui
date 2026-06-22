@@ -150,15 +150,66 @@ fn make_window() bool {
 // The root controller's view is the CAMetalLayer-backed surface the renderer
 // draws into; record both the view and its layer for the shell to read.
 fn make_root_controller(bounds: native.CGRect, scale: objc.CGFloat) ?Id {
-    const UIViewController = objc.get_class("UIViewController") orelse return null;
-    const vc = objc.msg_send(Id, objc.alloc(UIViewController), "init", .{});
+    const cls = ensure_root_vc_class() orelse return null;
+    const vc = objc.msg_send(Id, objc.alloc(cls), "init", .{});
     std.debug.assert(@intFromPtr(vc) != 0);
+    g_root_vc = vc;
     const view = make_metal_view(bounds, scale) orelse return null;
     objc.msg_send(void, vc, "setView:", .{view});
     g_window.view = view;
     g_window.layer = objc.msg_send(Id, view, "layer", .{});
     std.debug.assert(g_window.layer != null);
     return vc;
+}
+
+// Chrome the root controller reflects: the status-bar style and visibility (immersive). The
+// napi (display.*) writes the state; the controller's overrides below read it.
+var g_status_dark: bool = false;
+var g_immersive: bool = false;
+var g_root_vc: ?Id = null;
+var g_root_vc_class: ?objc.Class = null;
+
+// UIStatusBarStyle: 3 darkContent (dark icons on a light bar), 1 lightContent (light icons).
+fn vc_status_style(_: Id, _: objc.Sel) callconv(.c) objc.NSInteger {
+    return if (g_status_dark) 3 else 1;
+}
+fn vc_status_hidden(_: Id, _: objc.Sel) callconv(.c) objc.BOOL {
+    return if (g_immersive) objc.YES else objc.NO;
+}
+
+fn ensure_root_vc_class() ?objc.Class {
+    if (g_root_vc_class) |c| return c;
+    const UIViewController = objc.get_class("UIViewController") orelse return null;
+    const name = "ZiguiViewController";
+    const cls = objc.objc_allocateClassPair(UIViewController, name, 0) orelse return null;
+    add_chrome_method(cls, "preferredStatusBarStyle", @ptrCast(&vc_status_style), "q@:");
+    add_chrome_method(cls, "prefersStatusBarHidden", @ptrCast(&vc_status_hidden), "B@:");
+    objc.objc_registerClassPair(cls);
+    g_root_vc_class = cls;
+    return cls;
+}
+
+fn add_chrome_method(
+    cls: objc.Class,
+    name: [:0]const u8,
+    imp: *const anyopaque,
+    enc: [:0]const u8,
+) void {
+    _ = objc.class_addMethod(cls, objc.sel(name), imp, enc);
+}
+
+pub fn set_status_dark(dark: bool) void {
+    g_status_dark = dark;
+    status_appearance_update();
+}
+pub fn set_immersive(on: bool) void {
+    g_immersive = on;
+    status_appearance_update();
+}
+// UIKit caches the status-bar appearance; this makes it re-query the overrides above.
+fn status_appearance_update() void {
+    const vc = g_root_vc orelse return;
+    objc.msg_send(void, vc, "setNeedsStatusBarAppearanceUpdate", .{});
 }
 
 fn make_metal_view(bounds: native.CGRect, scale: objc.CGFloat) ?Id {
