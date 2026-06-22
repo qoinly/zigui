@@ -289,8 +289,11 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
                 perm_text(f, "notifications", "Notifications"),
                 .{ .size = 14, .color = muted },
             ),
+            zigui.button("Request location", .{ .on_click = zigui.on(App, req_location) }),
+            zigui.text(perm_text(f, "location", "Location"), .{ .size = 14, .color = muted }),
             section("NOTIFICATIONS"),
             zigui.button("Post notification", .{ .on_click = zigui.on(App, post_notif) }),
+            zigui.button("Show toast", .{ .on_click = zigui.on(App, show_toast) }),
         }),
         bottom_gap(),
     });
@@ -460,6 +463,14 @@ fn req_notif(app: *App) void {
 fn post_notif(app: *App) void {
     _ = app;
     zigui.napi.notifications.post("zigui", "Hello from the zigui demo!");
+}
+fn req_location(app: *App) void {
+    _ = app;
+    zigui.napi.permissions.request("location");
+}
+fn show_toast(app: *App) void {
+    _ = app;
+    zigui.napi.notifications.toast("Toast from zigui!");
 }
 fn perm_text(f: *Frame, name: []const u8, label: []const u8) []const u8 {
     const w: []const u8 = switch (zigui.napi.permissions.status(name)) {

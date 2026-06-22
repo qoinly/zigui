@@ -21,11 +21,16 @@ pub fn read_nsstring(ns: Id, buf: []u8) []const u8 {
     return buf[0..i];
 }
 
-// The key window's root view controller, for presenting modals (the share sheet, the
-// pickers). keyWindow is deprecated but still resolves the single-scene app's window.
-pub fn root_vc() ?Id {
+// The app's key window. keyWindow is deprecated but still resolves the single-scene app's
+// window; used to present modals and to overlay a toast.
+pub fn key_window() ?Id {
     const UIApplication = objc.get_class("UIApplication") orelse return null;
     const app = objc.msg_send(Id, UIApplication, "sharedApplication", .{});
-    const win = objc.msg_send(?Id, app, "keyWindow", .{}) orelse return null;
+    return objc.msg_send(?Id, app, "keyWindow", .{});
+}
+
+// The key window's root view controller, for presenting modals (the share sheet, the pickers).
+pub fn root_vc() ?Id {
+    const win = key_window() orelse return null;
     return objc.msg_send(?Id, win, "rootViewController", .{});
 }
