@@ -1,7 +1,8 @@
 const zigui = @import("zigui");
 
-// The Android backend owns the run loop (App.run returns immediately), so the state
-// must outlive main() - a container-scoped var, not a stack local, and no deinit.
+// The mobile backends own the run loop (App.run never returns, or returns immediately on
+// Android), so the state lives as a container-scoped var - not a stack local - and there is
+// no defer app.deinit(). This works for the desktop target too.
 const App = struct { taps: u32 = 0 };
 var state: App = .{};
 
@@ -19,7 +20,7 @@ fn on_tap(app: *App) void {
 }
 
 pub fn main() !void {
-    var window = try zigui.App.init(.{ .title = "{{display}}", .size = .{ 400, 800 } });
+    var window = try zigui.App.init(.{ .title = "{{display}}", .size = .{ 900, 600 } });
     try window.run(&state, .{ .body = view });
 }
 

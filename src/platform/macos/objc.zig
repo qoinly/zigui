@@ -42,6 +42,9 @@ pub extern "c" fn class_addMethod(
     imp: *const anyopaque,
     types: [*:0]const u8,
 ) bool;
+pub const Protocol = opaque {};
+pub extern "c" fn objc_getProtocol(name: [*:0]const u8) ?*Protocol;
+pub extern "c" fn class_addProtocol(cls: Class, protocol: *Protocol) bool;
 pub extern "c" fn class_addIvar(
     cls: Class,
     name: [*:0]const u8,
@@ -60,7 +63,41 @@ pub extern "c" fn object_setInstanceVariable(
     value: ?*anyopaque,
 ) *opaque {};
 
+// For a class object, returns its metaclass - where a class method (e.g. an iOS
+// view subclass's +layerClass) is registered.
+pub extern "c" fn object_getClass(obj: ?*anyopaque) ?Class;
+
 pub extern "c" fn objc_msgSend() void;
+
+// Minimal Blocks-runtime support for a no-capture global block: _NSConcreteGlobalBlock is
+// the global-block isa, and the layout matches clang's emission so an objc method can call
+// block.invoke(&block, args...). Lets napi callbacks (e.g. biometric's reply) be a block.
+pub extern "c" var _NSConcreteGlobalBlock: anyopaque;
+pub const BLOCK_IS_GLOBAL: c_int = 1 << 28;
+pub const BlockDescriptor = extern struct {
+    reserved: c_ulong = 0,
+    size: c_ulong,
+};
+pub const Block = extern struct {
+    isa: *const anyopaque,
+    flags: c_int,
+    reserved: c_int = 0,
+    invoke: *const anyopaque,
+    descriptor: *const BlockDescriptor,
+};
+
+// Build a no-capture global block wrapping `invoke`. The block storage and `desc` (sized
+// @sizeOf(Block)) must outlive the async call that holds the block.
+pub fn global_block(invoke: *const anyopaque, desc: *const BlockDescriptor) Block {
+    std.debug.assert(desc.size == @sizeOf(Block));
+    std.debug.assert(desc.reserved == 0);
+    return .{
+        .isa = &_NSConcreteGlobalBlock,
+        .flags = BLOCK_IS_GLOBAL,
+        .invoke = invoke,
+        .descriptor = desc,
+    };
+}
 
 fn MsgSendFn(comptime ReturnType: type, comptime ArgTypes: []const type) type {
     return switch (ArgTypes.len) {

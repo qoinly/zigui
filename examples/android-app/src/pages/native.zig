@@ -69,8 +69,6 @@ fn do_pick_file(app: *App) void {
 pub fn view(f: *Frame, app: *App) *Node {
     const clip = app.last_result[0..app.last_result_len];
     const note = if (app.last_result_len > 0) clip else "(clipboard empty)";
-    const file = app.file_preview[0..app.file_preview_len];
-    const file_note = if (app.file_preview_len > 0) file else "(no file picked)";
     const cam = switch (zigui.napi.permissions.status(CAMERA)) {
         .granted => "Camera: granted",
         .not_requested => "Camera: not requested",
@@ -93,12 +91,13 @@ pub fn view(f: *Frame, app: *App) *Node {
         zigui.button("Rotate", .{ .on_click = zigui.on(App, cycle_orientation) }),
         zigui.button("Brightness", .{ .on_click = zigui.on(App, toggle_brightness) }),
         page.status(device_status(f)),
+        page.status(version_status(f)),
         zigui.button("Authenticate", .{ .on_click = zigui.on(App, do_biometric) }),
         page.status(auth),
         zigui.button("Request camera", .{ .on_click = zigui.on(App, do_request_camera) }),
         page.status(cam),
         zigui.button("Pick file", .{ .on_click = zigui.on(App, do_pick_file) }),
-        zigui.text(file_note, .{ .size = 14 }),
+        pick_result(f, app),
     });
 }
 
@@ -116,4 +115,24 @@ fn device_status(f: *Frame) []const u8 {
     };
     const out = std.fmt.bufPrint(buf, "Battery: {d}%{s}  Net: {s}", .{ level, charge, net });
     return out catch "Battery/Net: n/a";
+}
+
+// The app's own versionName (device.app_version), formatted into the arena.
+fn version_status(f: *Frame) []const u8 {
+    var vbuf: [32]u8 = undefined;
+    const v = zigui.napi.device.app_version(&vbuf);
+    const buf = f.arena.alloc(u8, 48) catch return "Version: n/a";
+    return std.fmt.bufPrint(buf, "Version: {s}", .{v}) catch "Version: n/a";
+}
+
+// The pick outcome: a spinner while a pick is in flight, then the chosen file's name
+// over its imported local path. The engine wakes the loop when the result lands, so no
+// animate call is needed - only pending() and take_file() drive this.
+fn pick_result(f: *Frame, app: *App) *Node {
+    if (zigui.napi.picker.pending()) return zigui.spinner(10, f.theme.foreground);
+    if (app.picked_name_len == 0) return zigui.text("(no file picked)", .{ .size = 14 });
+    return zigui.col(.{ .gap = .sm }, &.{
+        zigui.text(app.picked_name[0..app.picked_name_len], .{ .size = 14 }),
+        zigui.text(app.picked_path[0..app.picked_path_len], .{ .size = 12, .muted = true }),
+    });
 }

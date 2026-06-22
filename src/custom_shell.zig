@@ -12,6 +12,7 @@ const impl = if (builtin.abi.isAndroid())
     @import("platform/android/custom_shell.zig")
 else switch (builtin.os.tag) {
     .macos => @import("platform/macos/custom_shell.zig"),
+    .ios => @import("platform/ios/custom_shell.zig"),
     .windows => @import("platform/windows/custom_shell.zig"),
     .linux => @import("platform/linux/custom_shell.zig"),
     else => @compileError("zigui: unsupported OS for custom shell"),
@@ -86,11 +87,12 @@ pub fn register_paint_now(cb: RedrawFn) void {
 }
 
 // Touch routes a finger drag through a single handler that scrolls the region
-// under it (or drags a captured control). Only the Android backend has a touch
-// source; the desktop backends use the wheel + drag separately and ignore this.
+// under it (or drags a captured control). Only the touch backends (Android, iOS)
+// have a touch source; the desktop backends use the wheel + drag separately and
+// ignore this.
 pub const TouchMoveFn = *const fn (ctx: *anyopaque, x: f32, y: f32) void;
 pub fn register_touch_move(cb: TouchMoveFn, ctx: *anyopaque) void {
-    if (builtin.abi.isAndroid()) impl.register_touch_move(cb, ctx);
+    if (builtin.abi.isAndroid() or builtin.os.tag == .ios) impl.register_touch_move(cb, ctx);
 }
 
 // The platform Back button: only Android has one. The handler returns whether it
@@ -109,11 +111,11 @@ pub fn desktop_accent_color() ?@import("window/types.zig").Rgba {
     return null;
 }
 
-// Safe-area insets (points) the paint loop carves off the body. Only the Android
-// surface is edge-to-edge under the system bars; desktop windows exclude their
-// chrome already, so the insets are zero and the body math is unchanged.
+// Safe-area insets (points) the paint loop carves off the body. The Android and
+// iOS surfaces are edge-to-edge under the system bars; desktop windows exclude
+// their chrome already, so the insets are zero and the body math is unchanged.
 pub fn safe_area_insets() @import("geometry.zig").Insets {
-    if (builtin.abi.isAndroid()) return impl.safe_area_insets();
+    if (builtin.abi.isAndroid() or builtin.os.tag == .ios) return impl.safe_area_insets();
     return .{};
 }
 

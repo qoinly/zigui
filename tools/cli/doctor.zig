@@ -1,8 +1,10 @@
-// `zigui doctor` - checks the Android toolchain a scaffolded app needs to package an
-// APK. Reports each piece [ok] / [x] (required) / [--] (optional, missing), and exits
-// non-zero when a required tool is absent.
+// `zigui doctor` - checks the toolchains a scaffolded app needs: the Android SDK/NDK/JDK to
+// package an APK, and Xcode's command-line tools to build for the iOS Simulator. Reports each
+// piece [ok] / [x] (required) / [--] (optional or not configured), and exits non-zero when a
+// configured toolchain is missing a required tool.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("main.zig");
 
 // Mirror androidApk's defaults (build.zig) - the exact versions the APK build pins to.
@@ -12,27 +14,46 @@ const api = 36;
 
 pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
     _ = args;
-    try ctx.out.print("zigui doctor - Android toolchain\n\n", .{});
+    try ctx.out.print("zigui doctor\n", .{});
+    var broken: u32 = 0;
+    broken += try android_section(ctx);
+    broken += try ios_section(ctx);
 
-    const sdk = ctx.env.get("ANDROID_HOME");
-    const jdk = ctx.env.get("JAVA_HOME");
-    try report_env(ctx, "ANDROID_HOME", sdk);
-    try report_env(ctx, "JAVA_HOME", jdk);
-    if (sdk == null or jdk == null) {
+    try ctx.out.print("\n", .{});
+    if (broken == 0) {
         try ctx.out.print(
-            "\nset ANDROID_HOME (SDK root) and JAVA_HOME (a JDK), then re-run.\n",
+            "ready - a scaffolded app can build for its configured target(s).\n",
             .{},
         );
-        return cli.Error.Reported;
+        return;
     }
+    try ctx.out.print(
+        "{d} required tool(s) missing in a configured toolchain (see [x]).\n",
+        .{broken},
+    );
+    return cli.Error.Reported;
+}
+
+// The Android APK toolchain. Returns the count of missing required tools; an unconfigured
+// toolchain (no ANDROID_HOME/JAVA_HOME) is reported but not counted as broken.
+fn android_section(ctx: cli.Ctx) !u32 {
+    try ctx.out.print("\nAndroid (APK build):\n", .{});
+    const sdk = ctx.env.get("ANDROID_HOME");
+    const jdk = ctx.env.get("JAVA_HOME");
+    if (sdk == null or jdk == null) {
+        try ctx.out.print(
+            "  [--] not configured - set ANDROID_HOME + JAVA_HOME to build APKs\n",
+            .{},
+        );
+        return 0;
+    }
+    try report_env(ctx, "ANDROID_HOME", sdk);
+    try report_env(ctx, "JAVA_HOME", jdk);
     const home = sdk.?;
     const java = jdk.?;
     const ndk = ctx.env.get("ANDROID_NDK_HOME") orelse
         try join(ctx, home, try std.fmt.allocPrint(ctx.gpa, "ndk/{s}", .{ndk_version}));
-    const bt = try std.fmt.allocPrint(ctx.gpa, "{s}/build-tools/{s}", .{
-        home,
-        build_tools,
-    });
+    const bt = try std.fmt.allocPrint(ctx.gpa, "{s}/build-tools/{s}", .{ home, build_tools });
     const keystore = ctx.env.get("ANDROID_DEBUG_KEYSTORE") orelse
         try join(ctx, home, "debug.keystore");
 
@@ -52,14 +73,24 @@ pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
     try optional(ctx, "adb", try join(ctx, home, "platform-tools/adb"));
     try optional(ctx, "emulator", try join(ctx, home, "emulator/emulator"));
     try optional(ctx, "debug keystore", keystore);
+    return missing;
+}
 
-    try ctx.out.print("\n", .{});
-    if (missing == 0) {
-        try ctx.out.print("all set - `zig build` in a scaffolded app will package an APK.\n", .{});
-        return;
+// The iOS Simulator toolchain. iOS builds need macOS + Xcode's command-line tools (xcrun);
+// the per-run simulator is booted separately. Returns the count of missing required tools.
+fn ios_section(ctx: cli.Ctx) !u32 {
+    try ctx.out.print("\niOS (Simulator build):\n", .{});
+    if (builtin.os.tag != .macos) {
+        try ctx.out.print("  [--] not available - iOS builds need macOS\n", .{});
+        return 0;
     }
-    try ctx.out.print("{d} required tool(s) missing (see [x] above).\n", .{missing});
-    return cli.Error.Reported;
+    var missing: u32 = 0;
+    try require(ctx, &missing, "xcrun", "/usr/bin/xcrun");
+    try ctx.out.print(
+        "  boot a simulator (`xcrun simctl boot <udid>`) before `zig build run -- ios`.\n",
+        .{},
+    );
+    return missing;
 }
 
 fn report_env(ctx: cli.Ctx, name: []const u8, val: ?[]const u8) !void {

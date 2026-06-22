@@ -1,0 +1,10 @@
+const std = @import("std");
+const zigui = @import("zigui");
+
+// zigui.app wires a build step per target (`zig build desktop|android|ios`) and one run
+// dispatcher (`zig build run -- <target> [device]`). Run `zigui doctor` to check toolchains.
+pub fn build(b: *std.Build) void {
+    zigui.app(b, .{
+        .source = b.path("src/main.zig"),{{desktop_block}}{{android_block}}{{ios_block}}
+    });
+}

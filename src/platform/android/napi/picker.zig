@@ -1,11 +1,14 @@
-// The system document picker. open_file launches it; the chosen file's text comes
-// back through the app's ZiguiActivity.onActivityResult -> on_native_file, and the
-// app reads it once via take_file.
+// The system document picker. open_file launches it; the chosen file's display name
+// plus a readable local path (a copy ZiguiActivity.onActivityResult imports into the
+// app's cacheDir) come back through on_native_file, and the app reads them once via
+// take_file. pending() reports the in-flight pick (drive a spinner off it). The result
+// lands on the UI thread, off the render thread, so it wakes the loop via
+// background.nudge() rather than relying on an animating frame.
 
-const std = @import("std");
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
-const utf8 = @import("utf8.zig");
+const background = @import("../../../background.zig");
+const PickedFile = @import("../../../napi/picker_types.zig").PickedFile;
 
 const JNIEnv = util.JNIEnv;
 
@@ -13,15 +16,17 @@ const JNIEnv = util.JNIEnv;
 // onActivityResult must echo it back so this is the only result it reads.
 pub const FILE_REQUEST_CODE: jni.jint = 0x5A16;
 
-// The picked file's text content, awaiting the app's one take_file. A whole file is
-// large, so this caps the preview rather than allocating per pick.
-const FILE_MAX: usize = 4096;
-var g_file_buf: [FILE_MAX]u8 = undefined;
-var g_file_len: usize = 0;
-var g_file_valid: bool = false;
+// The picked file's display name + local path, awaiting the app's one take_file. The
+// name caps at a leaf filename; the path at a cacheDir absolute path.
+var g_name: [256]u8 = undefined;
+var g_name_len: usize = 0;
+var g_path: [1024]u8 = undefined;
+var g_path_len: usize = 0;
+var g_valid: bool = false;
+var g_pending: bool = false;
 
-// Launches the system document picker (ACTION_OPEN_DOCUMENT). The chosen file's
-// text arrives later through on_native_file via the activity's onActivityResult.
+// Launches the system document picker (ACTION_OPEN_DOCUMENT). The chosen file's name +
+// path arrive later through on_native_file via the activity's onActivityResult.
 pub fn open_file() void {
     const c = util.ctx() orelse return;
     const env = c.env;
@@ -67,31 +72,39 @@ pub fn open_file() void {
     ) orelse return;
     var sa = [_]jni.jvalue{ .{ .l = intent }, .{ .i = FILE_REQUEST_CODE } };
     t.CallVoidMethodA(env, c.activity, start, &sa);
+    g_valid = false; // drop any undrained prior result before this pick
+    g_pending = true; // the result or cancel clears it
 }
 
-// The app's ZiguiActivity.onActivityResult forwards the picked file's text here
-// (the erased env + Java String), the IME-sink shape. It becomes the next take_file.
-pub fn on_native_file(env_ptr: *anyopaque, content: ?*anyopaque) void {
+// Whether a pick is in flight (between open_file and the result/cancel). A caller
+// drives a spinner off this.
+pub fn pending() bool {
+    return g_pending;
+}
+
+// The picked file's name + local path, returned once after a pick (null until then,
+// and again after the single read). The slices live until the next open_file.
+pub fn take_file() ?PickedFile {
+    if (!g_valid) return null;
+    g_valid = false;
+    return .{ .name = g_name[0..g_name_len], .path = g_path[0..g_path_len] };
+}
+
+// onActivityResult forwards the picked file's display name + cacheDir path here (the
+// erased env + two Java Strings). Stashed for the app's one take_file, then the loop is
+// woken so the next poll lands it.
+pub fn on_native_file(env_ptr: *anyopaque, name: ?*anyopaque, path: ?*anyopaque) void {
     const env: JNIEnv = @ptrCast(@alignCast(env_ptr));
-    const ref = content orelse return;
-    const t = env.*;
-    const chars = t.GetStringUTFChars(env, ref, null) orelse return;
-    defer t.ReleaseStringUTFChars(env, ref, chars);
-    const span = std.mem.span(chars);
-    // Back the cap-truncation off any split codepoint before the copy.
-    g_file_len = utf8.floor(span, @min(span.len, FILE_MAX));
-    @memcpy(g_file_buf[0..g_file_len], span[0..g_file_len]);
-    g_file_valid = true;
-    std.debug.assert(g_file_len <= FILE_MAX);
+    g_name_len = util.read_jstr(env, name, &g_name).len;
+    g_path_len = util.read_jstr(env, path, &g_path).len;
+    g_valid = true;
+    g_pending = false;
+    background.nudge();
 }
 
-// The app reads a just-picked file once (consume-once, the navigator take_result
-// shape); null when nothing was picked since the last read.
-pub fn take_file(buf: []u8) ?[]const u8 {
-    if (!g_file_valid) return null;
-    std.debug.assert(g_file_len <= g_file_buf.len);
-    g_file_valid = false;
-    const n = @min(g_file_len, buf.len);
-    @memcpy(buf[0..n], g_file_buf[0..n]);
-    return buf[0..n];
+// onActivityResult forwards a cancel or a failed import here: clear the in-flight flag
+// so the spinner stops, and wake the loop so the change shows.
+pub fn on_native_cancel() void {
+    g_pending = false;
+    background.nudge();
 }

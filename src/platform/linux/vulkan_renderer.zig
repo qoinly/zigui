@@ -1731,6 +1731,25 @@ pub const Renderer = struct {
         });
     }
 
+    // No frost machinery on this backend (the frosted bars are iOS/Metal-only); render
+    // the frame as usual so the shared paint seam stays uniform across renderers.
+    pub fn draw_frame_frost(
+        self: *Renderer,
+        clear: ClearColor,
+        prims: []const Primitive,
+        sprites: []const MonochromeSprite,
+        mono_atlas: ?*anyopaque,
+        color_sprites: []const PolychromeSprite,
+        color_atlas: ?*anyopaque,
+        split_prims: usize,
+        split_sprites: usize,
+        split_color: usize,
+        frosts: []const [6]f32,
+    ) void {
+        _ = .{ split_prims, split_sprites, split_color, frosts };
+        self.draw_frame(clear, prims, sprites, mono_atlas, color_sprites, color_atlas);
+    }
+
     // The blur split: everything before the indices is the backdrop (frosted),
     // the rest draws crisp on top; crisp_top points stay unblurred so the
     // title bar never frosts (the d3d11 Modal contract).

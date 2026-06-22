@@ -26,3 +26,9 @@ pub fn network() Network {
     if (@hasDecl(impl, "network_code")) return @enumFromInt(impl.network_code());
     p.unsupported("device.network");
 }
+// The running app's own version string (iOS CFBundleShortVersionString, Android
+// versionName) copied into buf; empty when unavailable.
+pub fn app_version(buf: []u8) []const u8 {
+    if (@hasDecl(impl, "app_version")) return impl.app_version(buf);
+    p.unsupported("device.app_version");
+}

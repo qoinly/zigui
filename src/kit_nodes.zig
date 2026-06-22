@@ -28,6 +28,7 @@ const textarea_kit = @import("kit/textarea.zig");
 const alert_kit = @import("kit/alert.zig");
 const tabs_kit = @import("kit/tabs.zig");
 const bottom_bar_kit = @import("kit/bottom_bar.zig");
+const top_bar_kit = @import("kit/top_bar.zig");
 const toggle_group_kit = @import("kit/toggle_group.zig");
 const slider_kit = @import("kit/slider.zig");
 const select_kit = @import("kit/select.zig");
@@ -938,6 +939,54 @@ pub fn bottom_bar(
     const spec = a.create(BottomBarSpec) catch @panic("node arena oom");
     spec.* = .{ .theme = theme, .items = items, .state = state, .o = o };
     return node.leaf(a, BottomBarSpec.measure, BottomBarSpec.draw, spec);
+}
+
+pub const TopBarStyle = top_bar_kit.Style;
+
+pub const TopBar = struct {
+    style: top_bar_kit.Style = .inline_,
+    scroll: ?*top_bar_kit.ScrollState = null,
+    frost: bool = true,
+    search: ?[]const u8 = null,
+    on_back: ?callbacks.ClickFn = null,
+    on_action: ?callbacks.ClickFn = null,
+    action_icon: ?top_bar_kit.Icon = null,
+    ctx: ?*anyopaque = null,
+    paint: ?*custom_paint.PaintContext = null,
+};
+
+const TopBarSpec = struct {
+    theme: *const Theme,
+    title: []const u8,
+    o: TopBar,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, top_bar_kit.height());
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *TopBarSpec = @ptrCast(@alignCast(ctx));
+        if (r.size.width <= 0) return;
+        _ = try top_bar_kit.render(b, r.origin.x, r.origin.y, r.size.width, .{
+            .title = self.title,
+            .style = self.o.style,
+            .scroll = self.o.scroll,
+            .frost = self.o.frost,
+            .search = self.o.search,
+            .on_back = self.o.on_back,
+            .on_action = self.o.on_action,
+            .action_icon = self.o.action_icon,
+            .ctx = self.o.ctx,
+            .theme = self.theme,
+            .paint = self.o.paint,
+        });
+    }
+};
+
+pub fn top_bar(a: A, theme: *const Theme, title: []const u8, o: TopBar) *Node {
+    const spec = a.create(TopBarSpec) catch @panic("node arena oom");
+    spec.* = .{ .theme = theme, .title = title, .o = o };
+    return node.leaf(a, TopBarSpec.measure, TopBarSpec.draw, spec);
 }
 
 pub const ToggleGrp = struct {

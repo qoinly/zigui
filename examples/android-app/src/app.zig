@@ -35,10 +35,12 @@ pub const App = struct {
     // the pop delivered it (take_result yields it once, the slice is borrowed).
     last_result: [64]u8 = undefined,
     last_result_len: usize = 0,
-    // A preview of the picked document's text, kept across frames (take_file yields
-    // it once, like the route result).
-    file_preview: [256]u8 = undefined,
-    file_preview_len: usize = 0,
+    // The last picked file's display name + local path, kept across frames (take_file
+    // yields them once, like the route result).
+    picked_name: [128]u8 = undefined,
+    picked_name_len: usize = 0,
+    picked_path: [256]u8 = undefined,
+    picked_path_len: usize = 0,
     // The last accessibility screen-read, kept across frames (read() borrows the
     // buffer it fills, so copy it out for the page to show).
     a11y_read: [256]u8 = undefined,
@@ -112,8 +114,9 @@ pub const App = struct {
             @memcpy(app.last_result[0..k], r[0..k]);
             app.last_result_len = k;
         }
-        if (zigui.napi.picker.take_file(&app.file_preview)) |picked| {
-            app.file_preview_len = picked.len;
+        if (zigui.napi.picker.take_file()) |f| {
+            app.picked_name_len = copy(&app.picked_name, f.name);
+            app.picked_path_len = copy(&app.picked_path, f.path);
         }
         if (zigui.napi.biometric.result()) |outcome| {
             app.auth_done = outcome == .success;

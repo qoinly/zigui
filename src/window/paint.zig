@@ -129,6 +129,11 @@ pub const PaintContext = struct {
     backdrop_prims: u32 = 0,
     backdrop_sprites: u32 = 0,
     backdrop_color: u32 = 0,
+    // The iOS frosted bars: each is x, y, w, h, corner in points the kit marks; the
+    // backdrop (up to the backdrop_* split) blurs under them, items crisp on top. Holds
+    // a nav bar + a tab bar in one frame.
+    frost_rects: [6][6]f32 = undefined,
+    frost_count: u32 = 0,
     // Set while drawing a modal's backdrop so is_hovered reports false there: the
     // frosted layer behind a modal must be inert (no hover), not just blurred.
     block_hover: bool = false,
@@ -182,6 +187,7 @@ pub const PaintContext = struct {
         self.backdrop_prims = 0;
         self.backdrop_sprites = 0;
         self.backdrop_color = 0;
+        self.frost_count = 0;
         self.block_hover = false;
         self.text_field_active = false;
         // Rasterize glyphs at the real device scale: a 1x surface fed 2x
@@ -535,7 +541,22 @@ pub const PaintContext = struct {
             break :blk renderer.ClearColor.init(bg.r, bg.g, bg.b, 1);
         };
         const color_atlas_tex: ?*anyopaque = self.color_atlas.get_texture();
-        if (self.blur_modal) {
+        if (self.frost_count > 0) {
+            // The iOS bars marked frosted regions: the backdrop (up to the backdrop_*
+            // split) blurs under them, the bars' items draw crisp on top.
+            self.renderer.draw_frame_frost(
+                clear,
+                self.prims.items,
+                self.sprites.items,
+                self.text_system.mono_atlas_texture(),
+                self.color_sprites.items,
+                color_atlas_tex,
+                @intCast(self.backdrop_prims),
+                @intCast(self.backdrop_sprites),
+                @intCast(self.backdrop_color),
+                self.frost_rects[0..self.frost_count],
+            );
+        } else if (self.blur_modal) {
             const tbar = self.handle.titlebar;
             const crisp_top: f32 = if (tbar.enabled) @floatCast(tbar.height) else 0;
             self.renderer.draw_frame_modal(
