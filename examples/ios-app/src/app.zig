@@ -265,6 +265,7 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             section("LINKS"),
             zigui.button("Share text", .{ .on_click = zigui.on(App, share) }),
             zigui.button("Open ziglang.org", .{ .on_click = zigui.on(App, open_zig) }),
+            zigui.button("Send SMS", .{ .on_click = zigui.on(App, send_sms) }),
             section("FILES"),
             pick_node,
             zigui.text(pick_text, .{ .size = 14, .color = muted }),
@@ -427,6 +428,10 @@ fn share(app: *App) void {
 fn open_zig(app: *App) void {
     _ = app;
     zigui.napi.links.open_url("https://ziglang.org");
+}
+fn send_sms(app: *App) void {
+    _ = app;
+    zigui.napi.sms.send("12345", "Hello from zigui!");
 }
 fn pick_file(app: *App) void {
     _ = app;

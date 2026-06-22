@@ -106,6 +106,7 @@ fn link_ios(b: *std.Build, zigui: *std.Build.Module) void {
     zigui.linkFramework("UserNotifications", .{}); // notification permission
     zigui.linkFramework("Network", .{}); // network reachability (NWPathMonitor)
     zigui.linkFramework("CoreLocation", .{}); // location permission (CLLocationManager)
+    zigui.linkFramework("MessageUI", .{}); // sms compose (MFMessageComposeViewController)
     zigui.link_libc = true;
     ios_sim_paths(b, zigui);
 }
