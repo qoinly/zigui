@@ -7,7 +7,7 @@ const cli = @import("main.zig");
 const prompt = @import("prompt.zig");
 const scaffold = @import("scaffold.zig");
 
-const target_names = [_][]const u8{ "desktop", "android" };
+const target_names = [_][]const u8{ "desktop", "android", "ios" };
 
 pub const Config = struct {
     name: []const u8,
@@ -15,6 +15,7 @@ pub const Config = struct {
     out: []const u8,
     desktop: bool,
     android: bool,
+    ios: bool,
     force: bool,
 };
 
@@ -53,15 +54,16 @@ pub fn run(ctx: cli.Ctx, args: *std.process.Args.Iterator) !void {
     if (out) |o| cfg.out = o;
     cfg.force = force;
 
-    if (!cfg.desktop and !cfg.android) {
+    if (!cfg.desktop and !cfg.android and !cfg.ios) {
         try ctx.err.print("zigui create: pick at least one target\n", .{});
         return cli.Error.Reported;
     }
 
-    try ctx.out.print("\ncreating {s} ({s}{s}) in {s}/\n\n", .{
+    try ctx.out.print("\ncreating {s} ({s}{s}{s}) in {s}/\n\n", .{
         cfg.name,
         if (cfg.desktop) "desktop " else "",
-        if (cfg.android) "android" else "",
+        if (cfg.android) "android " else "",
+        if (cfg.ios) "ios" else "",
         cfg.out,
     });
     try scaffold.run(ctx, cfg);
@@ -71,7 +73,7 @@ fn gather_interactive(ctx: cli.Ctx, name_in: ?[]const u8, pkg_in: ?[]const u8) !
     const name = name_in orelse try prompt.text(ctx, "Project name", "my-zigui-app");
     const package = pkg_in orelse
         try prompt.text(ctx, "Package id", try default_package(ctx, name));
-    var chosen = [_]bool{ true, false }; // desktop preselected
+    var chosen = [_]bool{ true, false, false }; // desktop preselected
     try prompt.multiselect(ctx, "Targets", &target_names, &chosen);
     return .{
         .name = name,
@@ -79,6 +81,7 @@ fn gather_interactive(ctx: cli.Ctx, name_in: ?[]const u8, pkg_in: ?[]const u8) !
         .out = name,
         .desktop = chosen[0],
         .android = chosen[1],
+        .ios = chosen[2],
         .force = false,
     };
 }
@@ -105,6 +108,7 @@ fn gather_flags(
     };
     var desktop = false;
     var android = false;
+    var ios = false;
     var it = std.mem.splitScalar(u8, tf, ',');
     while (it.next()) |t| {
         const s = std.mem.trim(u8, t, " ");
@@ -112,8 +116,13 @@ fn gather_flags(
             desktop = true;
         } else if (cli.eql(s, "android")) {
             android = true;
+        } else if (cli.eql(s, "ios")) {
+            ios = true;
         } else {
-            try ctx.err.print("zigui create: unknown target '{s}' (have desktop, android)\n", .{s});
+            try ctx.err.print(
+                "zigui create: unknown target '{s}' (have desktop, android, ios)\n",
+                .{s},
+            );
             return cli.Error.Reported;
         }
     }
@@ -123,6 +132,7 @@ fn gather_flags(
         .out = name,
         .desktop = desktop,
         .android = android,
+        .ios = ios,
         .force = false,
     };
 }
@@ -154,7 +164,7 @@ fn help(w: *std.Io.Writer) !void {
         \\interactive on a TTY (asks name, package, targets). Flags drive it headless:
         \\  --name <name>          project name (or the positional)
         \\  --package <id>         package id (default com.example.<name>)
-        \\  --target <a,b>         desktop, android (required when piped)
+        \\  --target <a,b>         desktop, android, ios (required when piped)
         \\  --out <dir>            output dir (default <name>)
         \\  --force                overwrite files that already exist
         \\

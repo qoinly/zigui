@@ -79,8 +79,8 @@ fn usage(w: *std.Io.Writer) !void {
         \\usage: zigui <command> [args]
         \\
         \\commands:
-        \\  create [name]  scaffold a new app (interactive: pick desktop / android)
-        \\  doctor         check the Android toolchain (SDK, NDK, JDK)
+        \\  create [name]  scaffold a new app (interactive: pick desktop / android / ios)
+        \\  doctor         check the Android + iOS toolchains
         \\  version        print the version
         \\  help           print this help
         \\

@@ -21,15 +21,13 @@ const Dep = union(enum) {
 };
 
 const tmpl_zon = @embedFile("templates/build.zig.zon.tmpl");
-const tmpl_build_android = @embedFile("templates/build.android.zig.tmpl");
-const tmpl_build_desktop = @embedFile("templates/build.desktop.zig.tmpl");
-const tmpl_build_both = @embedFile("templates/build.both.zig.tmpl");
-const tmpl_main_android = @embedFile("templates/main.android.zig.tmpl");
-const tmpl_main_desktop = @embedFile("templates/main.desktop.zig.tmpl");
+const tmpl_build = @embedFile("templates/build.zig.tmpl");
+const tmpl_main = @embedFile("templates/main.zig.tmpl");
 const tmpl_manifest = @embedFile("templates/AndroidManifest.xml.tmpl");
+const tmpl_plist = @embedFile("templates/Info.plist.tmpl");
 
 pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
-    std.debug.assert(cfg.desktop or cfg.android);
+    std.debug.assert(cfg.desktop or cfg.android or cfg.ios);
     std.debug.assert(cfg.name.len > 0); // the name seeds the ident and the title
     std.debug.assert(cfg.out.len > 0); // the out dir prefixes every written path
     const ident = try create.ident(ctx, cfg.name);
@@ -38,6 +36,7 @@ pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
     try cwd.createDirPath(ctx.io, cfg.out);
     try cwd.createDirPath(ctx.io, try join(ctx, cfg.out, "src"));
     if (cfg.android) try cwd.createDirPath(ctx.io, try join(ctx, cfg.out, "android"));
+    if (cfg.ios) try cwd.createDirPath(ctx.io, try join(ctx, cfg.out, "ios"));
 
     const subs = [_]Sub{
         .{ .key = "ident", .val = ident },
@@ -45,24 +44,23 @@ pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
         .{ .key = "package", .val = cfg.package },
         .{ .key = "fingerprint", .val = try fingerprint(ctx, ident, cfg.package) },
         .{ .key = "dep", .val = try dep_str(ctx) },
-        .{ .key = "android_paths", .val = if (cfg.android) "\n        \"android\"," else "" },
+        .{ .key = "platform_paths", .val = try platform_paths(ctx, cfg) },
+        .{ .key = "desktop_block", .val = try desktop_block(ctx, cfg, ident) },
+        .{ .key = "android_block", .val = try android_block(ctx, cfg, ident) },
+        .{ .key = "ios_block", .val = try ios_block(ctx, cfg, ident) },
     };
-
-    const build_tmpl = if (cfg.desktop and cfg.android)
-        tmpl_build_both
-    else if (cfg.android)
-        tmpl_build_android
-    else
-        tmpl_build_desktop;
-    const main_tmpl = if (cfg.android) tmpl_main_android else tmpl_main_desktop;
 
     var made: u32 = 0;
     try write(ctx, cfg, "build.zig.zon", try render(ctx, tmpl_zon, &subs), &made);
-    try write(ctx, cfg, "build.zig", try render(ctx, build_tmpl, &subs), &made);
-    try write(ctx, cfg, "src/main.zig", try render(ctx, main_tmpl, &subs), &made);
+    try write(ctx, cfg, "build.zig", try render(ctx, tmpl_build, &subs), &made);
+    try write(ctx, cfg, "src/main.zig", try render(ctx, tmpl_main, &subs), &made);
     if (cfg.android) {
         const m = try render(ctx, tmpl_manifest, &subs);
         try write(ctx, cfg, "android/AndroidManifest.xml", m, &made);
+    }
+    if (cfg.ios) {
+        const p = try render(ctx, tmpl_plist, &subs);
+        try write(ctx, cfg, "ios/Info.plist", p, &made);
     }
 
     try ctx.out.print("\n", .{});
@@ -74,14 +72,54 @@ pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
         return;
     }
     try ctx.out.print("done. next:\n  cd {s}\n", .{cfg.out});
-    if (cfg.desktop) {
-        const step = if (cfg.android) "desktop" else "run";
-        try ctx.out.print("  zig build {s}\n", .{step});
-    }
+    if (cfg.desktop) try ctx.out.print("  zig build run -- desktop\n", .{});
     if (cfg.android) try ctx.out.print(
-        "  zig build run   # install + launch the APK (see `zigui doctor`)\n",
+        "  zig build run -- android   # needs the Android SDK (see `zigui doctor`)\n",
         .{},
     );
+    if (cfg.ios) try ctx.out.print(
+        "  zig build run -- ios   # needs Xcode + a booted simulator (see `zigui doctor`)\n",
+        .{},
+    );
+}
+
+// A `.<target> = .{...}` field for the app() call, or "" when that target is off. The leading
+// newline puts each on its own line under .source.
+fn desktop_block(ctx: cli.Ctx, cfg: create.Config, ident: []const u8) ![]const u8 {
+    if (!cfg.desktop) return "";
+    return std.fmt.allocPrint(ctx.gpa, "\n        .desktop = .{{ .name = \"{s}\" }},", .{ident});
+}
+
+fn android_block(ctx: cli.Ctx, cfg: create.Config, ident: []const u8) ![]const u8 {
+    if (!cfg.android) return "";
+    return std.fmt.allocPrint(ctx.gpa,
+        \\
+        \\        .android = .{{
+        \\            .name = "{s}",
+        \\            .manifest = b.path("android/AndroidManifest.xml"),
+        \\            .package_name = "{s}",
+        \\        }},
+    , .{ ident, cfg.package });
+}
+
+fn ios_block(ctx: cli.Ctx, cfg: create.Config, ident: []const u8) ![]const u8 {
+    if (!cfg.ios) return "";
+    return std.fmt.allocPrint(ctx.gpa,
+        \\
+        \\        .ios = .{{
+        \\            .name = "{s}",
+        \\            .info_plist = b.path("ios/Info.plist"),
+        \\            .bundle_id = "{s}",
+        \\        }},
+    , .{ ident, cfg.package });
+}
+
+// The platform dirs added to build.zig.zon's .paths.
+fn platform_paths(ctx: cli.Ctx, cfg: create.Config) ![]const u8 {
+    return std.fmt.allocPrint(ctx.gpa, "{s}{s}", .{
+        if (cfg.android) "\n        \"android\"," else "",
+        if (cfg.ios) "\n        \"ios\"," else "",
+    });
 }
 
 const Sub = struct { key: []const u8, val: []const u8 };
