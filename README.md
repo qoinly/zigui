@@ -9,8 +9,8 @@
 ## Requirements
 
 - Zig 0.16.0
-- macOS (Metal), Windows (Direct3D 11), Linux (Vulkan; Wayland or X11), or
-  Android (Vulkan; min API 26)
+- macOS (Metal), Windows (Direct3D 11), Linux (Vulkan; Wayland or X11),
+  Android (Vulkan; min API 26), or iOS (Metal; min 15.0, Simulator)
 
 ## Install
 
@@ -35,27 +35,30 @@ exe.root_module.addImport("zigui", zigui.module("zigui"));
 const zigui = @import("zigui");
 ```
 
-Or scaffold a fresh project (desktop, android, or both) with the CLI - it writes the
-build files and a starter `main.zig` for you:
+Or scaffold a fresh project (desktop, android, ios, or a mix) with the CLI - it writes
+the build files and a starter `main.zig` for you:
 
 ```sh
-zig build cli                          # builds zig-out/bin/zigui
-zigui create myapp --target desktop
+zig build cli                                  # builds zig-out/bin/zigui
+zigui create myapp --target desktop,ios
 ```
 
 See [docs/cli.md](docs/cli.md).
 
-For Android, the same module builds into a signed APK through the `zigui.androidApk`
-build helper - the app writes no Java (zigui ships its own activity and services
-under `io.qoinly.zigui`). See [docs/android.md](docs/android.md) for the toolchain
-setup and the build wiring.
+A consumer `build.zig` declares its targets with one `zigui.app` call; the engine wires
+a build step per platform (`zig build desktop|android|ios`) and one run dispatcher
+(`zig build run -- <platform> [device]`). Android packages a signed APK (the app writes
+no Java - zigui ships its own activity under `io.qoinly.zigui`); iOS assembles a `.app`
+for the Simulator. See [docs/android.md](docs/android.md) and [docs/ios.md](docs/ios.md)
+for each toolchain.
 
 ## Docs
 
 The API docs live in [docs/](docs/README.md) - app & window, layout, theming, the
 kit, rendering, plus external frames, input capture, and system integration
-(clipboard, fullscreen, displays). [docs/android.md](docs/android.md) covers the
-Android backend, and [docs/cli.md](docs/cli.md) the project-scaffolding CLI.
+(clipboard, fullscreen, displays). [docs/android.md](docs/android.md) and
+[docs/ios.md](docs/ios.md) cover the mobile backends, and [docs/cli.md](docs/cli.md)
+the project-scaffolding CLI.
 
 ## Build from source
 
@@ -66,8 +69,9 @@ zig build test   # run the tests
 cd examples/showcase && zig build run   # the demo app
 ```
 
-The desktop demo doubles as the visual reference. `examples/android-app` is the
-Android counterpart - `zig build` produces an APK (see [docs/android.md](docs/android.md)).
+The desktop demo doubles as the visual reference. `examples/android-app` and
+`examples/ios-app` are the mobile counterparts - `zig build android` / `zig build ios`
+build them (see [docs/android.md](docs/android.md), [docs/ios.md](docs/ios.md)).
 
 ## Components
 
@@ -98,6 +102,7 @@ Everything returns `*Node` and nests. Full APIs in [docs/kit](docs/kit/overview.
 | Windows | works | Direct3D 11 |
 | Linux | works | Vulkan (Wayland + X11) |
 | Android | works | Vulkan (NativeActivity) |
+| iOS | works | Metal (Simulator) |
 
 What works:
 
@@ -131,14 +136,23 @@ What works:
   SMS) reaches the platform through a shipped Java shell - the app writes no Java.
   Plus off-UI-thread background work and headless background events (a Zig handler
   runs on a notification or a manifest broadcast even when the app is closed).
+- iOS: the same kit renders through Metal with touch input and a native-API surface
+  (notifications + toasts, clipboard, haptics, battery and connectivity, status-bar
+  style, immersive mode, orientation lock, brightness, links and share, file picker,
+  Face ID, runtime permissions, SMS compose), reached through the shared Objective-C
+  runtime - no Swift, no `.m`. The window is scene-managed, so a rotation reflows the
+  surface and the safe area.
 
 ## Limitations
 
 - On Windows, native file dialogs and the detached-panel helpers aren't there yet.
 - On Linux, fractional display scaling falls back to the nearest integer factor.
-- On Android there is one fullscreen surface: no extra windows, no custom chrome,
-  and `app.run` hands the loop to the framework rather than blocking, so the app
-  state must outlive `main`. See [docs/android.md](docs/android.md).
+- On Android and iOS there is one fullscreen surface: no extra windows, no custom
+  chrome, and `app.run` hands the loop to the framework (it never returns), so the
+  app state must outlive `main`. See [docs/android.md](docs/android.md),
+  [docs/ios.md](docs/ios.md).
+- iOS ships for the Simulator only; a real-device build (code signing + `devicectl`)
+  is not wired up yet.
 - No accessibility. Nothing wires up VoiceOver or NSAccessibility roles and
   labels.
 - Text is BMP only. No IME composition (so no CJK input), no emoji or colour

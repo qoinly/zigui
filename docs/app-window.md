@@ -39,8 +39,8 @@ fn render(f: *zigui.Frame, state: *State) *zigui.Node { ... }
 
 Blocks until the window closes. The view fn returns the UI tree for this frame;
 the same `state` pointer you passed to `run` comes back on every call and is
-what callbacks receive. (On Android `run` does not block - the framework owns the
-loop - so the state must outlive `main`; see [On Android](#on-android).)
+what callbacks receive. (On Android and iOS `run` does not block - the framework owns
+the loop - so the state must outlive `main`; see [On Android](#on-android).)
 
 ### Views
 
@@ -152,8 +152,9 @@ zigui.row(.{ .pad = .{ .px = 24 } }, kids)
 
 ## Multiple windows
 
-Desktop only - Android is a single NativeActivity surface, so `open_window` and the
-per-window helpers below do not apply there (see [On Android](#on-android)).
+Desktop only - Android and iOS are single-surface, so `open_window` and the
+per-window helpers below do not apply there (see [On Android](#on-android), [On
+iOS](#on-ios)).
 
 `run` opens the first window and blocks. To open more, call `open_window` while
 `run` is going (i.e. from a click). Each extra window has its own state and views;
@@ -216,6 +217,13 @@ loop-side facts:
   `titlebar` view is unused. `body`, `overlay`, and `hud` work as on desktop, and
   `f.body` already accounts for the system bar insets.
 
+## On iOS
+
+iOS behaves like [On Android](#on-android) - `run` does not return (`UIApplicationMain`
+owns the loop), one fullscreen surface, no window chrome - so the same module-scope-state
+rule applies. The window is scene-managed, so a rotation reflows the surface and `f.body`'s
+safe-area insets follow (in landscape they move to the side). See [docs/ios.md](ios.md).
+
 ## deinit
 
 ```zig
@@ -223,4 +231,4 @@ defer app.deinit();
 ```
 
 Stops the display link, closes the window, and frees what `App.init` allocated.
-On Android this is a no-op parity shim (the framework owns teardown).
+On Android and iOS this is a no-op parity shim (the framework owns teardown).

@@ -4,7 +4,7 @@ zigui draws native UI on the GPU. You build a tree of nodes and return it from a
 view function; zigui lays it out and draws it. The tree is rebuilt every frame, so
 the UI is always a function of your state.
 
-macOS, Windows, Linux, and Android. Zig 0.16.0.
+macOS, Windows, Linux, Android, and iOS. Zig 0.16.0.
 
 ## A window
 
@@ -76,4 +76,5 @@ Variants exist for callbacks that carry an argument: `zigui.on_id` (an id),
 - [Input capture](input.md) - grab raw mouse + keyboard
 - [System integration](system.md) - clipboard, fullscreen, displays
 - [Android](android.md) - the Vulkan backend, the APK build, the native-API surface
-- [CLI](cli.md) - scaffold a project, check the Android toolchain
+- [iOS](ios.md) - the Metal backend, the Simulator build, the native-API surface
+- [CLI](cli.md) - scaffold a project, check the mobile toolchains

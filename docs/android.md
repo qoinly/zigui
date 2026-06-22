@@ -7,7 +7,7 @@ through a native-API surface.
 
 The app writes **no Java**. zigui ships its own activity and services under the
 `io.qoinly.zigui` package and the JNI exports they call; you supply Zig, a
-manifest, and one call to the `zigui.androidApk` build helper.
+manifest, and one `zigui.app` call (or the low-level `zigui.androidApk`).
 
 Targets `minSdk 26` (the Vulkan + `AHardwareBuffer` floor) through `targetSdk 36`,
 on both `arm64-v8a` and `x86_64` device ABIs.
@@ -30,21 +30,22 @@ installed. The APK is signed with the Android debug key.
 
 ## Building an APK
 
-A consumer build.zig supplies only Zig and a manifest:
+A consumer build.zig declares the target with one `zigui.app` call (this is what the
+CLI scaffolds); it supplies only Zig and a manifest:
 
 ```zig
 const std = @import("std");
 const zigui = @import("zigui");
 
 pub fn build(b: *std.Build) void {
-    const optimize = b.standardOptimizeOption(.{});
-    zigui.androidApk(b, .{
-        .name = "my_app",                    // the lib name; matches android.app.lib_name
+    zigui.app(b, .{
         .source = b.path("src/main.zig"),    // your Zig root, imports "zigui"
-        .manifest = b.path("android/AndroidManifest.xml"),
-        .package_name = "com.example.myapp", // applicationId, for `zig build run`
-        .optimize = optimize,
-        .out_name = "my-app.apk",
+        .android = .{
+            .name = "my_app",                // the lib name; matches android.app.lib_name
+            .manifest = b.path("android/AndroidManifest.xml"),
+            .package_name = "com.example.myapp",
+            .out_name = "my-app.apk",
+        },
     });
 }
 ```
@@ -53,13 +54,17 @@ pub fn build(b: *std.Build) void {
 `android/`, one folder per platform.
 
 ```sh
-zig build        # writes the signed APK to zig-out/bin
-zig build run    # installs and launches it on a connected device / emulator (adb)
+zig build android                   # writes the signed APK to zig-out/bin
+zig build run -- android            # installs + launches on a connected device / emulator
+zig build run -- android <serial>   # ... on a specific one (adb devices)
 ```
 
-`androidApk` cross-compiles one `.so` per ABI, dexes zigui's Java shell, links the
-manifest with `aapt2`, packs the libs stored + page-aligned (so the loader mmaps
-them), aligns, and signs.
+`androidApk` (which `app` calls) cross-compiles one `.so` per ABI, dexes zigui's Java
+shell, links the manifest with `aapt2`, packs the libs stored + page-aligned (so the
+loader mmaps them), aligns, and signs. Call `zigui.androidApk` directly for the full
+option set below (NDK / build-tools / API versions); `app`'s `.android` covers the
+common fields (`name`, `manifest`, `package_name`, `out_name`, `activity`, the
+`include_*` opt-ins).
 
 ### Options
 

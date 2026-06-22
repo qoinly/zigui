@@ -3,11 +3,11 @@
 Clipboard, fullscreen, and display enumeration. Call these from a view fn - they
 act on the window drawing the current frame.
 
-> Desktop backends. Android exposes its system integration through a separate
+> Desktop backends. Android and iOS expose their system integration through a separate
 > native-API surface, `zigui.napi.*` (clipboard, notifications, haptics, battery,
 > connectivity, brightness, orientation, links, file picker, biometric, and more),
-> documented in [docs/android.md](android.md). `set_fullscreen` maps to Android
-> immersive mode (hiding the system bars).
+> documented in [docs/android.md](android.md) and [docs/ios.md](ios.md).
+> `set_fullscreen` maps to mobile immersive mode (hiding the system bars).
 
 ## Clipboard
 

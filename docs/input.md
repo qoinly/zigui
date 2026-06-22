@@ -8,9 +8,10 @@ mouselook.
 You get the raw events; what you send and how is up to you. No special permission
 is needed. See `examples/input_demo.zig`.
 
-> This raw-capture path is for desktop pointer + keyboard. On Android, touch drives
-> the widgets directly (taps, drags, scroll) and the soft keyboard feeds text
-> through the platform editor - there is no `grab`. See [docs/android.md](android.md).
+> This raw-capture path is for desktop pointer + keyboard. On Android and iOS, touch
+> drives the widgets directly (taps, drags, scroll) and the soft keyboard feeds text
+> through the platform editor - there is no `grab`. See [docs/android.md](android.md),
+> [docs/ios.md](ios.md).
 
 ## Grab
 
