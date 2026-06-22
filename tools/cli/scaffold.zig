@@ -6,20 +6,6 @@ const std = @import("std");
 const cli = @import("main.zig");
 const create = @import("create.zig");
 
-// The zigui dependency written into a generated app's build.zig.zon. In zigui's own
-// development this is a sibling path so a scaffolded app builds against the working
-// tree; at release, swap it to the tagged tarball:
-//   const zigui_dep: Dep = .{ .pinned = .{
-//       .url = "https://github.com/qoinly/zigui/archive/refs/tags/v0.3.1.tar.gz",
-//       .hash = "<run `zig fetch <url>` to get this>",
-//   } };
-const zigui_dep: Dep = .{ .path = "../zigui" };
-
-const Dep = union(enum) {
-    path: []const u8,
-    pinned: struct { url: []const u8, hash: []const u8 },
-};
-
 const tmpl_zon = @embedFile("templates/build.zig.zon.tmpl");
 const tmpl_build = @embedFile("templates/build.zig.tmpl");
 const tmpl_main = @embedFile("templates/main.zig.tmpl");
@@ -43,7 +29,7 @@ pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
         .{ .key = "display", .val = cfg.name },
         .{ .key = "package", .val = cfg.package },
         .{ .key = "fingerprint", .val = try fingerprint(ctx, ident, cfg.package) },
-        .{ .key = "dep", .val = try dep_str(ctx) },
+        .{ .key = "deps", .val = deps_block(cfg) },
         .{ .key = "platform_paths", .val = try platform_paths(ctx, cfg) },
         .{ .key = "desktop_block", .val = try desktop_block(ctx, cfg, ident) },
         .{ .key = "android_block", .val = try android_block(ctx, cfg, ident) },
@@ -71,6 +57,7 @@ pub fn run(ctx: cli.Ctx, cfg: create.Config) !void {
         );
         return;
     }
+    if (!cfg.local) try fetch_zigui(ctx, cfg);
     try ctx.out.print("done. next:\n  cd {s}\n", .{cfg.out});
     if (cfg.desktop) try ctx.out.print("  zig build run -- desktop\n", .{});
     if (cfg.android) try ctx.out.print(
@@ -184,13 +171,41 @@ fn join(ctx: cli.Ctx, dir: []const u8, rel: []const u8) ![]const u8 {
     return std.fmt.allocPrint(ctx.gpa, "{s}/{s}", .{ dir, rel });
 }
 
-fn dep_str(ctx: cli.Ctx) ![]const u8 {
-    return switch (zigui_dep) {
-        .path => |p| std.fmt.allocPrint(ctx.gpa, ".{{ .path = \"{s}\" }}", .{p}),
-        .pinned => |v| std.fmt.allocPrint(
-            ctx.gpa,
-            ".{{\n            .url = \"{s}\",\n            .hash = \"{s}\",\n        }}",
-            .{ v.url, v.hash },
-        ),
-    };
+// The .dependencies value for the generated build.zig.zon. Default leaves it empty so
+// `create` can pin zigui with `zig fetch --save` (the tag's hash, computed on the user's
+// machine). With --local it points at a sibling working tree, for developing zigui itself.
+fn deps_block(cfg: create.Config) []const u8 {
+    return if (cfg.local)
+        \\.{
+        \\        .zigui = .{ .path = "../zigui" },
+        \\    }
+    else
+        ".{}";
+}
+
+// Pins the scaffolded app to THIS CLI's zigui release: runs `zig fetch --save` in the new
+// project so its build.zig.zon gets the tag's url + hash (Zig computes the hash locally, so
+// no hash is baked into the CLI). Non-fatal on failure (offline, no zig, tag missing): the
+// dependency stays empty and we print the command to finish it by hand.
+fn fetch_zigui(ctx: cli.Ctx, cfg: create.Config) !void {
+    std.debug.assert(cfg.out.len > 0); // the project dir is the fetch cwd
+    const url = try std.fmt.allocPrint(
+        ctx.gpa,
+        "git+https://github.com/qoinly/zigui#v{s}",
+        .{cli.version},
+    );
+    try ctx.out.print("\n  pinning zigui {s}\n", .{url});
+    var child = std.process.spawn(ctx.io, .{
+        .argv = &.{ "zig", "fetch", "--save=zigui", url },
+        .cwd = .{ .path = cfg.out },
+    }) catch |e| return warn_fetch(ctx, url, @errorName(e));
+    switch (child.wait(ctx.io) catch |e| return warn_fetch(ctx, url, @errorName(e))) {
+        .exited => |code| if (code != 0) return warn_fetch(ctx, url, "zig fetch exited nonzero"),
+        else => return warn_fetch(ctx, url, "zig fetch did not exit cleanly"),
+    }
+}
+
+fn warn_fetch(ctx: cli.Ctx, url: []const u8, why: []const u8) !void {
+    try ctx.err.print("  ! could not pin zigui ({s}). run this in the project:\n", .{why});
+    try ctx.err.print("      zig fetch --save=zigui {s}\n", .{url});
 }
