@@ -106,6 +106,8 @@ pub const App = struct {
     awake: bool = false,
     bright_slider: zigui.kit.slider.SliderState = .{},
     bright_vals: [1]f32 = .{0.5},
+    immersive_on: bool = false,
+    status_dark: bool = false,
     bio: Bio = .untried,
     // Kit-tab widget state.
     kit_toggle: bool = true,
@@ -276,6 +278,12 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             zigui.text("Brightness", .{ .size = 14, .color = muted }),
             zigui.slider(&app.bright_vals, &app.bright_slider, .{
                 .on_change = zigui.on_at(App, set_bright),
+            }),
+            zigui.toggle(app.immersive_on, "Immersive", .{
+                .on_change = zigui.on(App, toggle_immersive),
+            }),
+            zigui.toggle(app.status_dark, "Dark status bar", .{
+                .on_change = zigui.on(App, toggle_status),
             }),
             section("SECURITY"),
             zigui.button("Authenticate", .{ .on_click = zigui.on(App, do_auth) }),
@@ -448,6 +456,14 @@ fn set_awake(app: *App) void {
 fn set_bright(app: *App, i: usize, v: f32) void {
     app.bright_vals[i] = v;
     zigui.napi.display.brightness(v);
+}
+fn toggle_immersive(app: *App) void {
+    app.immersive_on = !app.immersive_on;
+    zigui.napi.display.immersive(app.immersive_on);
+}
+fn toggle_status(app: *App) void {
+    app.status_dark = !app.status_dark;
+    zigui.napi.display.status_bar_icons(if (app.status_dark) .dark else .light);
 }
 fn do_auth(app: *App) void {
     _ = app;
