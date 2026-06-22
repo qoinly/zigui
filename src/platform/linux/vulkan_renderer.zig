@@ -1010,17 +1010,22 @@ pub const Renderer = struct {
         if (self.dfns.vkCreateDescriptorSetLayout(self.device.?, &dsl_info, null, &self.quad_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
         // Storage buffers: quad + text + the four PrimPipe classes. Samplers:
-        // the mono and color atlases, the two blur sources, two (luma +
-        // chroma) per frame set, plus one per ycbcr (dmabuf) frame set.
+        // the mono and color atlases, the two blur sources, two (luma + chroma)
+        // per frame set, plus the ycbcr (dmabuf) frame sets. The ycbcr binding is
+        // an immutable-sampler combined-image-sampler over a multi-planar (NV12)
+        // format, so on strict drivers it draws combinedImageSamplerDescriptorCount
+        // samplers - up to one per plane (2 for NV12) - not one; budget two per
+        // ycbcr set so the dmabuf path allocates on NVIDIA, not just Mesa (which
+        // reports one). Sets count one each; the surplus is headroom.
         const pool_sizes = [_]vk.DescriptorPoolSize{
             .{ .descriptor_type = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptor_count = 6 },
             .{
                 .descriptor_type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptor_count = 4 + 3 * MAX_FRAMES,
+                .descriptor_count = 4 + 4 * MAX_FRAMES,
             },
         };
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .max_sets = 8 + 2 * MAX_FRAMES,
+            .max_sets = 8 + 4 * MAX_FRAMES,
             .pool_size_count = pool_sizes.len,
             .pool_sizes = &pool_sizes,
         };

@@ -176,6 +176,16 @@ pub fn input_events() []const InputEvent {
     return frame_ctx.get().paint.raw_inputs();
 }
 
+// Non-grab keyboard: the key presses this frame for app shortcuts, with the cursor
+// free (unlike input_events(), which only fills under grab()). Named key_presses, not
+// keys, so it does not shadow the kbd(keys:...) parameter at a call site.
+pub const KeyEvent = custom_shell.KeyEvent;
+pub const KeyCode = custom_shell.KeyCode;
+pub const KeyMods = custom_shell.KeyMods;
+pub fn key_presses() []const KeyEvent {
+    return frame_ctx.get().paint.keys();
+}
+
 // Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
 // window; display_bounds(i) gives monitor i's frame in points so the app can size a
 // stream or place a window per screen.
