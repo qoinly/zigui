@@ -44,5 +44,7 @@
     <string>Demo: authenticate with Face ID.</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Demo: show the photos permission prompt.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Demo: show the location permission prompt.</string>
 </dict>
 </plist>

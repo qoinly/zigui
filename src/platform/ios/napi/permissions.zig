@@ -9,13 +9,14 @@ const util = @import("util.zig");
 const cs = @import("../custom_shell.zig");
 const Id = objc.Id;
 
-const Kind = enum { camera, microphone, photos, notifications, unknown };
+const Kind = enum { camera, microphone, photos, notifications, location, unknown };
 
 fn kind_of(name: []const u8) Kind {
     if (std.mem.eql(u8, name, "camera")) return .camera;
     if (std.mem.eql(u8, name, "microphone")) return .microphone;
     if (std.mem.eql(u8, name, "photos")) return .photos;
     if (std.mem.eql(u8, name, "notifications")) return .notifications;
+    if (std.mem.eql(u8, name, "location")) return .location;
     return .unknown;
 }
 
@@ -135,6 +136,52 @@ fn notif_request() void {
     objc.msg_send(void, c, sel, .{ opts, &g_nr_block });
 }
 
+// --- location (CLLocationManager) ---
+
+var g_loc_mgr: ?Id = null;
+var g_loc_delegate: ?Id = null;
+
+// locationManagerDidChangeAuthorization: (iOS 14+) fires after the prompt; just wake so the
+// app re-polls the synchronous status.
+fn loc_changed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
+    cs.request_redraw();
+}
+
+fn loc_manager() ?Id {
+    if (g_loc_mgr) |m| return m;
+    const cls = objc.get_class("CLLocationManager") orelse return null;
+    const m = objc.msg_send(Id, objc.alloc(cls), "init", .{});
+    const NSObject = objc.get_class("NSObject") orelse return null;
+    const dcls = objc.objc_allocateClassPair(NSObject, "ZiguiLocDelegate", 0) orelse return null;
+    const sel = "locationManagerDidChangeAuthorization:";
+    _ = objc.class_addMethod(dcls, objc.sel(sel), @ptrCast(&loc_changed), "v@:@");
+    objc.objc_registerClassPair(dcls);
+    const d = objc.msg_send(Id, objc.alloc(dcls), "init", .{});
+    g_loc_delegate = d; // the manager's delegate is weak, keep it alive
+    objc.msg_send(void, m, "setDelegate:", .{d});
+    g_loc_mgr = m;
+    return m;
+}
+
+// CLAuthorizationStatus 0 notDetermined / 1 restricted / 2 denied / 3 always / 4 whenInUse.
+fn map_cl(s: objc.NSInteger) u8 {
+    return switch (s) {
+        3, 4 => 0,
+        0 => 1,
+        else => 3,
+    };
+}
+
+fn loc_status() u8 {
+    const m = loc_manager() orelse return 1;
+    return map_cl(objc.msg_send(objc.NSInteger, m, "authorizationStatus", .{}));
+}
+
+fn loc_request() void {
+    const m = loc_manager() orelse return;
+    objc.msg_send(void, m, "requestWhenInUseAuthorization", .{});
+}
+
 // --- facade ---
 
 pub fn status_code(name: []const u8) u8 {
@@ -142,6 +189,7 @@ pub fn status_code(name: []const u8) u8 {
         .camera, .microphone => |k| av_status(k),
         .photos => photo_status(),
         .notifications => notif_status(),
+        .location => loc_status(),
         .unknown => 1,
     };
 }
@@ -155,6 +203,7 @@ pub fn request(name: []const u8) void {
         .camera, .microphone => |k| av_request(k),
         .photos => photo_request(),
         .notifications => notif_request(),
+        .location => loc_request(),
         .unknown => {},
     }
 }
