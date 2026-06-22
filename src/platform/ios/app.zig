@@ -106,20 +106,63 @@ fn ensure_delegate_class() void {
         @ptrCast(&did_finish_launching),
         "B@:@@",
     );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("application:configurationForConnectingSceneSession:options:"),
+        @ptrCast(&config_for_scene),
+        "@@:@@@",
+    );
     objc.objc_registerClassPair(cls);
     g_delegate_class = cls;
 }
 
-// UIKit calls this once on launch: build the window and view, then notify the
-// registered surface delegate that the surface is ready.
+// UIKit calls this on launch. The window is built when the scene connects (scenes own
+// sizing + rotation), so this only acknowledges launch.
 fn did_finish_launching(_: Id, _: objc.Sel, _: Id, _: Id) callconv(.c) bool {
-    build_surface();
     return true;
 }
 
-fn build_surface() void {
-    std.debug.assert(!g_window.in_use); // launch fires once
-    if (!make_window()) return;
+var g_scene_delegate_class: ?objc.Class = null;
+
+// The app delegate hands UIKit this configuration so the connecting scene uses our scene
+// delegate (a runtime class). A scene-owned window resizes on rotation, so the surface and
+// safe-area insets follow the interface orientation.
+fn config_for_scene(_: Id, _: objc.Sel, _: Id, session: Id, _: Id) callconv(.c) Id {
+    const Cfg = objc.get_class("UISceneConfiguration").?;
+    const role = objc.msg_send(Id, session, "role", .{});
+    const sel = "configurationWithName:sessionRole:";
+    const cfg = objc.msg_send(Id, Cfg, sel, .{ ns_string("Default Configuration"), role });
+    if (ensure_scene_delegate_class()) |scls| {
+        objc.msg_send(void, cfg, "setDelegateClass:", .{scls});
+    }
+    return cfg;
+}
+
+fn ensure_scene_delegate_class() ?objc.Class {
+    if (g_scene_delegate_class) |c| return c;
+    const NSObject = objc.get_class("NSObject") orelse return null;
+    const cls = objc.objc_allocateClassPair(NSObject, "ZiguiSceneDelegate", 0) orelse return null;
+    const sel = objc.sel("scene:willConnectToSession:options:");
+    _ = objc.class_addMethod(cls, sel, @ptrCast(&scene_will_connect), "v@:@@@");
+    // UIKit asserts the scene delegate conforms to UISceneDelegate (UIWindowSceneDelegate
+    // incorporates it); declare both on the runtime class.
+    if (objc.objc_getProtocol("UISceneDelegate")) |p| _ = objc.class_addProtocol(cls, p);
+    if (objc.objc_getProtocol("UIWindowSceneDelegate")) |p| _ = objc.class_addProtocol(cls, p);
+    objc.objc_registerClassPair(cls);
+    g_scene_delegate_class = cls;
+    return cls;
+}
+
+// UIKit calls this when the window scene attaches: build the window into that scene, then
+// notify the registered surface delegate that the surface is ready.
+fn scene_will_connect(_: Id, _: objc.Sel, scene: Id, _: Id, _: Id) callconv(.c) void {
+    build_surface(scene);
+}
+
+fn build_surface(scene: Id) void {
+    std.debug.assert(@intFromPtr(scene) != 0); // UIKit hands a live window scene
+    std.debug.assert(!g_window.in_use); // the scene connects once
+    if (!make_window(scene)) return;
     std.debug.assert(g_window.window != null);
     std.debug.assert(g_window.layer != null);
     g_window.in_use = true;
@@ -129,7 +172,7 @@ fn build_surface() void {
     if (g_delegate) |d| d.on_ready(d.ctx, &g_window);
 }
 
-fn make_window() bool {
+fn make_window(scene: Id) bool {
     const UIScreen = objc.get_class("UIScreen") orelse return false;
     const screen = objc.msg_send(Id, UIScreen, "mainScreen", .{});
     const bounds = objc.msg_send(native.CGRect, screen, "bounds", .{});
@@ -138,7 +181,7 @@ fn make_window() bool {
 
     const vc = make_root_controller(bounds, scale) orelse return false;
     const UIWindow = objc.get_class("UIWindow") orelse return false;
-    const window = objc.msg_send(Id, objc.alloc(UIWindow), "initWithFrame:", .{bounds});
+    const window = objc.msg_send(Id, objc.alloc(UIWindow), "initWithWindowScene:", .{scene});
     objc.msg_send(void, window, "setRootViewController:", .{vc});
     objc.msg_send(void, window, "makeKeyAndVisible", .{});
 
@@ -166,6 +209,7 @@ fn make_root_controller(bounds: native.CGRect, scale: objc.CGFloat) ?Id {
 // napi (display.*) writes the state; the controller's overrides below read it.
 var g_status_dark: bool = false;
 var g_immersive: bool = false;
+var g_orientation: objc.NSUInteger = 26; // UIInterfaceOrientationMaskAllButUpsideDown
 var g_root_vc: ?Id = null;
 var g_root_vc_class: ?objc.Class = null;
 
@@ -176,6 +220,9 @@ fn vc_status_style(_: Id, _: objc.Sel) callconv(.c) objc.NSInteger {
 fn vc_status_hidden(_: Id, _: objc.Sel) callconv(.c) objc.BOOL {
     return if (g_immersive) objc.YES else objc.NO;
 }
+fn vc_orientations(_: Id, _: objc.Sel) callconv(.c) objc.NSUInteger {
+    return g_orientation;
+}
 
 fn ensure_root_vc_class() ?objc.Class {
     if (g_root_vc_class) |c| return c;
@@ -184,6 +231,7 @@ fn ensure_root_vc_class() ?objc.Class {
     const cls = objc.objc_allocateClassPair(UIViewController, name, 0) orelse return null;
     add_chrome_method(cls, "preferredStatusBarStyle", @ptrCast(&vc_status_style), "q@:");
     add_chrome_method(cls, "prefersStatusBarHidden", @ptrCast(&vc_status_hidden), "B@:");
+    add_chrome_method(cls, "supportedInterfaceOrientations", @ptrCast(&vc_orientations), "Q@:");
     objc.objc_registerClassPair(cls);
     g_root_vc_class = cls;
     return cls;
@@ -210,6 +258,39 @@ pub fn set_immersive(on: bool) void {
 fn status_appearance_update() void {
     const vc = g_root_vc orelse return;
     objc.msg_send(void, vc, "setNeedsStatusBarAppearanceUpdate", .{});
+}
+
+var g_geom_desc: objc.BlockDescriptor = .{ .size = @sizeOf(objc.Block) };
+var g_geom_block: objc.Block = undefined;
+
+// requestGeometryUpdate requires an error handler; a rejected update (the orientation is
+// outside the supported set) leaves the app in its current orientation.
+fn geometry_error(_: *objc.Block, _: Id) callconv(.c) void {}
+
+// Set the allowed orientation mask, then ask the window scene to adopt it now (the override
+// alone only constrains future rotations).
+pub fn set_orientation(mask: objc.NSUInteger) void {
+    g_orientation = mask;
+    if (g_root_vc) |vc| {
+        const sel = objc.sel("setNeedsUpdateOfSupportedInterfaceOrientations");
+        if (objc.msg_send(objc.BOOL, vc, "respondsToSelector:", .{sel}) != 0) {
+            objc.msg_send(void, vc, "setNeedsUpdateOfSupportedInterfaceOrientations", .{});
+        }
+    }
+    force_geometry(mask);
+}
+
+fn force_geometry(mask: objc.NSUInteger) void {
+    const window = g_window.window orelse return;
+    const scene = objc.msg_send(?Id, window, "windowScene", .{}) orelse return;
+    const PrefsCls = objc.get_class("UIWindowSceneGeometryPreferencesIOS") orelse return;
+    const init_sel = "initWithInterfaceOrientations:";
+    const prefs = objc.msg_send(Id, objc.alloc(PrefsCls), init_sel, .{mask});
+    std.debug.assert(@intFromPtr(prefs) != 0);
+    _ = objc.msg_send(Id, prefs, "autorelease", .{});
+    g_geom_block = objc.global_block(@ptrCast(&geometry_error), &g_geom_desc);
+    const sel = "requestGeometryUpdateWithPreferences:errorHandler:";
+    objc.msg_send(void, scene, sel, .{ prefs, &g_geom_block });
 }
 
 fn make_metal_view(bounds: native.CGRect, scale: objc.CGFloat) ?Id {

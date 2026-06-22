@@ -151,8 +151,21 @@ fn page(
     content: *Node,
 ) *Node {
     return zigui.col(.{}, &.{
-        zigui.scroll(list, .{ .height = f.size.height }, content),
+        zigui.scroll(list, .{ .height = f.size.height }, safe_h_inset(f, content)),
         zigui.top_bar(title, .{ .style = .large, .scroll = list }),
+    });
+}
+
+// Inset the body by the horizontal safe-area (the notch / sensor housing in landscape) so
+// content clears it; both insets are zero in portrait, so this returns content unchanged.
+fn safe_h_inset(f: *Frame, content: *Node) *Node {
+    const left = f.body.origin.x;
+    const right = f.size.width - (f.body.origin.x + f.body.size.width);
+    if (left <= 0 and right <= 0) return content;
+    return zigui.row(.{}, &.{
+        zigui.col(.{ .width = left }, &.{}),
+        zigui.col(.{ .grow = 1 }, &.{content}),
+        zigui.col(.{ .width = right }, &.{}),
     });
 }
 
@@ -284,6 +297,12 @@ fn native_page(f: *Frame, app: *App, safe_top: f32) *Node {
             }),
             zigui.toggle(app.status_dark, "Dark status bar", .{
                 .on_change = zigui.on(App, toggle_status),
+            }),
+            zigui.text("Orientation", .{ .size = 14, .color = muted }),
+            zigui.row(.{ .gap = .sm, .wrap = true }, &.{
+                zigui.button("Portrait", .{ .on_click = zigui.on(App, orient_portrait) }),
+                zigui.button("Landscape", .{ .on_click = zigui.on(App, orient_landscape) }),
+                zigui.button("Auto", .{ .on_click = zigui.on(App, orient_auto) }),
             }),
             section("SECURITY"),
             zigui.button("Authenticate", .{ .on_click = zigui.on(App, do_auth) }),
@@ -464,6 +483,18 @@ fn toggle_immersive(app: *App) void {
 fn toggle_status(app: *App) void {
     app.status_dark = !app.status_dark;
     zigui.napi.display.status_bar_icons(if (app.status_dark) .dark else .light);
+}
+fn orient_portrait(app: *App) void {
+    _ = app;
+    zigui.napi.display.orientation(.portrait);
+}
+fn orient_landscape(app: *App) void {
+    _ = app;
+    zigui.napi.display.orientation(.landscape);
+}
+fn orient_auto(app: *App) void {
+    _ = app;
+    zigui.napi.display.orientation(.auto);
 }
 fn do_auth(app: *App) void {
     _ = app;
