@@ -10,7 +10,7 @@ const create = @import("create.zig");
 // development this is a sibling path so a scaffolded app builds against the working
 // tree; at release, swap it to the tagged tarball:
 //   const zigui_dep: Dep = .{ .pinned = .{
-//       .url = "https://github.com/qoinly/zigui/archive/refs/tags/v0.2.0.tar.gz",
+//       .url = "https://github.com/qoinly/zigui/archive/refs/tags/v0.3.1.tar.gz",
 //       .hash = "<run `zig fetch <url>` to get this>",
 //   } };
 const zigui_dep: Dep = .{ .path = "../zigui" };
