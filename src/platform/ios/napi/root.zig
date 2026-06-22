@@ -9,3 +9,4 @@ pub const display = @import("display.zig");
 pub const biometric = @import("biometric.zig");
 pub const permissions = @import("permissions.zig");
 pub const notifications = @import("notifications.zig");
+pub const sms = @import("sms.zig");
