@@ -104,7 +104,7 @@ pub const DeviceContext = struct {
 // every Vulkan device guarantees, so frames need no per-draw buffer traffic.
 const FramePush = extern struct {
     viewport: [2]f32,
-    _pad0: [2]f32 = .{ 0, 0 },
+    rot: [2]f32 = .{ 1, 0 },
     bounds: [4]f32,
     clip_bounds: [4]f32,
     opacity_pad: [4]f32,
@@ -289,6 +289,9 @@ pub const Renderer = struct {
         [_]vk.Semaphore{vk.NULL_HANDLE} ** MAX_SWAPCHAIN_IMAGES,
     image_count: u32 = 0,
     extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+    // display/layout dims and the ndc divisor; equals extent unless a 90/270 rotation transposes the image.
+    logical_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+    transform: u32 = vk.SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
 
     render_pass: vk.RenderPass = vk.NULL_HANDLE,
     cmd_pool: vk.CommandPool = vk.NULL_HANDLE,
@@ -780,6 +783,21 @@ pub const Renderer = struct {
         };
     }
 
+    fn is_rotated(t: u32) bool {
+        return (t & (vk.SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+            vk.SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) != 0;
+    }
+
+    // (cos, sin) of the transform's own angle, applied about +Z to bring content upright.
+    fn scene_rot(t: u32) [2]f32 {
+        return switch (t) {
+            vk.SURFACE_TRANSFORM_ROTATE_90_BIT_KHR => .{ 0, 1 },
+            vk.SURFACE_TRANSFORM_ROTATE_180_BIT_KHR => .{ -1, 0 },
+            vk.SURFACE_TRANSFORM_ROTATE_270_BIT_KHR => .{ 0, -1 },
+            else => .{ 1, 0 },
+        };
+    }
+
     fn surface_extent(self: *Renderer, caps: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
         // 0xFFFFFFFF means the surface size is whatever the client picks; the
         // shell's configured size (scaled to buffer pixels) is the truth.
@@ -838,7 +856,15 @@ pub const Renderer = struct {
             &caps,
         );
         if (caps_rc != vk.SUCCESS) return error.SwapchainCreateFailed;
-        self.extent = self.surface_extent(caps);
+        self.transform = caps.current_transform;
+        const ce = self.surface_extent(caps);
+        self.logical_extent = ce;
+        // scanout is the native panel; a 90/270 rotation transposes it while layout stays logical.
+        self.extent = if (is_rotated(self.transform))
+            .{ .width = ce.height, .height = ce.width }
+        else
+            ce;
+        backend.publish_logical_extent(self.win, self.logical_extent);
 
         var image_count: u32 = caps.min_image_count + 1;
         if (caps.max_image_count > 0 and image_count > caps.max_image_count)
@@ -1071,7 +1097,7 @@ pub const Renderer = struct {
 
         const push_range = vk.PushConstantRange{
             .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
-            .size = 8, // vec2 viewport_size in points
+            .size = 16, // vec2 viewport_size + vec2 rot
         };
         const layout_info = vk.PipelineLayoutCreateInfo{
             .set_layout_count = 1,
@@ -1183,7 +1209,7 @@ pub const Renderer = struct {
 
         const push_range = vk.PushConstantRange{
             .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
-            .size = 8,
+            .size = 16, // vec2 viewport_size + vec2 rot
         };
         const layout_info = vk.PipelineLayoutCreateInfo{
             .set_layout_count = 1,
@@ -1453,7 +1479,7 @@ pub const Renderer = struct {
 
         const push_range = vk.PushConstantRange{
             .stage_flags = vk.SHADER_STAGE_VERTEX_BIT,
-            .size = 8, // vec2 viewport_size in points
+            .size = 16, // vec2 viewport_size + vec2 rot
         };
         const layout_info = vk.PipelineLayoutCreateInfo{
             .set_layout_count = 1,
@@ -1789,7 +1815,8 @@ pub const Renderer = struct {
     ) void {
         const device = self.device orelse return;
         const want = self.pixel_extent();
-        if (want.width != self.extent.width or want.height != self.extent.height) {
+        // want is logical; extent is native under rotation, so compare in logical space.
+        if (want.width != self.logical_extent.width or want.height != self.logical_extent.height) {
             self.recreate_swapchain() catch return;
             self.dirty = true;
         }
@@ -2092,9 +2119,16 @@ pub const Renderer = struct {
         std.debug.assert(self.applied_scale >= 1);
         const scale: f32 = @floatFromInt(self.applied_scale);
         return .{
-            @as(f32, @floatFromInt(self.extent.width)) / scale,
-            @as(f32, @floatFromInt(self.extent.height)) / scale,
+            @as(f32, @floatFromInt(self.logical_extent.width)) / scale,
+            @as(f32, @floatFromInt(self.logical_extent.height)) / scale,
         };
+    }
+
+    // viewport divisor plus the display-rotation (cos, sin), packed as the vertex push.
+    fn scene_push(self: *const Renderer) [4]f32 {
+        const vp = self.viewport_points();
+        const r = scene_rot(self.transform);
+        return .{ vp[0], vp[1], r[0], r[1] };
     }
 
     fn encode_scene(
@@ -2179,14 +2213,14 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = self.viewport_points();
+        const scene_pc = self.scene_push();
         self.dfns.vkCmdPushConstants(
             cmd,
             pipe.layout,
             vk.SHADER_STAGE_VERTEX_BIT,
             0,
-            8,
-            @ptrCast(&viewport_pt),
+            16,
+            @ptrCast(&scene_pc),
         );
         self.dfns.vkCmdDraw(cmd, 6, @intCast(batch.len), 0, first);
     }
@@ -2218,14 +2252,14 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = self.viewport_points();
+        const scene_pc = self.scene_push();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.color_pipe.layout,
             vk.SHADER_STAGE_VERTEX_BIT,
             0,
-            8,
-            @ptrCast(&viewport_pt),
+            16,
+            @ptrCast(&scene_pc),
         );
         self.dfns.vkCmdDraw(cmd, 6, @intCast(color_sprites.len), 0, first);
     }
@@ -2295,6 +2329,7 @@ pub const Renderer = struct {
             );
             const push = FramePush{
                 .viewport = viewport_pt,
+                .rot = scene_rot(self.transform),
                 .bounds = f.bounds,
                 .clip_bounds = f.clip_bounds,
                 .opacity_pad = .{ f.opacity, 0, 0, 0 },
@@ -2398,14 +2433,14 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = self.viewport_points();
+        const scene_pc = self.scene_push();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.quad_pipeline_layout,
             vk.SHADER_STAGE_VERTEX_BIT,
             0,
-            8,
-            @ptrCast(&viewport_pt),
+            16,
+            @ptrCast(&scene_pc),
         );
         self.dfns.vkCmdDraw(cmd, 6, @intCast(batch.len), 0, first);
     }
@@ -2436,14 +2471,14 @@ pub const Renderer = struct {
             0,
             null,
         );
-        const viewport_pt = self.viewport_points();
+        const scene_pc = self.scene_push();
         self.dfns.vkCmdPushConstants(
             cmd,
             self.text_pipeline_layout,
             vk.SHADER_STAGE_VERTEX_BIT,
             0,
-            8,
-            @ptrCast(&viewport_pt),
+            16,
+            @ptrCast(&scene_pc),
         );
         self.dfns.vkCmdDraw(cmd, 6, @intCast(sprites.len), 0, first);
     }

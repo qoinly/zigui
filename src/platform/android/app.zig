@@ -37,6 +37,9 @@ pub const SurfaceDelegate = struct {
     ctx: *anyopaque,
     on_ready: *const fn (ctx: *anyopaque, window: *native.AndroidWindow) void,
     on_lost: *const fn (ctx: *anyopaque) void,
+    // A rotation/resize that keeps the surface: wake the loop so the swapchain
+    // recreate and re-layout run even when the UI is otherwise idle.
+    on_resized: ?*const fn (ctx: *anyopaque) void = null,
 };
 
 var g_delegate: ?SurfaceDelegate = null;
@@ -90,6 +93,7 @@ pub export fn ANativeActivity_onCreate(
     activity.callbacks.onNativeWindowDestroyed = on_window_destroyed;
     activity.callbacks.onInputQueueCreated = on_input_queue_created;
     activity.callbacks.onInputQueueDestroyed = on_input_queue_destroyed;
+    activity.callbacks.onNativeWindowResized = on_window_resized;
     activity.callbacks.onContentRectChanged = on_content_rect_changed;
     g_activity = activity;
     jni.set_thread(activity.env, activity.clazz); // text/IME use JNI on this thread
@@ -145,11 +149,22 @@ fn notify_lost() void {
     if (g_delegate) |d| d.on_lost(d.ctx);
 }
 
+fn on_window_resized(activity: *Activity, window: *Window) callconv(.c) void {
+    _ = activity;
+    _ = window;
+    notify_resized();
+}
+
+fn notify_resized() void {
+    if (g_delegate) |d| if (d.on_resized) |f| f(d.ctx);
+}
+
 // The content rect changes on rotation / bar show-hide; re-read the insets then.
 fn on_content_rect_changed(activity: *Activity, rect: *const native.ARect) callconv(.c) void {
     _ = activity;
     _ = rect;
     refresh_insets();
+    notify_resized();
 }
 
 // Pull the system-bar insets from JNI into the shell. A null read (view not laid
