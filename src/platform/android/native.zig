@@ -113,6 +113,10 @@ pub const AndroidWindow = struct {
     scale: i32 = 1,
     renderer_owned: bool = false,
     surface_ctx: ?*anyopaque = null,
+    // The renderer's caps-derived display extent, preferred over ANativeWindow
+    // below because the native dims are unreliable under a display rotation.
+    disp_w: i32 = 0,
+    disp_h: i32 = 0,
 
     // Refresh the cached point extent from the live surface. Android has no
     // buffer-scale negotiation - the surface simply IS its pixel size - so
@@ -120,8 +124,8 @@ pub const AndroidWindow = struct {
     pub fn sync_extent(self: *AndroidWindow) void {
         const native = self.native orelse return;
         std.debug.assert(self.scale >= 1);
-        const w = ANativeWindow_getWidth(native);
-        const h = ANativeWindow_getHeight(native);
+        const w = if (self.disp_w != 0) self.disp_w else ANativeWindow_getWidth(native);
+        const h = if (self.disp_h != 0) self.disp_h else ANativeWindow_getHeight(native);
         self.width_pt = @max(@divTrunc(w, self.scale), 1);
         self.height_pt = @max(@divTrunc(h, self.scale), 1);
     }

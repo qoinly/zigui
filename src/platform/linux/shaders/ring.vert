@@ -11,6 +11,7 @@ const float PI = 3.14159265358979;
 
 layout(push_constant) uniform Viewport {
     vec2 viewport_size;
+    vec2 rot;
 } pc;
 
 struct RingChart {
@@ -50,6 +51,8 @@ void main() {
     float outer = min(c.bounds.z, c.bounds.w) * 0.5;
 
     vec2 ndc = (pixel_pos / pc.viewport_size) * 2.0 - 1.0;
+    ndc = vec2(ndc.x * pc.rot.x - ndc.y * pc.rot.y,
+               ndc.x * pc.rot.y + ndc.y * pc.rot.x);
     gl_Position = vec4(ndc, 0.0, 1.0);
 
     gl_ClipDistance[0] = pixel_pos.x - c.clip_bounds.x;

@@ -64,6 +64,7 @@ pub const App = struct {
             .ctx = @ptrCast(self),
             .on_ready = on_surface_ready,
             .on_lost = on_surface_lost,
+            .on_resized = on_surface_resized,
         });
     }
 
@@ -100,6 +101,11 @@ pub const App = struct {
     fn on_surface_lost(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.teardown();
+    }
+
+    fn on_surface_resized(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (self.win) |*w| w.pc.request_redraw();
     }
 
     // The deferred App.init body: now that the surface exists, stand up the

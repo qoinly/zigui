@@ -58,6 +58,10 @@ pub fn window_scale(target: *anyopaque) i32 {
     };
 }
 
+// Desktop surfaces never rotate, so the renderer's display extent already equals
+// its layout size; the Android arm caches it, this one has nothing to publish.
+pub fn publish_logical_extent(_: *anyopaque, _: vk.Extent2D) void {}
+
 pub fn renderer_takeover(target: *anyopaque) void {
     switch (active) {
         .wayland => wayland_shell.renderer_takeover(wl_win(target)),

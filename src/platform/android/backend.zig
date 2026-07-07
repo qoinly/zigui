@@ -27,6 +27,14 @@ pub fn window_scale(target: *anyopaque) i32 {
     return win(target).scale;
 }
 
+// The renderer publishes its caps-derived display extent here so sync_extent drives
+// layout from it, not the ANativeWindow whose dims are unreliable under rotation.
+pub fn publish_logical_extent(target: *anyopaque, ext: vk.Extent2D) void {
+    const w = win(target);
+    w.disp_w = @intCast(ext.width);
+    w.disp_h = @intCast(ext.height);
+}
+
 pub fn renderer_takeover(target: *anyopaque) void {
     const w = win(target);
     std.debug.assert(w.in_use);

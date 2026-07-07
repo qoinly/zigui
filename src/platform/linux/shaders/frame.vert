@@ -10,7 +10,7 @@ const vec2 UNIT[6] = vec2[](
 
 layout(push_constant) uniform FrameParams {
     vec2 viewport_size;
-    vec2 pad0;
+    vec2 rot;
     vec4 bounds;
     vec4 clip_bounds;
     vec4 opacity_pad;
@@ -31,6 +31,8 @@ void main() {
     vec2 pixel_pos = pc.bounds.xy + unit_vertex * pc.bounds.zw;
 
     vec2 ndc = (pixel_pos / pc.viewport_size) * 2.0 - 1.0;
+    ndc = vec2(ndc.x * pc.rot.x - ndc.y * pc.rot.y,
+               ndc.x * pc.rot.y + ndc.y * pc.rot.x);
     gl_Position = vec4(ndc, 0.0, 1.0);
 
     gl_ClipDistance[0] = pixel_pos.x - pc.clip_bounds.x;
