@@ -123,6 +123,10 @@ pub const PaintContext = struct {
     // animation (e.g. a caret blink).
     now_s: f64 = 0,
     base_s: f64 = 0, // clock value at init; now_s stays small for f64 precision
+    // A one-shot redraw deadline (in now_s seconds). Lets a view schedule a wakeup
+    // far cheaper than animating() every vsync: the loop idles until now_s hits it,
+    // fires one redraw, and clears it. Re-arm each frame for a periodic refresh.
+    redraw_at: ?f64 = null,
     // When set, the renderer blurs all prims/sprites up to the backdrop_* split
     // and draws the rest crisp on top. Set before emitting the modal layer.
     blur_modal: bool = false,
@@ -205,6 +209,12 @@ pub const PaintContext = struct {
 
     pub fn request_redraw(self: *PaintContext) void {
         self.renderer.request_redraw();
+    }
+
+    // Schedule one redraw ~seconds from now. Cheaper than animating every vsync
+    // for a slow refresh (a clock, a resource meter); re-arm each frame to repeat.
+    pub fn request_redraw_after(self: *PaintContext, seconds: f64) void {
+        self.redraw_at = self.now_s + seconds;
     }
 
     pub fn add_hitbox(self: *PaintContext, hb: HitBox) !void {
@@ -460,6 +470,12 @@ pub const PaintContext = struct {
         // result. The edge is consumed here, on the loop's own thread.
         if (background.took_completion()) self.renderer.request_redraw();
         self.now_s = monotonic_seconds() - self.base_s;
+        if (self.redraw_at) |deadline| {
+            if (self.now_s >= deadline) {
+                self.redraw_at = null;
+                self.renderer.request_redraw();
+            }
+        }
         if (!self.renderer.dirty) return null;
 
         self.prims.clearRetainingCapacity();

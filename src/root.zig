@@ -74,6 +74,12 @@ pub const ScrollBar = node.ScrollBar;
 pub fn animate() void {
     frame_ctx.get().paint.animating = true;
 }
+// Schedule a single redraw ~seconds from now instead of animating every vsync.
+// Re-arm each frame for a slow periodic refresh (a clock, a resource meter) at a
+// fraction of the CPU a continuous animate() costs.
+pub fn request_redraw_after(seconds: f64) void {
+    frame_ctx.get().paint.request_redraw_after(seconds);
+}
 pub const render_tree = node.render;
 pub const render_tree_at = node.render_at;
 
