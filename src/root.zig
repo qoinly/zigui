@@ -778,6 +778,66 @@ pub fn resizable_demo(o: kit_nodes.ResizableDemo) *node.Node {
 pub const ResizableDemoOpts = kit_nodes.ResizableDemo;
 pub const ResizableSnap = kit_nodes.ResizableSnap;
 
+pub const ResizeHandleOpts = struct {
+    orientation: kit.resizable.Orientation = .horizontal,
+    kind: kit.resizable.HandleKind = .line,
+    on_drag: ?callbacks.DragFn = null,
+    on_drag_end: ?callbacks.DragEndFn = null,
+    ctx: ?*anyopaque = null,
+};
+
+const ResizeHandleSpec = struct {
+    theme: *const window.Theme,
+    paint: *window.PaintContext,
+    orientation: kit.resizable.Orientation,
+    kind: kit.resizable.HandleKind,
+    on_drag: ?callbacks.DragFn,
+    on_drag_end: ?callbacks.DragEndFn,
+    ctx: ?*anyopaque,
+
+    fn measure(b: *render.RenderBuilder, c: *anyopaque) SizeF {
+        _ = b;
+        const self: *ResizeHandleSpec = @ptrCast(@alignCast(c));
+        // horizontal = panels side by side => a vertical 1px line that fills height;
+        // vertical = stacked panels => a horizontal 1px line that fills width. (0 fills.)
+        return if (self.orientation == .horizontal) SizeF.init(1, 0) else SizeF.init(0, 1);
+    }
+
+    fn draw(b: *render.RenderBuilder, c: *anyopaque, r: BoundsF) render.RenderError!void {
+        const self: *ResizeHandleSpec = @ptrCast(@alignCast(c));
+        const horizontal = self.orientation == .horizontal;
+        const len = if (horizontal) r.size.height else r.size.width;
+        if (len <= 0) return;
+        _ = try kit.resizable.render(b, r.origin.x, r.origin.y, len, .{
+            .orientation = self.orientation,
+            .kind = self.kind,
+            .theme = self.theme,
+            .paint = self.paint,
+            .on_drag = self.on_drag,
+            .on_drag_end = self.on_drag_end,
+            .ctx = self.ctx,
+        });
+    }
+};
+
+// A single draggable divider as a composable node: drop it between two panes in a
+// row/col and it reads its own laid-out length. Wire on_drag with zigui.on_drag;
+// the cursor (x, y) it reports is window-space.
+pub fn resize_handle(o: ResizeHandleOpts) *node.Node {
+    const fc = frame_ctx.get();
+    const spec = fc.arena.create(ResizeHandleSpec) catch @panic("node arena oom");
+    spec.* = .{
+        .theme = fc.theme,
+        .paint = fc.paint,
+        .orientation = o.orientation,
+        .kind = o.kind,
+        .on_drag = o.on_drag,
+        .on_drag_end = o.on_drag_end,
+        .ctx = o.ctx orelse fc.state,
+    };
+    return node.leaf(fc.arena, ResizeHandleSpec.measure, ResizeHandleSpec.draw, spec);
+}
+
 // The floating toast stack: put it in the non-modal hud region. Self-times off the
 // frame clock; the caller owns the slot array.
 pub fn toasts(o: kit_nodes.Toasts) *node.Node {
