@@ -30,6 +30,15 @@ const CFRange = c.CFRange;
 
 const MAX_GLYPHS_PER_RUN: usize = 256;
 
+// Register a bundled font FILE (process scope) so CTFontCreateWithName resolves it
+// by the family name in its name table.
+pub fn register_app_font(path: []const u8) bool {
+    const url = c.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse
+        return false;
+    defer c.CFRelease(url);
+    return c.CTFontManagerRegisterFontsForURL(url, c.kCTFontManagerScopeProcess, null) != 0;
+}
+
 pub const MacTextSystem = struct {
     allocator: Allocator,
     fonts: std.ArrayListUnmanaged(CTFontRef) = .empty,

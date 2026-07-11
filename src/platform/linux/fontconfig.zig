@@ -33,6 +33,7 @@ const Fns = struct {
         *?[*:0]u8,
     ) callconv(.c) FcResult,
     FcPatternGetInteger: *const fn (*Pattern, [*:0]const u8, c_int, *c_int) callconv(.c) FcResult,
+    FcConfigAppFontAddFile: *const fn (?*Config, [*:0]const u8) callconv(.c) c_int,
 };
 
 var fns: Fns = undefined;
@@ -49,6 +50,13 @@ pub fn load() Error!void {
     g_config = fns.FcInitLoadConfigAndFonts() orelse return error.LibraryLoadFailed;
     g_loaded = true;
     std.debug.assert(g_config != null);
+}
+
+// Register a font file with the app-font set so match() finds it by the family
+// name in its name table (used to bundle fonts without OS-installing them).
+pub fn add_app_font(path: [*:0]const u8) bool {
+    load() catch return false;
+    return fns.FcConfigAppFontAddFile(g_config, path) != 0;
 }
 
 // OpenType weight (100..900) to the fontconfig scale (0..210).

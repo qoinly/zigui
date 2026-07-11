@@ -56,7 +56,12 @@ pub fn grid_cols(spec: theme.GridCols, cfg: node.Cfg, kids: []const *node.Node) 
     return node.grid_cols(fc.arena, spec, with_state_ctx(fc, cfg), kids);
 }
 pub fn text(s: []const u8, o: node.Txt) *node.Node {
-    return node.text(frame_ctx.get().arena, s, o);
+    const fc = frame_ctx.get();
+    var oo = o;
+    // Inherit the theme's UI font unless this text overrides it (e.g. a mono
+    // family). Empty theme font_family keeps the platform default.
+    if (oo.font_family.len == 0) oo.font_family = fc.theme.font_family;
+    return node.text(fc.arena, s, oo);
 }
 pub fn spacer() *node.Node {
     return node.spacer(frame_ctx.get().arena);
@@ -1064,6 +1069,13 @@ pub const RenderBuilder = render.RenderBuilder;
 pub const layout = @import("layout.zig");
 pub const style = @import("style.zig");
 pub const text_system = @import("text_system.zig");
+
+// Register a bundled font FILE at startup so `Theme.font_family` / `Txt.font_family`
+// can select it by name. Keeps fonts out of the binary (they stay files). Returns
+// false if unsupported on this platform or the file can't be read.
+pub fn register_font_file(path: []const u8) bool {
+    return text_system.register_app_font(path);
+}
 
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;

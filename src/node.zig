@@ -75,6 +75,9 @@ pub const Node = struct {
     muted: bool = false,
     font_size: f32 = 14,
     weight: FontWeight = .normal,
+    // Empty = the label default (system font / theme default resolved by the
+    // facade). Set to a registered family name to override per text node (mono).
+    font_family: []const u8 = "",
     leaf_measure: ?LeafMeasure = null,
     leaf_draw: ?LeafDraw = null,
     leaf_ctx: *anyopaque = undefined,
@@ -148,6 +151,9 @@ pub const Txt = struct {
     color: ?Rgba = null,
     // Clamp to one line with a trailing ellipsis instead of wrapping.
     truncate: bool = false,
+    // Override the font family for this text (e.g. a mono family for code/URLs).
+    // Empty inherits the theme's font_family (resolved by the facade).
+    font_family: []const u8 = "",
 };
 
 fn style_of(cfg: Cfg, dir: FlexDirection) Style {
@@ -235,6 +241,7 @@ pub fn text(a: A, s: []const u8, o: Txt) *Node {
         .muted = o.muted,
         .color = o.color,
         .truncate = o.truncate,
+        .font_family = o.font_family,
     });
 }
 
@@ -365,7 +372,8 @@ fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(
     const n: *Node = @ptrCast(@alignCast(ctx));
     std.debug.assert(n.kind == .text);
     const b = measure_b.?;
-    const sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
+    var sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
+    if (n.font_family.len > 0) sty.font_family = n.font_family;
     if (proposal.min_content) {
         const mc = label.min_content_width(b, n.text, sty);
         const wr = label.measure_wrapped(b, n.text, sty, mc);
@@ -445,11 +453,12 @@ fn draw_tree(
             }
         },
         .text => {
-            const sty = label.Style{
+            var sty = label.Style{
                 .font_size = n.font_size,
                 .weight = n.weight,
                 .color = text_color(theme, n),
             };
+            if (n.font_family.len > 0) sty.font_family = n.font_family;
             if (n.truncate) {
                 _ = try label.render_clamped(b, x, y, n.text, r.size.width, sty);
             } else {
