@@ -86,6 +86,9 @@ pub const PaintContext = struct {
     color_sprites: std.ArrayListUnmanaged(primitives.PolychromeSprite) = .empty,
     hitboxes: std.ArrayListUnmanaged(HitBox) = .empty,
     prev_hover_ctx: ?*anyopaque = null,
+    // The topmost hovered box's stable id, refreshed each frame from the hitboxes.
+    // A view reads it (via the frame) to reveal-on-hover.
+    hovered_id: []const u8 = "",
     mouse_x: f32 = -1,
     mouse_y: f32 = -1,
     mouse_inside: bool = false,
@@ -215,6 +218,30 @@ pub const PaintContext = struct {
     // for a slow refresh (a clock, a resource meter); re-arm each frame to repeat.
     pub fn request_redraw_after(self: *PaintContext, seconds: f64) void {
         self.redraw_at = self.now_s + seconds;
+    }
+
+    // Record the topmost hover-id box under the pointer. Call once per frame after
+    // every hitbox is registered; ids are stable (caller literals), so the value
+    // survives to the next frame's build where a view reveals its hovered row.
+    pub fn refresh_hover(self: *PaintContext) void {
+        var id: []const u8 = "";
+        if (self.mouse_inside) {
+            var i: usize = self.hitboxes.items.len;
+            while (i > 0) {
+                i -= 1;
+                const hb = self.hitboxes.items[i];
+                if (hb.hover_id.len == 0) continue;
+                if (self.mouse_x >= hb.x and self.mouse_x < hb.x + hb.w and
+                    self.mouse_y >= hb.y and self.mouse_y < hb.y + hb.h)
+                {
+                    id = hb.hover_id;
+                    break;
+                }
+            }
+        }
+        if (std.mem.eql(u8, id, self.hovered_id)) return;
+        self.hovered_id = id;
+        self.renderer.request_redraw();
     }
 
     pub fn add_hitbox(self: *PaintContext, hb: HitBox) !void {

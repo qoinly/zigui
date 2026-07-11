@@ -82,6 +82,11 @@ pub const Node = struct {
     // boxes/leaves.
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    // A stable id recorded as "hovered" while the pointer is over this box; the
+    // frame exposes the topmost one so a view can reveal-on-hover without a callback.
+    hover_id: []const u8 = "",
+    // A text node clamps to one line with a trailing ellipsis instead of wrapping.
+    truncate: bool = false,
     // Laid-out absolute rect written at draw; lets a container anchor an overlay
     // (menu/popover) to itself, the way the kit triggers expose their rect_out.
     rect_out: ?*[4]f32 = null,
@@ -132,6 +137,7 @@ pub const Cfg = struct {
     border_width: f32 = 1,
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    hover_id: []const u8 = "",
     rect_out: ?*[4]f32 = null,
 };
 
@@ -140,6 +146,8 @@ pub const Txt = struct {
     weight: FontWeight = .normal,
     muted: bool = false,
     color: ?Rgba = null,
+    // Clamp to one line with a trailing ellipsis instead of wrapping.
+    truncate: bool = false,
 };
 
 fn style_of(cfg: Cfg, dir: FlexDirection) Style {
@@ -186,6 +194,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .border_width = cfg.border_width,
         .on_click = cfg.on_click,
         .click_ctx = cfg.click_ctx,
+        .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
         .children = own_kids(a, kids),
     });
@@ -225,6 +234,7 @@ pub fn text(a: A, s: []const u8, o: Txt) *Node {
         .weight = o.weight,
         .muted = o.muted,
         .color = o.color,
+        .truncate = o.truncate,
     });
 }
 
@@ -407,13 +417,14 @@ fn draw_tree(
     const y = r.origin.y + oy;
     // Register the click target before recursing so a clickable child (added
     // later) wins over a clickable parent in the newest-first hit walk.
-    if (pc) |p| if (n.on_click) |cb| {
+    if (pc) |p| if (n.on_click != null or n.hover_id.len > 0) {
         try p.add_hitbox(.{
             .x = x,
             .y = y,
             .w = r.size.width,
             .h = r.size.height,
-            .on_click = cb,
+            .on_click = n.on_click,
+            .hover_id = n.hover_id,
             .ctx = n.click_ctx,
         });
     };
@@ -433,11 +444,18 @@ fn draw_tree(
                 try b.append_quad(q);
             }
         },
-        .text => _ = try label.render_wrapped(b, x, y, n.text, .{
-            .font_size = n.font_size,
-            .weight = n.weight,
-            .color = text_color(theme, n),
-        }, r.size.width),
+        .text => {
+            const sty = label.Style{
+                .font_size = n.font_size,
+                .weight = n.weight,
+                .color = text_color(theme, n),
+            };
+            if (n.truncate) {
+                _ = try label.render_clamped(b, x, y, n.text, r.size.width, sty);
+            } else {
+                _ = try label.render_wrapped(b, x, y, n.text, sty, r.size.width);
+            }
+        },
         .leaf => if (n.leaf_draw) |d| {
             try d(b, n.leaf_ctx, .{ .origin = .{ .x = x, .y = y }, .size = r.size });
         },

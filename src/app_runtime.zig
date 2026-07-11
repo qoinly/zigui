@@ -21,6 +21,7 @@ pub const Frame = struct {
     theme: *const types.Theme,
     arena: std.mem.Allocator,
     time: f64, // monotonic seconds, for time-based animation (with zigui.animate)
+    hovered_id: []const u8 = "", // topmost hover-id box under the pointer (reveal-on-hover)
 };
 
 // The window's region views. titlebar/overlay/hud are optional. The lib always
@@ -150,6 +151,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 .theme = &w.theme,
                 .arena = w.arena.allocator(),
                 .time = pc.now_s,
+                .hovered_id = pc.hovered_id,
             };
             // non-null whenever State != void (the loop is started from a real pointer)
             const st: State = if (State == void) {} else @ptrCast(@alignCast(w.user_state.?));
@@ -189,6 +191,8 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             };
             // No focused input claimed the singleton editor this frame -> hide it.
             if (!pc.text_field_active) pc.hide_text_field();
+            // Every hitbox is registered now; record the hovered id for next frame.
+            pc.refresh_hover();
         }
     };
 }
