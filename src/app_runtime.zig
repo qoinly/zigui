@@ -213,6 +213,7 @@ pub const App = struct {
         min_size: ?[2]f32 = null,
         theme: ?types.Theme = null,
         feel: types.Feel = .liquid_glass,
+        titlebar_height: ?f32 = null,
     };
 
     // What open_window takes: just the window's identity. Its state + views come
@@ -225,6 +226,7 @@ pub const App = struct {
         size: ?[2]f32 = null,
         min_size: ?[2]f32 = null,
         theme: ?types.Theme = null,
+        titlebar_height: ?f32 = null,
         feel: types.Feel = .liquid_glass,
     };
 
@@ -251,6 +253,7 @@ pub const App = struct {
             .chrome = .custom,
             .feel = opts.feel,
             .theme = theme,
+            .titlebar = if (opts.titlebar_height) |h| .{ .height = h } else .{},
         });
         errdefer handle.deinit();
 
@@ -364,6 +367,7 @@ pub const App = struct {
             .chrome = .custom,
             .feel = opts.feel,
             .theme = theme,
+            .titlebar = if (opts.titlebar_height) |h| .{ .height = h } else .{},
         });
         errdefer handle.deinit();
 
