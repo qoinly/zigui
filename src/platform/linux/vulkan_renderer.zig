@@ -844,6 +844,24 @@ pub const Renderer = struct {
         if (formats[0].format == vk.FORMAT_UNDEFINED) return;
         self.format = formats[0].format;
         self.color_space = formats[0].color_space;
+
+        // The UI shaders output already-sRGB colors, so an _SRGB swapchain would
+        // gamma-encode them a second time and everything renders too bright. Pick
+        // the _UNORM twin of the surface's preferred channel order instead.
+        const format_b8g8r8a8_srgb: u32 = 50;
+        const format_r8g8b8a8_srgb: u32 = 43;
+        const want: u32 = switch (self.format) {
+            format_b8g8r8a8_srgb, vk.FORMAT_B8G8R8A8_UNORM => vk.FORMAT_B8G8R8A8_UNORM,
+            format_r8g8b8a8_srgb, vk.FORMAT_R8G8B8A8_UNORM => vk.FORMAT_R8G8B8A8_UNORM,
+            else => return,
+        };
+        if (want == self.format) return;
+        for (formats[0..count]) |f| {
+            if (f.format == want) {
+                self.format = want;
+                return;
+            }
+        }
     }
 
     fn create_swapchain(self: *Renderer) Error!void {
