@@ -211,6 +211,8 @@ pub const App = struct {
         title: []const u8 = "",
         size: [2]f32,
         min_size: ?[2]f32 = null,
+        theme: ?types.Theme = null,
+        feel: types.Feel = .liquid_glass,
     };
 
     // What open_window takes: just the window's identity. Its state + views come
@@ -222,6 +224,8 @@ pub const App = struct {
         id: u32 = 0,
         size: ?[2]f32 = null,
         min_size: ?[2]f32 = null,
+        theme: ?types.Theme = null,
+        feel: types.Feel = .liquid_glass,
     };
 
     pub fn init(opts: Options) !*App {
@@ -237,7 +241,7 @@ pub const App = struct {
         rt.quit_on_last_window_closed();
         rt.install_edit_menu();
 
-        const theme = types.Theme.default_dark();
+        const theme = opts.theme orelse types.Theme.default_dark();
         const handle = try window.open_custom_shell(.{
             .title = opts.title,
             .width = @floatCast(opts.size[0]),
@@ -245,7 +249,7 @@ pub const App = struct {
             .min_width = if (opts.min_size) |m| @floatCast(m[0]) else MIN_W,
             .min_height = if (opts.min_size) |m| @floatCast(m[1]) else MIN_H,
             .chrome = .custom,
-            .feel = .liquid_glass,
+            .feel = opts.feel,
             .theme = theme,
         });
         errdefer handle.deinit();
@@ -350,7 +354,7 @@ pub const App = struct {
         std.debug.assert(size[0] > 0);
         std.debug.assert(size[1] > 0);
 
-        const theme = types.Theme.default_dark();
+        const theme = opts.theme orelse types.Theme.default_dark();
         const handle = try window.open_custom_shell(.{
             .title = title,
             .width = @floatCast(size[0]),
@@ -358,7 +362,7 @@ pub const App = struct {
             .min_width = @floatCast(min[0]),
             .min_height = @floatCast(min[1]),
             .chrome = .custom,
-            .feel = .liquid_glass,
+            .feel = opts.feel,
             .theme = theme,
         });
         errdefer handle.deinit();
