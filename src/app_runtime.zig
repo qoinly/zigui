@@ -131,9 +131,14 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             raw: paint.Frame,
         ) paint.PaintError!void {
             const w: *Window = @ptrCast(@alignCast(ctx));
-            // Apply a runtime theme swap before the frame reads it.
+            // Apply a runtime theme swap before the frame reads it. Update BOTH the
+            // window theme (view content, via f.theme) and the shell handle theme
+            // (the chrome: titlebar band, separator, caption buttons) — the renderer
+            // paints the band from pc.handle.theme, a separate copy.
             if (pending_theme) |th| {
                 w.theme = th;
+                w.handle.theme = th;
+                pc.handle.theme = th;
                 pending_theme = null;
             }
             // High-water pool: reset both before building this frame's tree.
