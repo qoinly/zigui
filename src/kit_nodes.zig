@@ -748,6 +748,8 @@ pub const Ta = struct {
     height: f32 = 132,
     read_only: bool = false,
     wrap: bool = true,
+    font_family: []const u8 = "SF Mono",
+    font_size: f32 = 13,
     on_focus: ?callbacks.FocusFn = null,
     ctx: ?*anyopaque = null,
 };
@@ -764,6 +766,8 @@ const TextareaSpec = struct {
             .paint = self.o.paint.?, // the facade always sets it before draw
             .read_only = self.o.read_only,
             .wrap = self.o.wrap,
+            .font_family = self.o.font_family,
+            .font_size = self.o.font_size,
             .on_focus = self.o.on_focus,
             .ctx = self.o.ctx,
         };
