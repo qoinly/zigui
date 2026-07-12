@@ -109,6 +109,11 @@ pub const MacIconSystem = struct {
             .pencil => "pencil",
             .star => "star",
             .corner_down_left => "arrow.turn.down.left",
+            .braces => "curlybraces",
+            .code => "chevron.left.forwardslash.chevron.right",
+            .file_code => "doc.plaintext",
+            .markdown => "m.square",
+            .image => "photo",
         };
     }
 

@@ -144,6 +144,11 @@ pub const WinIconSystem = struct {
             .pencil => "\u{E70F}", // Edit
             .star => "\u{E734}", // FavoriteStar
             .corner_down_left => "", // no clean Segoe match -> bundled Lucide
+            .braces => "", // -> bundled Lucide
+            .code => "\u{E943}", // Code
+            .file_code => "", // -> bundled Lucide
+            .markdown => "", // -> bundled Lucide
+            .image => "\u{EB9F}", // Photo2
         };
     }
 
