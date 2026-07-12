@@ -125,6 +125,10 @@ pub const Cfg = struct {
     col_gap: ?tokens.Spacing = null,
     pad: tokens.Spacing = .none,
     grow: f32 = 0,
+    // Shrink weight when the row/col overflows (CSS flex-shrink). Default 1 lets a
+    // box give up space; 0 pins it at its natural size so siblings absorb the
+    // overflow instead (e.g. a fixed action cluster while a label area shrinks).
+    shrink: f32 = 1,
     width: ?f32 = null,
     height: ?f32 = null,
     min_width: ?f32 = null,
@@ -163,6 +167,7 @@ fn style_of(cfg: Cfg, dir: FlexDirection) Style {
         .justify_content = cfg.justify,
         .align_items = cfg.cross,
         .flex_grow = cfg.grow,
+        .flex_shrink = cfg.shrink,
         .width = if (cfg.width) |w| .{ .px = w } else .auto,
         .height = if (cfg.height) |h| .{ .px = h } else .auto,
         .min_width = if (cfg.min_width) |w| .{ .px = w } else .auto,
