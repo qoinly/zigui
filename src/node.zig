@@ -379,6 +379,17 @@ fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(
     const b = measure_b.?;
     var sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
     if (n.font_family.len > 0) sty.font_family = n.font_family;
+    // A truncating label is a single clamped line, never wrapped: report a
+    // single-line height (so flex cross-centering keeps it vertically centered
+    // instead of top-anchored inside a two-line box) and a 0 min-content (free to
+    // shrink; draw() clamps it to the granted width with an ellipsis).
+    if (n.truncate) {
+        const m = label.measure(b, n.text, sty);
+        const line_h = m.ascent + m.descent;
+        if (proposal.min_content) return .{ .width = 0, .height = line_h };
+        const w = if (proposal.width) |pw| @min(m.width, pw) else m.width;
+        return .{ .width = w, .height = line_h };
+    }
     if (proposal.min_content) {
         const mc = label.min_content_width(b, n.text, sty);
         const wr = label.measure_wrapped(b, n.text, sty, mc);
