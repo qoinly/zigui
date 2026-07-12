@@ -145,7 +145,6 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             w.eng.clear();
             _ = w.arena.reset(.retain_capacity);
             pc.blur_modal = false; // an overlay re-arms it each frame while open
-            pc.modal_no_blur = false;
             pc.frost_count = 0; // the bars append their frost rects each frame
             pc.text_field_active = false; // a focused input re-arms it below
             // Clear the redraw-again flag too: whatever still needs continuous

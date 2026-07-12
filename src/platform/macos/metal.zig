@@ -532,7 +532,6 @@ pub const Renderer = struct {
         split_sprites: usize,
         split_color: usize,
         crisp_top: f32,
-        blur: bool,
     ) void {
         self.draw_frame_impl(
             clear_color,
@@ -541,7 +540,7 @@ pub const Renderer = struct {
             mono_atlas_texture,
             color_sprites,
             color_atlas_texture,
-            blur,
+            true,
             split_prims,
             split_sprites,
             split_color,
@@ -614,19 +613,14 @@ pub const Renderer = struct {
 
         const splits_ok = split_prims <= prims.len and split_sprites <= sprites.len and
             split_color <= color_sprites.len;
-        const is_modal = split_prims > 0 or split_sprites > 0 or split_color > 0;
         const want_blur = blur and self.blit_pipeline_state != null and splits_ok;
         const want_frost = frosts.len > 0 and self.blit_pipeline_state != null and
             self.frost_pipeline_state != null and splits_ok;
-        // A modal split without blur: the top-layer separation (crisp backdrop +
-        // modal on top) minus the expensive full-screen blur.
-        const want_flat = !blur and is_modal and self.blit_pipeline_state != null and splits_ok;
-        if (want_blur or want_frost or want_flat) self.ensure_offscreen(new_width, new_height);
-        const offscreen_ok = self.offscreen_tex != null;
-        const blur_ok = offscreen_ok and self.offscreen_blur_tex != null and self.ensure_blur();
+        if (want_blur or want_frost) self.ensure_offscreen(new_width, new_height);
+        const blur_ok = self.offscreen_tex != null and
+            self.offscreen_blur_tex != null and self.ensure_blur();
         const do_blur = want_blur and blur_ok;
         const do_frost = want_frost and blur_ok;
-        const do_flat = want_flat and offscreen_ok;
 
         if (do_blur) {
             const off = self.offscreen_tex.?;
@@ -698,32 +692,6 @@ pub const Renderer = struct {
             const vw: f32 = @floatCast(new_width);
             const vh: f32 = @floatCast(new_height);
             self.encode_frosts(enc2, blurred, frosts, sf, vw, vh);
-            self.encode_scene(
-                enc2,
-                prims[split_prims..],
-                sprites[split_sprites..],
-                color_sprites[split_color..],
-                mono_atlas_id,
-                color_atlas_id,
-            );
-            objc.msg_send(void, enc2, "endEncoding", .{});
-        } else if (do_flat) {
-            // Top-layer split, no blur: render the backdrop crisp to the offscreen,
-            // blit it fullscreen, then draw the modal crisp on top. Lifts a composed
-            // modal (palette/save) over the body without the per-frame blur cost.
-            const off = self.offscreen_tex.?;
-            const enc1 = self.begin_pass(command_buffer, off, clear_color) orelse return;
-            self.encode_scene(
-                enc1,
-                prims[0..split_prims],
-                sprites[0..split_sprites],
-                color_sprites[0..split_color],
-                mono_atlas_id,
-                color_atlas_id,
-            );
-            objc.msg_send(void, enc1, "endEncoding", .{});
-            const enc2 = self.begin_pass(command_buffer, texture, clear_color) orelse return;
-            self.encode_blit(enc2, off);
             self.encode_scene(
                 enc2,
                 prims[split_prims..],

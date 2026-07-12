@@ -149,10 +149,6 @@ pub const PaintContext = struct {
     // When set, the renderer blurs all prims/sprites up to the backdrop_* split
     // and draws the rest crisp on top. Set before emitting the modal layer.
     blur_modal: bool = false,
-    // When blur_modal is set, skip the (expensive) full-screen backdrop blur and
-    // just lift the modal crisp over the un-blurred backdrop (a composed modal that
-    // dims via its own scrim instead of frosting). Reset per frame like blur_modal.
-    modal_no_blur: bool = false,
     backdrop_prims: u32 = 0,
     backdrop_sprites: u32 = 0,
     backdrop_color: u32 = 0,
@@ -643,7 +639,6 @@ pub const PaintContext = struct {
                 @intCast(self.backdrop_sprites),
                 @intCast(self.backdrop_color),
                 crisp_top,
-                !self.modal_no_blur,
             );
         } else {
             self.renderer.draw_frame(
