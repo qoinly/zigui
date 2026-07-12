@@ -1132,7 +1132,9 @@ pub fn render(
     const g = prepare(b, st, opts, x, y, w, h);
 
     const caret_before = st.caret;
-    const changed = if (st.focused) drain_keys(st, opts) else false;
+    // Stay focused (caret/selection persist) but stop draining keys while a modal
+    // owns the keyboard, else its arrows would also walk this editor's caret.
+    const changed = if (st.focused and !p.block_keys) drain_keys(st, opts) else false;
     if (changed) if (opts.on_change) |cb| cb(opts.ctx);
     apply_scroll(st, opts, g, changed or st.caret != caret_before);
 

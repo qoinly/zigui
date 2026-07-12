@@ -181,6 +181,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             else
                 null;
             pc.block_hover = ov_root != null;
+            pc.block_keys = ov_root != null; // a modal owns the keyboard; body text areas go inert
             if (views.titlebar) |titlebar_view| {
                 const tb_root = titlebar_view(&f, st);
                 try node.render_at(&w.eng, &builder, &w.theme, tb_root, raw.titlebar, pc);
@@ -196,6 +197,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             try node.render_at(&w.eng, &builder, &w.theme, body_root, body_bounds, pc);
             if (ov_root) |root| {
                 pc.block_hover = false; // the modal layer itself is live
+                pc.block_keys = false; // a text field inside the modal still types
                 const full = geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size };
                 try node.render_at(&w.eng, &builder, &w.theme, root, full, pc);
             }

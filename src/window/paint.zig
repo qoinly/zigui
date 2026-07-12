@@ -164,6 +164,11 @@ pub const PaintContext = struct {
     // Set while drawing a modal's backdrop so is_hovered reports false there: the
     // frosted layer behind a modal must be inert (no hover), not just blurred.
     block_hover: bool = false,
+    // Same, for the keyboard: a focused text area behind a modal must stop draining
+    // keys (arrows moving its caret while a palette owns the keys). Raised for the
+    // body pass while an overlay is up and cleared for the overlay's own pass, so a
+    // text field inside the modal still types.
+    block_keys: bool = false,
     // A focused text input sets this while showing the native editor; the runtime
     // hides the singleton editor on a frame where nobody claims it (blur / nav away).
     text_field_active: bool = false,
@@ -216,6 +221,7 @@ pub const PaintContext = struct {
         self.backdrop_color = 0;
         self.frost_count = 0;
         self.block_hover = false;
+        self.block_keys = false;
         self.text_field_active = false;
         // Rasterize glyphs at the real device scale: a 1x surface fed 2x
         // rasters is a permanent linear downsample (soft text). macOS pins the
