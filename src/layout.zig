@@ -216,9 +216,16 @@ pub const LayoutEngine = struct {
             );
         }
 
-        // Auto axes (root/subtree path) collapse to the laid-out content extent.
-        if (w_auto and children_size.width > 0) final_width = children_size.width;
-        if (h_auto and children_size.height > 0) final_height = children_size.height;
+        // Auto axes (root/subtree path) collapse to the laid-out content extent —
+        // shrink-wrap. EXCEPT a grow>0 node's main axis: grow means "fill the
+        // available space", so it keeps `available` even at the root (a full-window
+        // overlay scrim fills the window; a grow=0 menu still shrink-wraps to content).
+        const fill_main = style.flex_grow > 0;
+        const main_is_row = style.flex_direction.is_row();
+        const keep_w = fill_main and main_is_row; // row -> main axis is width
+        const keep_h = fill_main and !main_is_row; // column -> main axis is height
+        if (w_auto and children_size.width > 0 and !keep_w) final_width = children_size.width;
+        if (h_auto and children_size.height > 0 and !keep_h) final_height = children_size.height;
 
         final_width = self.clamp_axis(
             final_width,
