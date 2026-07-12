@@ -1104,6 +1104,13 @@ pub fn set_idle_poll(enabled: bool, interval_ms: u32) void {
     @import("platform/linux/app.zig").set_idle_poll(enabled, interval_ms);
 }
 
+// Swap the window theme at runtime (e.g. a light/dark toggle). Safe to call from
+// a click handler; the runtime applies it at the top of the next frame and the
+// window repaints (the input that triggered the handler already drives a redraw).
+pub fn set_theme(t: Theme) void {
+    app_runtime.pending_theme = t;
+}
+
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;
 pub const Primitive = primitives.Primitive;

@@ -113,6 +113,11 @@ const WindowSet = struct {
     }
 };
 
+// A theme swap requested at runtime (e.g. a light/dark toggle from a click
+// handler, which runs between frames). Applied to the window at the top of the
+// next frame so f.theme reflects it immediately; a null means no change pending.
+pub var pending_theme: ?types.Theme = null;
+
 // The per-frame render bridge for one window, specialized on the view set. The
 // display link hands back the *Window as its context, so every callback drives
 // exactly the window it belongs to (no shared current-window global). Public so
@@ -126,6 +131,11 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             raw: paint.Frame,
         ) paint.PaintError!void {
             const w: *Window = @ptrCast(@alignCast(ctx));
+            // Apply a runtime theme swap before the frame reads it.
+            if (pending_theme) |th| {
+                w.theme = th;
+                pending_theme = null;
+            }
             // High-water pool: reset both before building this frame's tree.
             w.eng.clear();
             _ = w.arena.reset(.retain_capacity);
