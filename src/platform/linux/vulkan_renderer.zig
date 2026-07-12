@@ -266,6 +266,79 @@ const Offscreen = struct {
     framebuffer: vk.Framebuffer = vk.NULL_HANDLE,
 };
 
+// --- Vulkan ICD filter (Linux desktop) -----------------------------------
+// The loader dlopen()s *every* installed ICD at vkCreateInstance to enumerate
+// devices. On Mesa systems that drags in the software lavapipe/RADV drivers and
+// their ~40 MB libLLVM even though rendering runs on the hardware ICD. When
+// exactly one HW vendor is present across the DRM render nodes we pin
+// VK_LOADER_DRIVERS_SELECT to its ICD; init() falls back to the unfiltered
+// loader if the pin yields no usable device, so a hybrid or GPU-less box never
+// loses rendering. A user-set VK_LOADER_DRIVERS_SELECT always wins untouched.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn open(path: [*:0]const u8, flags: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+// `close` is already declared file-scope (dmabuf path); reused here.
+const ICD_ENV = "VK_LOADER_DRIVERS_SELECT";
+
+const HwVendor = enum {
+    intel,
+    amd,
+    nvidia,
+    fn glob(self: HwVendor) [*:0]const u8 {
+        return switch (self) {
+            .intel => "*intel*",
+            .amd => "*radeon*",
+            .nvidia => "*nvidia*,*nouveau*",
+        };
+    }
+};
+
+fn drm_vendor(path: [*:0]const u8) ?HwVendor {
+    const fd = open(path, 0); // O_RDONLY
+    if (fd < 0) return null;
+    defer _ = close(fd);
+    var buf: [16]u8 = undefined;
+    const got = read(fd, &buf, buf.len);
+    if (got <= 0) return null;
+    const s = std.mem.trim(u8, buf[0..@intCast(got)], " \n\r\t");
+    if (std.mem.eql(u8, s, "0x8086")) return .intel;
+    if (std.mem.eql(u8, s, "0x1002")) return .amd;
+    if (std.mem.eql(u8, s, "0x10de")) return .nvidia;
+    return null;
+}
+
+// The ICD glob for the single HW vendor across all DRM render nodes, or null on
+// a mixed / unknown / GPU-less box (stay unfiltered rather than pin the wrong one).
+fn hw_icd_glob() ?[*:0]const u8 {
+    var found: ?HwVendor = null;
+    var node: u32 = 128;
+    while (node < 136) : (node += 1) {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/renderD{d}/device/vendor", .{node}) catch continue;
+        const v = drm_vendor(path.ptr) orelse continue;
+        if (found) |f| {
+            if (f != v) return null; // more than one vendor present
+        } else found = v;
+    }
+    return if (found) |f| f.glob() else null;
+}
+
+// Returns true when a filter was applied (so a later no-device failure is worth
+// one unfiltered retry). No-op on Android (no loader env) and when the user set
+// the variable themselves.
+fn apply_icd_filter() bool {
+    if (builtin.abi.isAndroid()) return false;
+    if (getenv(ICD_ENV) != null) return false;
+    const glob = hw_icd_glob() orelse return false;
+    return setenv(ICD_ENV, glob, 1) == 0;
+}
+
+fn clear_icd_filter() void {
+    _ = unsetenv(ICD_ENV);
+}
+
 pub const Renderer = struct {
     win: *anyopaque,
     instance: ?*vk.Instance = null,
@@ -391,6 +464,9 @@ pub const Renderer = struct {
         // target is the backend window behind CustomShellHandle.metal_layer;
         // backend.zig knows which arm opened it.
         std.debug.assert(backend.window_in_use(target));
+        // Pin the loader to the HW ICD before it scans drivers (avoids lavapipe +
+        // its libLLVM). Set before vk.load()/create_instance so the loader reads it.
+        const icd_filtered = apply_icd_filter();
         vk.load() catch return error.LoaderMissing;
 
         var self = Renderer{ .win = target };
@@ -398,7 +474,17 @@ pub const Renderer = struct {
 
         try self.create_instance();
         try self.create_surface();
-        try self.pick_device();
+        self.pick_device() catch |err| {
+            // The pinned ICD produced no usable device (mis-probe / unusual setup);
+            // drop the filter and retry with the full loader set so rendering is
+            // never lost. If we never filtered, the failure is real — propagate it.
+            if (!icd_filtered) return err;
+            clear_icd_filter();
+            self.destroy_pre_device();
+            try self.create_instance();
+            try self.create_surface();
+            try self.pick_device();
+        };
         try self.create_device();
         // Settle the surface format before any consumer reads self.format - the
         // render pass, swapchain views, and offscreen pass must all agree.
