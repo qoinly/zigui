@@ -745,7 +745,11 @@ pub const Ta = struct {
     // The facade fills this; a direct kit_nodes caller must set it.
     paint: ?*custom_paint.PaintContext = null,
     spans: []const textarea_kit.TextSpan = &.{},
+    // Fixed pixel height, OR set grow > 0 to fill the flex parent's remaining main
+    // axis instead (height is then ignored). Growing avoids the one-frame lag of
+    // feeding back a measured rect: the editor reads its laid-out height directly.
     height: f32 = 132,
+    grow: f32 = 0,
     read_only: bool = false,
     wrap: bool = true,
     bordered: bool = true,
@@ -777,7 +781,9 @@ const TextareaSpec = struct {
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
         _ = b;
         const self: *TextareaSpec = @ptrCast(@alignCast(ctx));
-        return SizeF.init(0, self.o.height);
+        // grow: measure 0 on both axes so the height stays .auto and flex_grow fills
+        // it; otherwise pin the fixed height. Width is always fill (measure 0).
+        return SizeF.init(0, if (self.o.grow > 0) 0 else self.o.height);
     }
     fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
         const self: *TextareaSpec = @ptrCast(@alignCast(ctx));
@@ -785,12 +791,14 @@ const TextareaSpec = struct {
         const pc = self.o.paint orelse return; // the facade always sets it
         // Keep the loop ticking so the caret blinks between keystrokes.
         if (self.state.focused) pc.animating = true;
+        // The laid-out extent, not o.height: identical for a pinned height, but for a
+        // grown editor it is the space flex just handed us — correct on the first frame.
         _ = try textarea_kit.render(
             b,
             r.origin.x,
             r.origin.y,
             r.size.width,
-            self.o.height,
+            r.size.height,
             self.opts(),
         );
     }
@@ -799,7 +807,9 @@ const TextareaSpec = struct {
 pub fn textarea(a: A, theme: *const Theme, state: *textarea_kit.TextAreaState, o: Ta) *Node {
     const spec = a.create(TextareaSpec) catch @panic("node arena oom");
     spec.* = .{ .theme = theme, .state = state, .o = o };
-    return node.leaf(a, TextareaSpec.measure, TextareaSpec.draw, spec);
+    const n = node.leaf(a, TextareaSpec.measure, TextareaSpec.draw, spec);
+    if (o.grow > 0) n.style.flex_grow = o.grow; // fill the flex parent's remaining main axis
+    return n;
 }
 
 pub const AlertOpt = struct {
