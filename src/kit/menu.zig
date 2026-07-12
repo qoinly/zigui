@@ -24,7 +24,8 @@ pub const MenuEntry = struct {
     kind: ItemKind = .item,
     id: []const u8 = "",
     label: []const u8 = "",
-    // Leading icon, mutually exclusive with a check.
+    // Leading icon. On a plain item it replaces the check slot; on a checked radio
+    // it makes a select-style option (icon leads, the check moves to the trailing edge).
     icon: ?icon.Icon = null,
     shortcut: []const u8 = "", // right-aligned hint, e.g. a caller-formatted "Cmd X"
     checked: bool = false,
@@ -255,7 +256,10 @@ fn draw_row_lead(
             .point_size = CHECK_PT,
             .color = fg,
         });
-    } else if (it.kind == .radio and it.checked) {
+        // A radio with an icon is a select-style option: the icon leads here and the
+        // check moves to the trailing edge (draw_row_trailing). Only an icon-less
+        // radio keeps the minimalist leading dot.
+    } else if (it.kind == .radio and it.checked and it.icon == null) {
         const dot_x = x + LEAD_SLOT / 2 - RADIO_R + 2;
         const dot_y = ry + ROW_H / 2 - RADIO_R;
         var dot = Quad.init(dot_x, dot_y, RADIO_R * 2, RADIO_R * 2);
@@ -281,7 +285,14 @@ fn draw_row_trailing(
     hovered: bool,
     tsty: label.Style,
 ) RenderError!void {
-    if (it.kind == .submenu) {
+    if (it.kind == .radio and it.checked and it.icon != null) {
+        // Select-style option: leading icon, trailing check for the current choice.
+        const ck_x = x + w - SIDE - CHECK_PT;
+        _ = try icon.render_icon_centered_y(b, ck_x, ry, ROW_H, .check, .{
+            .point_size = CHECK_PT,
+            .color = fg,
+        });
+    } else if (it.kind == .submenu) {
         const chev_x = x + w - SIDE - CHEVRON_SLOT + 2;
         _ = try icon.render_icon_centered_y(b, chev_x, ry, ROW_H, .chevron_right, .{
             .point_size = ICON_PT - 1,
