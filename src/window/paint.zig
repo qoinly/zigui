@@ -168,6 +168,11 @@ pub const PaintContext = struct {
     // A focused text input sets this while showing the native editor; the runtime
     // hides the singleton editor on a frame where nobody claims it (blur / nav away).
     text_field_active: bool = false,
+    // The focused text editor re-arms this each frame (ctx = its state, blur = how to
+    // unfocus it). on_mouse_down blurs it when a press lands anywhere but on it, so a
+    // click outside the editor drops focus. Reset per frame like text_field_active.
+    text_focus_ctx: ?*anyopaque = null,
+    text_focus_blur: ?*const fn (*anyopaque) void = null,
     // Back navigation: the navigator publishes its stack depth each frame so the
     // Android backend knows whether a Back press should pop (consume it) or
     // background the app (depth 1). back_pressed is set by that backend on a Back
@@ -416,11 +421,14 @@ pub const PaintContext = struct {
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true;
+        var hit_ctx: ?*anyopaque = null;
+        var handled = false;
         var i: usize = self.hitboxes.items.len;
         while (i > 0) {
             i -= 1;
             const hb = self.hitboxes.items[i];
             if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                hit_ctx = hb.ctx;
                 if (hb.on_point) |cb| {
                     cb(hb.ctx, x, y);
                     self.drag_cb = cb;
@@ -429,10 +437,19 @@ pub const PaintContext = struct {
                 } else if (hb.on_click) |cb| {
                     cb(hb.ctx);
                 }
-                self.renderer.request_redraw();
-                return;
+                handled = true;
+                break;
             }
         }
+        // A press anywhere but on the focused editor drops its focus (click-outside).
+        // The editor's own hitbox shares its ctx, so hitting it leaves focus intact.
+        if (self.text_focus_ctx) |fc| if (hit_ctx != fc) {
+            if (self.text_focus_blur) |blur| blur(fc);
+            self.text_focus_ctx = null;
+            self.text_focus_blur = null;
+            handled = true; // redraw to show the unfocus even on empty space
+        };
+        if (handled) self.renderer.request_redraw();
     }
 
     pub fn on_right_mouse_down(self: *PaintContext, x: f32, y: f32) void {

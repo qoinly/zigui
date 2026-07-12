@@ -491,6 +491,13 @@ fn drag_end_thunk(ctx: ?*anyopaque) void {
     st.drag_autoscroll_dy = 0;
 }
 
+// Drop focus: the paint context calls this when a press lands outside the editor
+// (registered via text_focus_blur while focused).
+fn blur_thunk(ctx: *anyopaque) void {
+    const st: *TextAreaState = @ptrCast(@alignCast(ctx));
+    st.focused = false;
+}
+
 // Seed/clear the anchor before a caret move: Shift extends (anchor stays put),
 // no Shift collapses the selection.
 fn extend_begin(st: *TextAreaState, ev: custom_shell.KeyEvent) void {
@@ -852,7 +859,8 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             return false;
         },
         .escape => {
-            if (has_sel(st)) st.sel_anchor = null; // clear selection, keep caret
+            if (has_sel(st)) st.sel_anchor = null // first Esc: clear selection, keep caret + focus
+            else st.focused = false; // then Esc: drop focus
             return false;
         },
         .page_up, .page_down => return false,
@@ -1130,6 +1138,13 @@ pub fn render(
 
     snap_caret(st);
     const g = prepare(b, st, opts, x, y, w, h);
+
+    // Register as the focus owner so a press outside the editor drops focus (and Esc
+    // can blur it). Re-armed every focused frame; the paint context resets it per frame.
+    if (st.focused) {
+        p.text_focus_ctx = st;
+        p.text_focus_blur = blur_thunk;
+    }
 
     const caret_before = st.caret;
     // Stay focused (caret/selection persist) but stop draining keys while a modal

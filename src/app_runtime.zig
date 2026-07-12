@@ -147,6 +147,8 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             pc.blur_modal = false; // an overlay re-arms it each frame while open
             pc.frost_count = 0; // the bars append their frost rects each frame
             pc.text_field_active = false; // a focused input re-arms it below
+            pc.text_focus_ctx = null; // the focused editor re-arms it during its render
+            pc.text_focus_blur = null;
             // Clear the redraw-again flag too: whatever still needs continuous
             // frames (animate(), a focused editor) re-arms it during the build, so
             // an idle window stops driving its loop instead of spinning forever.
