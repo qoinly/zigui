@@ -458,6 +458,15 @@ pub fn dialog(o: kit_nodes.Dialog) *node.Node {
     oo.ctx = fc.state;
     return kit_nodes.dialog(fc.arena, fc.theme, oo);
 }
+
+// A zero-size leaf that lifts the sibling(s) drawn after it into the modal top
+// layer (crisp, over a frosted backdrop). Place it as the first child of a
+// facade-composed modal's root — right after the scrim — so an arbitrary card
+// renders above the body instead of being z-ordered behind deep body nodes.
+pub fn modal_backdrop() *node.Node {
+    const fc = frame_ctx.get();
+    return kit_nodes.modal_backdrop(fc.arena, fc.paint);
+}
 pub fn sidebar(o: kit_nodes.Sidebar) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;

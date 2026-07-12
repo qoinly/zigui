@@ -1459,6 +1459,37 @@ const DialogSpec = struct {
     }
 };
 
+// A zero-size leaf that lifts everything drawn AFTER it into the modal top layer:
+// it records the current backdrop counts (so the renderer frosts the body+scrim
+// drawn before it and draws the following content crisp on top) — the same
+// mechanism kit.dialog uses internally, exposed so a facade-composed modal (with
+// arbitrary children) can render above the body instead of losing the z-order to
+// deeply-nested body nodes. Place it as the first child of the modal's root, after
+// the scrim; the card follows and renders on top.
+const ModalBackdropSpec = struct {
+    paint: ?*custom_paint.PaintContext = null,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, 0);
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        _ = r;
+        const self: *ModalBackdropSpec = @ptrCast(@alignCast(ctx));
+        const pc = self.paint orelse return;
+        pc.blur_modal = true;
+        pc.backdrop_prims = @intCast(b.prims.items.len);
+        pc.backdrop_sprites = @intCast(b.sprites.items.len);
+        pc.backdrop_color = @intCast(b.color_sprites.items.len);
+    }
+};
+
+pub fn modal_backdrop(a: A, pc: ?*custom_paint.PaintContext) *Node {
+    const spec = a.create(ModalBackdropSpec) catch @panic("node arena oom");
+    spec.* = .{ .paint = pc };
+    return node.leaf(a, ModalBackdropSpec.measure, ModalBackdropSpec.draw, spec);
+}
+
 pub fn dialog(a: A, theme: *const Theme, o: Dialog) *Node {
     std.debug.assert(o.actions.len <= MAX_DIALOG_ACTIONS);
     // Copy actions into the arena: a `&.{...}` struct-array literal is a stack
