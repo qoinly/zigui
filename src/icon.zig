@@ -103,6 +103,8 @@ pub const Icon = enum {
     package,
     wrench,
     ellipsis,
+    pencil,
+    star,
 };
 
 pub const IconParams = struct {

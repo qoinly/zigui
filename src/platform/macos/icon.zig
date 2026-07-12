@@ -106,6 +106,8 @@ pub const MacIconSystem = struct {
             .package => "shippingbox",
             .wrench => "wrench.and.screwdriver",
             .ellipsis => "ellipsis",
+            .pencil => "pencil",
+            .star => "star",
         };
     }
 

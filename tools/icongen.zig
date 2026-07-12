@@ -465,6 +465,8 @@ const MAP = [_]Map{
     .{ .icon = "package", .lucide = "package" },
     .{ .icon = "wrench", .lucide = "wrench" },
     .{ .icon = "ellipsis", .lucide = "ellipsis" },
+    .{ .icon = "pencil", .lucide = "pencil" },
+    .{ .icon = "star", .lucide = "star" },
 };
 
 const Entry = struct { name: []const u8, cmds: []Cmd };

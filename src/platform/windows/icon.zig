@@ -141,6 +141,8 @@ pub const WinIconSystem = struct {
             .package => "", // no clean Segoe match
             .wrench => "\u{E90F}", // Repair
             .ellipsis => "\u{E712}", // More
+            .pencil => "\u{E70F}", // Edit
+            .star => "\u{E734}", // FavoriteStar
         };
     }
 
