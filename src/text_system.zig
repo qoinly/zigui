@@ -270,6 +270,12 @@ pub fn register_app_font(path: []const u8) bool {
     return false;
 }
 
+// Enable/disable ligatures + contextual alternates for all shaping. No-op on
+// backends that don't support it.
+pub fn set_ligatures(on: bool) void {
+    if (@hasDecl(native_text_mod, "set_ligatures")) native_text_mod.set_ligatures(on);
+}
+
 const NativeAtlas = switch (builtin.os.tag) {
     .macos => @import("platform/macos/mono_atlas.zig").MetalMonoAtlas,
     .ios => @import("platform/macos/mono_atlas.zig").MetalMonoAtlas,

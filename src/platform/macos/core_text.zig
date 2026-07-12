@@ -27,6 +27,7 @@ pub const CGContextRef = ?*anyopaque;
 
 pub const CFStringEncoding = u32;
 pub const CFNumberType = c_long;
+pub const kCFNumberIntType: CFNumberType = 9;
 pub const CTFontUIFontType = u32;
 pub const CTFontOrientation = u32;
 
@@ -63,6 +64,7 @@ pub extern "CoreFoundation" const kCFTypeDictionaryKeyCallBacks: anyopaque;
 pub extern "CoreFoundation" const kCFTypeDictionaryValueCallBacks: anyopaque;
 
 pub extern "CoreText" const kCTFontAttributeName: CFStringRef;
+pub extern "CoreText" const kCTLigatureAttributeName: CFStringRef;
 pub extern "CoreText" const kCTFontTraitsAttribute: CFStringRef;
 pub extern "CoreText" const kCTFontWeightTrait: CFStringRef;
 

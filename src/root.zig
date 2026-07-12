@@ -1077,6 +1077,13 @@ pub fn register_font_file(path: []const u8) bool {
     return text_system.register_app_font(path);
 }
 
+// Enable or disable ligatures + contextual alternates for ALL text shaping. A
+// code editor / monospace grid wants them off (a "=>" ligature collapses two
+// cells into one glyph and desyncs the caret). Call once at startup.
+pub fn set_ligatures(enabled: bool) void {
+    text_system.set_ligatures(enabled);
+}
+
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;
 pub const Primitive = primitives.Primitive;

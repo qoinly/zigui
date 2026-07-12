@@ -67,6 +67,19 @@ fn tag(a: u8, b: u8, c: u8, d: u8) u32 {
 pub const METRICS_TAG_CAP_HEIGHT: u32 = tag('c', 'p', 'h', 't');
 pub const METRICS_TAG_X_HEIGHT: u32 = tag('x', 'h', 'g', 't');
 
+pub const Feature = extern struct { tag: u32, value: u32, start: c_uint, end: c_uint };
+
+// Turn OFF ligatures + contextual alternates when set. A monospace editor lays
+// text on a fixed column grid, so a "=>" ligature would collapse two cells into
+// one glyph and desync the caret. Set once at startup; the shape cache stays
+// consistent. Default false = HarfBuzz's normal (ligatures on).
+pub var disable_liga: bool = false;
+const LIGA_OFF = [_]Feature{
+    .{ .tag = tag('l', 'i', 'g', 'a'), .value = 0, .start = 0, .end = 0xFFFF_FFFF },
+    .{ .tag = tag('c', 'l', 'i', 'g'), .value = 0, .start = 0, .end = 0xFFFF_FFFF },
+    .{ .tag = tag('c', 'a', 'l', 't'), .value = 0, .start = 0, .end = 0xFFFF_FFFF },
+};
+
 var fns: Fns = undefined;
 var g_loaded: bool = false;
 
@@ -125,7 +138,11 @@ pub fn shape(font: *Font, buffer: *Buffer, text: []const u8) ?Shaped {
     fns.hb_buffer_reset(buffer);
     fns.hb_buffer_add_utf8(buffer, text.ptr, @intCast(text.len), 0, @intCast(text.len));
     fns.hb_buffer_guess_segment_properties(buffer);
-    fns.hb_shape(font, buffer, null, 0);
+    if (disable_liga) {
+        fns.hb_shape(font, buffer, @ptrCast(&LIGA_OFF), LIGA_OFF.len);
+    } else {
+        fns.hb_shape(font, buffer, null, 0);
+    }
     const len = fns.hb_buffer_get_length(buffer);
     if (len == 0) return null;
     const infos = fns.hb_buffer_get_glyph_infos(buffer, null) orelse return null;
