@@ -149,6 +149,15 @@ pub const WinIconSystem = struct {
             .file_code => "", // -> bundled Lucide
             .markdown => "", // -> bundled Lucide
             .image => "\u{EB9F}", // Photo2
+            .network => "", // -> bundled Lucide
+            .toy_brick => "", // -> bundled Lucide
+            .keyboard => "\u{E144}", // KeyboardClassic
+            .laptop => "", // -> bundled Lucide
+            .download => "\u{E896}", // Download
+            .database => "", // -> bundled Lucide
+            .folder_plus => "", // -> bundled Lucide
+            .file_plus => "", // -> bundled Lucide
+            .file_up => "", // -> bundled Lucide
         };
     }
 

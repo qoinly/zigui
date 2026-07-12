@@ -473,6 +473,15 @@ const MAP = [_]Map{
     .{ .icon = "file_code", .lucide = "file-code" },
     .{ .icon = "markdown", .lucide = "markdown" }, // not in Lucide; source: tools/extra-icons/markdown.svg
     .{ .icon = "image", .lucide = "image" },
+    .{ .icon = "network", .lucide = "network" },
+    .{ .icon = "toy_brick", .lucide = "toy-brick" },
+    .{ .icon = "keyboard", .lucide = "keyboard" },
+    .{ .icon = "laptop", .lucide = "laptop" },
+    .{ .icon = "download", .lucide = "download" },
+    .{ .icon = "database", .lucide = "database" },
+    .{ .icon = "folder_plus", .lucide = "folder-plus" },
+    .{ .icon = "file_plus", .lucide = "file-plus" },
+    .{ .icon = "file_up", .lucide = "file-up" },
 };
 
 const Entry = struct { name: []const u8, cmds: []Cmd };

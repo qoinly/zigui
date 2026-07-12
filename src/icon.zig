@@ -111,6 +111,15 @@ pub const Icon = enum {
     file_code,
     markdown,
     image,
+    network,
+    toy_brick,
+    keyboard,
+    laptop,
+    download,
+    database,
+    folder_plus,
+    file_plus,
+    file_up,
 };
 
 pub const IconParams = struct {

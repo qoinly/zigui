@@ -114,6 +114,15 @@ pub const MacIconSystem = struct {
             .file_code => "doc.plaintext",
             .markdown => "m.square",
             .image => "photo",
+            .network => "network",
+            .toy_brick => "puzzlepiece.extension",
+            .keyboard => "keyboard",
+            .laptop => "laptopcomputer",
+            .download => "arrow.down.to.line",
+            .database => "", // no clean SF match -> bundled Lucide
+            .folder_plus => "folder.badge.plus",
+            .file_plus => "doc.badge.plus",
+            .file_up => "arrow.up.doc",
         };
     }
 
