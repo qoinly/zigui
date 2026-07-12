@@ -1478,6 +1478,9 @@ const ModalBackdropSpec = struct {
         const self: *ModalBackdropSpec = @ptrCast(@alignCast(ctx));
         const pc = self.paint orelse return;
         pc.blur_modal = true;
+        // Composed modals dim via their own scrim; skip the costly full-screen blur
+        // (it re-runs each frame, and its crisp-top region seams the backdrop).
+        pc.modal_no_blur = true;
         pc.backdrop_prims = @intCast(b.prims.items.len);
         pc.backdrop_sprites = @intCast(b.sprites.items.len);
         pc.backdrop_color = @intCast(b.color_sprites.items.len);

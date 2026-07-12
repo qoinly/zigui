@@ -1857,12 +1857,14 @@ pub const Renderer = struct {
         split_sprites: usize,
         split_color: usize,
         crisp_top: f32,
+        blur: bool,
     ) void {
         self.draw_frame_with(clear, prims, sprites, mono_atlas, color_sprites, color_atlas, .{
             .split_prims = split_prims,
             .split_sprites = split_sprites,
             .split_color = split_color,
             .crisp_top = crisp_top,
+            .no_blur = !blur,
         });
     }
 
@@ -1893,6 +1895,7 @@ pub const Renderer = struct {
         split_sprites: usize,
         split_color: usize,
         crisp_top: f32,
+        no_blur: bool = false, // top-layer split, but blit the backdrop crisp (no blur)
     };
 
     fn draw_frame_impl(
@@ -1996,26 +1999,33 @@ pub const Renderer = struct {
         self.dfns.vkCmdEndRenderPass(cmd);
         self.offscreen_read_barrier(cmd, self.scene_target.image);
 
-        // Pass H: horizontal blur scene -> aux.
-        self.begin_pass(cmd, self.offscreen_pass, self.blur_target.framebuffer, clear);
-        self.fullscreen_pass(cmd, self.blur_h_pipeline, self.scene_dset, push);
-        self.dfns.vkCmdEndRenderPass(cmd);
-        self.offscreen_read_barrier(cmd, self.blur_target.image);
-
-        // Backbuffer: vertical blur aux -> full frame, the crisp strip re-blit,
-        // then the modal layer crisp on top.
-        self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
-        self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
-        const top_px = m.crisp_top * scale;
-        if (top_px >= 1) {
-            const strip = vk.Rect2D{ .extent = .{
-                .width = self.extent.width,
-                .height = @intFromFloat(@min(top_px, @as(f32, @floatFromInt(self.extent.height)))),
-            } };
-            self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&strip));
+        if (m.no_blur) {
+            // No blur: blit the crisp backdrop fullscreen, then the modal on top. The
+            // top-layer split without the (per-frame) separable-blur passes.
+            self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
             self.fullscreen_pass(cmd, self.blit_pipeline, self.scene_dset, push);
-            const full = vk.Rect2D{ .extent = self.extent };
-            self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&full));
+        } else {
+            // Pass H: horizontal blur scene -> aux.
+            self.begin_pass(cmd, self.offscreen_pass, self.blur_target.framebuffer, clear);
+            self.fullscreen_pass(cmd, self.blur_h_pipeline, self.scene_dset, push);
+            self.dfns.vkCmdEndRenderPass(cmd);
+            self.offscreen_read_barrier(cmd, self.blur_target.image);
+
+            // Backbuffer: vertical blur aux -> full frame, the crisp strip re-blit,
+            // then the modal layer crisp on top.
+            self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
+            self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
+            const top_px = m.crisp_top * scale;
+            if (top_px >= 1) {
+                const strip = vk.Rect2D{ .extent = .{
+                    .width = self.extent.width,
+                    .height = @intFromFloat(@min(top_px, @as(f32, @floatFromInt(self.extent.height)))),
+                } };
+                self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&strip));
+                self.fullscreen_pass(cmd, self.blit_pipeline, self.scene_dset, push);
+                const full = vk.Rect2D{ .extent = self.extent };
+                self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&full));
+            }
         }
         self.encode_layers(
             cmd,
