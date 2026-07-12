@@ -19,6 +19,22 @@ pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
 pub const HitBox = types.HitBox;
 const Quad = primitives.Quad;
+
+// Adaptive-poll signals for the desktop poll loop (platform/linux/app.zig reads
+// them each round; ignored where rendering is display-link driven). The loop
+// resets them before tick_all, then every PaintContext.tick() reports whether it
+// needs vsync-rate frames (an animation) and how soon its next scheduled redraw is,
+// so the loop can idle-sleep instead of spinning at a fixed tick.
+pub var wants_fast_poll: bool = false;
+pub var soonest_deadline_ms: i32 = -1; // -1 = nothing scheduled this round
+
+fn note_poll(animating: bool, redraw_at: ?f64, now_s: f64) void {
+    if (animating) wants_fast_poll = true;
+    if (redraw_at) |d| {
+        const ms: i32 = @intFromFloat(@max(0.0, (d - now_s) * 1000.0));
+        soonest_deadline_ms = if (soonest_deadline_ms < 0) ms else @min(soonest_deadline_ms, ms);
+    }
+}
 const BoundsF = geometry.BoundsF;
 
 // The pinned 0.16.0 std has no Timer/Instant/nanoTimestamp, so read the platform
@@ -506,6 +522,7 @@ pub const PaintContext = struct {
                 self.renderer.request_redraw();
             }
         }
+        note_poll(self.animating, self.redraw_at, self.now_s);
         if (!self.renderer.dirty) return null;
 
         self.prims.clearRetainingCapacity();
