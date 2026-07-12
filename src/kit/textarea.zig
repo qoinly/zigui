@@ -182,6 +182,7 @@ pub const TextAreaOptions = struct {
     pad: f32 = 10,
     read_only: bool = false,
     wrap: bool = true, // soft-wrap long lines to the view width (no h-scroll exists)
+    bordered: bool = true, // false = fill only, no border/ring (a code pane in a panel)
     font_family: []const u8 = "SF Mono",
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -1126,13 +1127,16 @@ pub fn render(
     if (changed) if (opts.on_change) |cb| cb(opts.ctx);
     apply_scroll(st, opts, g, changed or st.caret != caret_before);
 
-    // Box: bg + border (ring when focused).
+    // Box: bg, plus a border (ring when focused) unless the caller wants a bare
+    // fill — a code pane embedded in a panel draws no box of its own.
     var box = Quad.init(x, y, w, h);
-    const border = if (st.focused) theme.ring else theme.border;
-    _ = box.set_background(theme.background)
-        .set_corner_radius(theme.radius - 2)
-        .set_border_color(border)
-        .set_border_width(if (st.focused) 2 else 1);
+    _ = box.set_background(theme.background);
+    if (opts.bordered) {
+        const border = if (st.focused) theme.ring else theme.border;
+        _ = box.set_corner_radius(theme.radius - 2)
+            .set_border_color(border)
+            .set_border_width(if (st.focused) 2 else 1);
+    }
     try b.append_quad(box);
 
     const band: [4]f32 = .{ g.text_x, y + 1, w - opts.pad * 2, h - 2 };
