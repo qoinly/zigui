@@ -468,6 +468,11 @@ const MAP = [_]Map{
     .{ .icon = "pencil", .lucide = "pencil" },
     .{ .icon = "star", .lucide = "star" },
     .{ .icon = "corner_down_left", .lucide = "corner-down-left" },
+    .{ .icon = "braces", .lucide = "braces" },
+    .{ .icon = "code", .lucide = "code" },
+    .{ .icon = "file_code", .lucide = "file-code" },
+    .{ .icon = "markdown", .lucide = "markdown" }, // not in Lucide; source: tools/extra-icons/markdown.svg
+    .{ .icon = "image", .lucide = "image" },
 };
 
 const Entry = struct { name: []const u8, cmds: []Cmd };
