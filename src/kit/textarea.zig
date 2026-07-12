@@ -580,6 +580,15 @@ fn caret_visible(st: *const TextAreaState, now_s: f64) bool {
     return phase < BLINK_PERIOD_S * 0.5;
 }
 
+// Seconds until the caret's next on<->off flip — a pure fn of the blink epoch, so
+// a focused editor can schedule one wakeup per flip instead of animating every frame.
+fn next_blink_edge_s(st: *const TextAreaState, now_s: f64) f64 {
+    const dt = now_s - st.blink_phase_t0;
+    const phase = dt - @floor(dt / BLINK_PERIOD_S) * BLINK_PERIOD_S;
+    const half = BLINK_PERIOD_S * 0.5;
+    return if (phase < half) half - phase else BLINK_PERIOD_S - phase;
+}
+
 // Top of the arena bytes used by the undo region; redo bytes (if any) sit above.
 fn undo_high_water(st: *const TextAreaState) usize {
     if (st.undo_count == 0) return 0;
@@ -1149,8 +1158,14 @@ pub fn render(
     try draw_caret(b, st, opts, g, band);
     try add_body_hitbox(st, opts, g);
 
-    // A blinking caret or a held edge-drag needs the vsync loop redrawing.
-    if (st.focused or st.dragging) p.animating = true;
+    // A held edge-drag autoscrolls, so it needs every vsync. A focused caret only
+    // changes at its blink edges: schedule a single wakeup at the next one instead of
+    // animating every frame (so a focused-but-idle editor renders ~2×/s, not 125×/s).
+    if (st.dragging) {
+        p.animating = true;
+    } else if (st.focused) {
+        p.request_redraw_after(next_blink_edge_s(st, p.now_s));
+    }
 
     st.last_text_x = g.text_x;
     st.last_text_y = g.text_y;

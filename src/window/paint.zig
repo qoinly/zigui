@@ -216,8 +216,11 @@ pub const PaintContext = struct {
 
     // Schedule one redraw ~seconds from now. Cheaper than animating every vsync
     // for a slow refresh (a clock, a resource meter); re-arm each frame to repeat.
+    // The earliest request wins, so independent schedulers in one frame (e.g. a 1 s
+    // meter and a 0.5 s caret blink) compose instead of the last one clobbering the rest.
     pub fn request_redraw_after(self: *PaintContext, seconds: f64) void {
-        self.redraw_at = self.now_s + seconds;
+        const at = self.now_s + seconds;
+        self.redraw_at = if (self.redraw_at) |cur| @min(cur, at) else at;
     }
 
     // Record the topmost hover-id box under the pointer. Call once per frame after
