@@ -4,6 +4,7 @@ const builder = @import("../render/builder.zig");
 const RenderError = builder.RenderError;
 const label = @import("../render/label.zig");
 const icon = @import("../render/icon.zig");
+const kbd = @import("kbd.zig");
 const primitives = @import("../primitives.zig");
 const custom_paint = @import("../window/paint.zig");
 const tr = @import("theme_resolve.zig");
@@ -27,7 +28,8 @@ pub const MenuEntry = struct {
     // Leading icon. On a plain item it replaces the check slot; on a checked radio
     // it makes a select-style option (icon leads, the check moves to the trailing edge).
     icon: ?icon.Icon = null,
-    shortcut: []const u8 = "", // right-aligned hint, e.g. a caller-formatted "Cmd X"
+    shortcut: []const u8 = "", // right-aligned text hint, e.g. a caller-formatted "Cmd X"
+    keys: []const []const u8 = &.{}, // right-aligned kbd chips (takes precedence over shortcut)
     checked: bool = false,
     disabled: bool = false,
     destructive: bool = false, // red text; red fill on hover
@@ -123,6 +125,8 @@ fn panel_width(b: *RenderBuilder, opts: *const MenuOptions, items: []const MenuE
         var trail: f32 = 0;
         if (it.kind == .submenu) {
             trail = CHEVRON_SLOT;
+        } else if (it.keys.len > 0) {
+            trail = kbd.measure(b, .{}, it.keys, .{ .theme = opts.theme, .size = .sm }).width + SHORTCUT_GAP;
         } else if (it.shortcut.len > 0) {
             trail = label.measure(b, it.shortcut, sty).width + SHORTCUT_GAP;
         }
@@ -298,6 +302,12 @@ fn draw_row_trailing(
             .point_size = ICON_PT - 1,
             .color = fg,
         });
+    } else if (it.keys.len > 0) {
+        const kopts = kbd.KbdOptions{ .theme = theme, .size = .sm };
+        const km = kbd.measure(b, .{}, it.keys, kopts);
+        const kx = x + w - SIDE - km.width;
+        const ky = ry + (ROW_H - km.height) / 2;
+        _ = try kbd.render(b, kx, ky, it.keys, kopts);
     } else if (it.shortcut.len > 0) {
         var sc = tsty;
         const sc_hl = hovered and !it.destructive;
