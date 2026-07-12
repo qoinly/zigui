@@ -108,6 +108,7 @@ pub const MacIconSystem = struct {
             .ellipsis => "ellipsis",
             .pencil => "pencil",
             .star => "star",
+            .corner_down_left => "arrow.turn.down.left",
         };
     }
 

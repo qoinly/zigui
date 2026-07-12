@@ -105,6 +105,7 @@ pub const Icon = enum {
     ellipsis,
     pencil,
     star,
+    corner_down_left,
 };
 
 pub const IconParams = struct {

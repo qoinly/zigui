@@ -143,6 +143,7 @@ pub const WinIconSystem = struct {
             .ellipsis => "\u{E712}", // More
             .pencil => "\u{E70F}", // Edit
             .star => "\u{E734}", // FavoriteStar
+            .corner_down_left => "", // no clean Segoe match -> bundled Lucide
         };
     }
 
