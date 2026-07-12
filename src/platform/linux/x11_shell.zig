@@ -52,6 +52,10 @@ pub const X11Window = struct {
     focused: bool = false,
     renderer_owned: bool = false,
     surface_ctx: ?*anyopaque = null,
+    // Set by configure/expose during an event drain; the drain paints once at the
+    // end (coalesced) instead of per event, so a resize storm doesn't trigger one
+    // full relayout + swapchain recreate per intermediate size.
+    needs_paint: bool = false,
 };
 
 var g_windows: [MAX_WINDOWS]X11Window = [_]X11Window{.{}} ** MAX_WINDOWS;
@@ -422,6 +426,15 @@ pub fn process_events() void {
         handle_event(event);
         xcb.free_event(event);
     }
+    // Coalesced paint: one repaint per window per drain, so a burst of
+    // ConfigureNotify/Expose events collapses to a single relayout + render at the
+    // final size rather than one per intermediate event (the resize-storm hot path).
+    for (&g_windows) |*win| {
+        if (win.in_use and win.needs_paint) {
+            win.needs_paint = false;
+            paint_now(win);
+        }
+    }
 }
 
 fn handle_event(event: *xcb.GenericEvent) void {
@@ -436,12 +449,12 @@ fn handle_event(event: *xcb.GenericEvent) void {
             if (w == win.width_pt and h == win.height_pt) return;
             win.width_pt = w;
             win.height_pt = h;
-            paint_now(win);
+            win.needs_paint = true; // coalesced: painted once after the drain
         },
         xcb.EXPOSE => {
             const expose: *const xcb.ExposeEvent = @ptrCast(event);
             const win = window_by_id(expose.window) orelse return;
-            paint_now(win);
+            win.needs_paint = true; // coalesced: painted once after the drain
         },
         xcb.CLIENT_MESSAGE => {
             const message: *const xcb.ClientMessageEvent = @ptrCast(event);
