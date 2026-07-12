@@ -130,6 +130,10 @@ pub const Cfg = struct {
     // box give up space; 0 pins it at its natural size so siblings absorb the
     // overflow instead (e.g. a fixed action cluster while a label area shrinks).
     shrink: f32 = 1,
+    // Flex-basis (main-axis start size before grow/shrink). null = auto (content).
+    // basis = 0 with grow lets siblings split the row EQUALLY regardless of content
+    // (two content-based grow cells otherwise drift by their content width).
+    basis: ?f32 = null,
     width: ?f32 = null,
     height: ?f32 = null,
     min_width: ?f32 = null,
@@ -172,6 +176,7 @@ fn style_of(cfg: Cfg, dir: FlexDirection) Style {
         .align_items = cfg.cross,
         .flex_grow = cfg.grow,
         .flex_shrink = cfg.shrink,
+        .flex_basis = if (cfg.basis) |b| .{ .px = b } else .auto,
         .width = if (cfg.width) |w| .{ .px = w } else .auto,
         .height = if (cfg.height) |h| .{ .px = h } else .auto,
         .min_width = if (cfg.min_width) |w| .{ .px = w } else .auto,
