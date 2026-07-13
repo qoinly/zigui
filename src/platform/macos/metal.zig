@@ -916,7 +916,9 @@ pub const Renderer = struct {
         objc.msg_send(void, desc, "setMinFilter:", .{MTLSamplerMinMagFilter.Linear});
         objc.msg_send(void, desc, "setMagFilter:", .{MTLSamplerMinMagFilter.Linear});
 
-        return objc.msg_send(?Id, self.device, "newSamplerStateWithDescriptor:", .{desc});
+        const state = objc.msg_send(?Id, self.device, "newSamplerStateWithDescriptor:", .{desc});
+        objc.msg_send(void, desc, "release", .{});
+        return state;
     }
 
     fn create_pipeline_state(
