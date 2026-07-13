@@ -312,7 +312,10 @@ pub fn text_input(field: *kit_nodes.TextField, o: kit_nodes.TextInputOpts) *node
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    // Default the focus ctx to the app state (what nearly every field wants), but
+    // let a caller pass its own — a grid of fields (KV cells) needs a per-cell ctx
+    // so one shared on_focus can tell which cell was clicked.
+    oo.ctx = o.ctx orelse fc.state;
     return kit_nodes.text_input(fc.arena, fc.theme, field, oo);
 }
 pub const EditableOpts = kit_nodes.EditableOpts;
