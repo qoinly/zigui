@@ -136,7 +136,6 @@ fn link_macos(zigui: *std.Build.Module) void {
     zigui.linkFramework("AppKit", .{});
     zigui.linkFramework("Foundation", .{});
     zigui.linkFramework("Metal", .{});
-    zigui.linkFramework("MetalPerformanceShaders", .{});
     zigui.linkFramework("QuartzCore", .{});
     zigui.linkFramework("CoreVideo", .{});
     zigui.linkFramework("CoreText", .{});

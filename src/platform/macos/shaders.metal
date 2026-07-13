@@ -504,6 +504,33 @@ fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[te
     return tex.sample(s, in.uv);
 }
 
+// Separable gaussian for the modal/frost backdrop, run at quarter res: a blit
+// downsamples the scene, H then V blur the small pair, and the final composite
+// blit upsamples. sigma is the full-res 12px divided by the downsample factor.
+constant float blur_sigma = 3.0;
+constant int blur_radius = 8;
+
+static float4 blur_1d(BlitOut in, texture2d<float> tex, float2 dir) {
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    float2 step = dir / float2(tex.get_width(), tex.get_height());
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    for (int i = -blur_radius; i <= blur_radius; i++) {
+        float w = exp(float(-i * i) / (2.0 * blur_sigma * blur_sigma));
+        acc += w * tex.sample(s, in.uv + float(i) * step);
+        wsum += w;
+    }
+    return acc / wsum;
+}
+
+fragment float4 blur_h_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    return blur_1d(in, tex, float2(1.0, 0.0));
+}
+
+fragment float4 blur_v_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    return blur_1d(in, tex, float2(0.0, 1.0));
+}
+
 // External-frame primitive: one textured quad per draw sampling a caller-owned
 // texture (remote screen / video), positioned in pixel space like the UI quads
 // and clipped to the layout rect. One uniform per draw at buffer(1) offset.

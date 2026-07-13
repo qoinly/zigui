@@ -54,7 +54,6 @@ pub const MTLSamplerMinMagFilter = struct {
 
 pub const MTLTextureUsage = struct {
     pub const ShaderRead: NSUInteger = 1;
-    pub const ShaderWrite: NSUInteger = 2;
     pub const RenderTarget: NSUInteger = 4;
 };
 
@@ -63,9 +62,14 @@ pub const MTLStorageMode = struct {
     pub const Private: NSUInteger = 2;
 };
 
-// MPS sigma is in points, not pixels - it scales itself by backing scale.
-const BLUR_SIGMA: f32 = 12.0;
-const MPSImageEdgeModeClamp: NSUInteger = 1;
+// The backdrop blur runs at quarter res (sigma and memory shrink with it); the
+// composite blit upsamples back. Factor 4 keeps a 12px full-res look via the
+// shader's fixed sigma 3.
+const BLUR_DOWNSAMPLE: NSUInteger = 4;
+
+// Drawn frames without a blur/frost pass before the offscreen trio is released
+// (~33 MB at 1200x800@2x); the next modal recreates it in its first frame.
+const OFFSCREEN_IDLE_FRAMES: u32 = 8;
 
 // Matches FrostUniform in ../ios/shaders.metal (48 bytes; the instanced array stride
 // must agree, so the float4 leaves the struct at 48 with the padding).
@@ -177,11 +181,15 @@ pub const Renderer = struct {
     frame_pipeline_state: ?Id = null,
     frame_nv12_pipeline_state: ?Id = null,
     metal_texture_cache: ?*anyopaque = null,
-    blur_kernel: ?Id = null,
+    blur_h_pipeline_state: ?Id = null,
+    blur_v_pipeline_state: ?Id = null,
     offscreen_tex: ?Id = null,
-    offscreen_blur_tex: ?Id = null,
+    // Quarter-res ping-pong pair for the separable blur; blur_a ends up blurred.
+    blur_a_tex: ?Id = null,
+    blur_b_tex: ?Id = null,
     offscreen_w: NSUInteger = 0,
     offscreen_h: NSUInteger = 0,
+    offscreen_idle_frames: u32 = 0,
 
     pub const Error = error{
         NoMetalDevice,
@@ -309,6 +317,14 @@ pub const Renderer = struct {
         renderer.blit_pipeline_state = renderer.create_pipeline_state(
             "blit_vertex",
             "blit_fragment",
+        );
+        renderer.blur_h_pipeline_state = renderer.create_pipeline_state(
+            "blit_vertex",
+            "blur_h_fragment",
+        );
+        renderer.blur_v_pipeline_state = renderer.create_pipeline_state(
+            "blit_vertex",
+            "blur_v_fragment",
         );
         renderer.frost_pipeline_state = renderer.create_frost_pipeline();
         renderer.frame_pipeline_state = renderer.create_pipeline_state(
@@ -449,9 +465,11 @@ pub const Renderer = struct {
             self.blit_pipeline_state,
             self.frame_pipeline_state,
             self.frame_nv12_pipeline_state,
-            self.blur_kernel,
+            self.blur_h_pipeline_state,
+            self.blur_v_pipeline_state,
             self.offscreen_tex,
-            self.offscreen_blur_tex,
+            self.blur_a_tex,
+            self.blur_b_tex,
         };
         for (optional) |maybe| if (maybe) |obj| objc.msg_send(void, obj, "release", .{});
         if (self.metal_texture_cache) |cache| CFRelease(cache);
@@ -619,14 +637,14 @@ pub const Renderer = struct {
         const want_frost = frosts.len > 0 and self.blit_pipeline_state != null and
             self.frost_pipeline_state != null and splits_ok;
         if (want_blur or want_frost) self.ensure_offscreen(new_width, new_height);
-        const blur_ok = self.offscreen_tex != null and
-            self.offscreen_blur_tex != null and self.ensure_blur();
+        const blur_ok = self.offscreen_tex != null and self.blur_a_tex != null and
+            self.blur_b_tex != null and self.blur_h_pipeline_state != null and
+            self.blur_v_pipeline_state != null;
         const do_blur = want_blur and blur_ok;
         const do_frost = want_frost and blur_ok;
 
         if (do_blur) {
             const off = self.offscreen_tex.?;
-            const blurred = self.offscreen_blur_tex.?;
             const enc1 = self.begin_pass(command_buffer, off, clear_color) orelse return;
             self.encode_scene(
                 enc1,
@@ -637,12 +655,8 @@ pub const Renderer = struct {
                 color_atlas_id,
             );
             objc.msg_send(void, enc1, "endEncoding", .{});
-            objc.msg_send(
-                void,
-                self.blur_kernel.?,
-                "encodeToCommandBuffer:sourceTexture:destinationTexture:",
-                .{ command_buffer, off, blurred },
-            );
+            const blurred = self.encode_blur_chain(command_buffer, off, clear_color) orelse
+                return;
             // Top strip re-blits the UNBLURRED backdrop so the title bar stays
             // crisp above the modal (scissor is pixels, top-left origin).
             const enc2 = self.begin_pass(command_buffer, texture, clear_color) orelse return;
@@ -671,7 +685,6 @@ pub const Renderer = struct {
             // Inverse of the modal blur: the backdrop stays crisp everywhere; only the
             // bar's capsule samples a blurred copy, so the content frosts under it.
             const off = self.offscreen_tex.?;
-            const blurred = self.offscreen_blur_tex.?;
             const enc1 = self.begin_pass(command_buffer, off, clear_color) orelse return;
             self.encode_scene(
                 enc1,
@@ -682,12 +695,8 @@ pub const Renderer = struct {
                 color_atlas_id,
             );
             objc.msg_send(void, enc1, "endEncoding", .{});
-            objc.msg_send(
-                void,
-                self.blur_kernel.?,
-                "encodeToCommandBuffer:sourceTexture:destinationTexture:",
-                .{ command_buffer, off, blurred },
-            );
+            const blurred = self.encode_blur_chain(command_buffer, off, clear_color) orelse
+                return;
             const enc2 = self.begin_pass(command_buffer, texture, clear_color) orelse return;
             self.encode_blit(enc2, off); // the crisp backdrop, fullscreen
             const sf: f32 = @floatCast(scale);
@@ -709,9 +718,52 @@ pub const Renderer = struct {
             objc.msg_send(void, enc, "endEncoding", .{});
         }
 
+        if (do_blur or do_frost) {
+            self.offscreen_idle_frames = 0;
+        } else if (self.offscreen_tex != null) {
+            self.offscreen_idle_frames += 1;
+            std.debug.assert(self.offscreen_idle_frames <= OFFSCREEN_IDLE_FRAMES);
+            if (self.offscreen_idle_frames == OFFSCREEN_IDLE_FRAMES) self.release_offscreen();
+        }
+
         objc.msg_send(void, command_buffer, "presentDrawable:", .{drawable});
         objc.msg_send(void, command_buffer, "commit", .{});
         self.dirty = false;
+    }
+
+    // In-flight command buffers retain what they reference, so releasing here at
+    // most defers the dealloc to GPU completion.
+    fn release_offscreen(self: *Renderer) void {
+        std.debug.assert(self.offscreen_tex != null);
+        std.debug.assert(self.offscreen_w > 0 and self.offscreen_h > 0);
+        if (self.offscreen_tex) |t| objc.msg_send(void, t, "release", .{});
+        if (self.blur_a_tex) |t| objc.msg_send(void, t, "release", .{});
+        if (self.blur_b_tex) |t| objc.msg_send(void, t, "release", .{});
+        self.offscreen_tex = null;
+        self.blur_a_tex = null;
+        self.blur_b_tex = null;
+        self.offscreen_w = 0;
+        self.offscreen_h = 0;
+        self.offscreen_idle_frames = 0;
+    }
+
+    // Downsample the scene into the quarter pair, blur H then V, and hand back
+    // the blurred texture (blur_a). Three tiny passes; the composite blit that
+    // follows upsamples it back to full res.
+    fn encode_blur_chain(self: *Renderer, cmd: Id, off: Id, clear: MTLClearColor) ?Id {
+        std.debug.assert(self.offscreen_w > 0 and self.offscreen_h > 0);
+        const a = self.blur_a_tex orelse return null;
+        const b = self.blur_b_tex orelse return null;
+        const down = self.begin_pass(cmd, a, clear) orelse return null;
+        self.encode_blit(down, off);
+        objc.msg_send(void, down, "endEncoding", .{});
+        const horiz = self.begin_pass(cmd, b, clear) orelse return null;
+        self.encode_fullscreen(horiz, self.blur_h_pipeline_state, a);
+        objc.msg_send(void, horiz, "endEncoding", .{});
+        const vert = self.begin_pass(cmd, a, clear) orelse return null;
+        self.encode_fullscreen(vert, self.blur_v_pipeline_state, b);
+        objc.msg_send(void, vert, "endEncoding", .{});
+        return a;
     }
 
     fn begin_pass(self: *Renderer, cmd: Id, tex: Id, clear: MTLClearColor) ?Id {
@@ -769,7 +821,12 @@ pub const Renderer = struct {
     }
 
     fn encode_blit(self: *Renderer, encoder: Id, tex: Id) void {
-        const pipeline = self.blit_pipeline_state orelse return;
+        self.encode_fullscreen(encoder, self.blit_pipeline_state, tex);
+    }
+
+    fn encode_fullscreen(self: *Renderer, encoder: Id, pipeline_state: ?Id, tex: Id) void {
+        _ = self;
+        const pipeline = pipeline_state orelse return;
         objc.msg_send(void, encoder, "setRenderPipelineState:", .{pipeline});
         objc.msg_send(void, encoder, "setFragmentTexture:atIndex:", .{ tex, @as(NSUInteger, 0) });
         objc.msg_send(void, encoder, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{
@@ -876,39 +933,41 @@ pub const Renderer = struct {
         const h: NSUInteger = @intFromFloat(h_f);
         if (w == 0 or h == 0) return;
         if (self.offscreen_tex != null and self.offscreen_w == w and self.offscreen_h == h) return;
-        const TD = objc.get_class("MTLTextureDescriptor") orelse return;
+        const t1 = self.make_target(w, h) orelse return;
+        const qw = @max(w / BLUR_DOWNSAMPLE, 1);
+        const qh = @max(h / BLUR_DOWNSAMPLE, 1);
+        const t2 = self.make_target(qw, qh) orelse {
+            objc.msg_send(void, t1, "release", .{});
+            return;
+        };
+        const t3 = self.make_target(qw, qh) orelse {
+            objc.msg_send(void, t1, "release", .{});
+            objc.msg_send(void, t2, "release", .{});
+            return;
+        };
+        if (self.offscreen_tex) |old| objc.msg_send(void, old, "release", .{});
+        if (self.blur_a_tex) |old| objc.msg_send(void, old, "release", .{});
+        if (self.blur_b_tex) |old| objc.msg_send(void, old, "release", .{});
+        self.offscreen_tex = t1;
+        self.blur_a_tex = t2;
+        self.blur_b_tex = t3;
+        self.offscreen_w = w;
+        self.offscreen_h = h;
+    }
+
+    fn make_target(self: *Renderer, w: NSUInteger, h: NSUInteger) ?Id {
+        std.debug.assert(w > 0 and h > 0);
+        const TD = objc.get_class("MTLTextureDescriptor") orelse return null;
         const desc = objc.msg_send(
             Id,
             TD,
             "texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
             .{ MTLPixelFormat.BGRA8Unorm, w, h, objc.NO },
         );
-        const usage = MTLTextureUsage.RenderTarget | MTLTextureUsage.ShaderRead |
-            MTLTextureUsage.ShaderWrite;
+        const usage = MTLTextureUsage.RenderTarget | MTLTextureUsage.ShaderRead;
         objc.msg_send(void, desc, "setUsage:", .{usage});
         objc.msg_send(void, desc, "setStorageMode:", .{MTLStorageMode.Private});
-        const t1 = objc.msg_send(?Id, self.device, "newTextureWithDescriptor:", .{desc}) orelse
-            return;
-        const t2 = objc.msg_send(?Id, self.device, "newTextureWithDescriptor:", .{desc}) orelse
-            return;
-        if (self.offscreen_tex) |old| objc.msg_send(void, old, "release", .{});
-        if (self.offscreen_blur_tex) |old| objc.msg_send(void, old, "release", .{});
-        self.offscreen_tex = t1;
-        self.offscreen_blur_tex = t2;
-        self.offscreen_w = w;
-        self.offscreen_h = h;
-    }
-
-    fn ensure_blur(self: *Renderer) bool {
-        if (self.blur_kernel != null) return true;
-        const cls = objc.get_class("MPSImageGaussianBlur") orelse return false;
-        const k = objc.msg_send(?Id, objc.alloc(cls), "initWithDevice:sigma:", .{
-            self.device,
-            BLUR_SIGMA,
-        }) orelse return false;
-        objc.msg_send(void, k, "setEdgeMode:", .{MPSImageEdgeModeClamp});
-        self.blur_kernel = k;
-        return true;
+        return objc.msg_send(?Id, self.device, "newTextureWithDescriptor:", .{desc});
     }
 
     fn create_sampler_state(self: *Renderer) ?Id {
