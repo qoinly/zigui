@@ -391,6 +391,8 @@ pub const PaintContext = struct {
         initial: []const u8,
         font_size: f32,
         rgba: types.Rgba,
+        secure: bool,
+        numeric: bool,
         id: u32,
     ) bool {
         const shown = custom_shell.show_text_field(
@@ -402,8 +404,8 @@ pub const PaintContext = struct {
             initial,
             font_size,
             rgba,
-            false,
-            false,
+            secure,
+            numeric,
             id,
         );
         if (shown) self.text_field_active = true;

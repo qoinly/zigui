@@ -1279,6 +1279,8 @@ const SelectOverlaySpec = struct {
                 fld.slice(),
                 theme.font_size,
                 theme.foreground,
+                false,
+                false,
                 SELECT_SEARCH_ID,
             );
             if (shown) {
@@ -1593,6 +1595,8 @@ fn edit_native(
     id: u32,
     spans: []const textarea_kit.TextSpan,
     font: ?[]const u8,
+    secure: bool,
+    numeric: bool,
 ) RenderError!void {
     std.debug.assert(id != 0); // 0 is the native editor's inactive sentinel
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
@@ -1606,6 +1610,8 @@ fn edit_native(
         field.slice(),
         theme.font_size,
         theme.foreground,
+        secure,
+        numeric,
         id,
     );
     // A background window does not own the editor, so it neither animates a caret
@@ -1616,7 +1622,7 @@ fn edit_native(
     field.set(pc.text_field_value(&tmp));
     if (!custom_shell.text_field_native_paint) {
         try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font);
-    } else if (spans.len > 0) {
+    } else if (spans.len > 0 and !secure) {
         // Native-painted backends (macOS) draw the text themselves, so the overlay
         // above can't reach it; hand the token colors to the native editor instead.
         // Flatten to the platform span type (no weight; native coloring is fg-only).
@@ -1767,6 +1773,15 @@ pub const TextInputOpts = struct {
     // Editor overlay font; null keeps the theme UI font. A URL/code field passes a
     // mono family so the idle and editing text read as one.
     font_family: ?[]const u8 = null,
+    // Field kind. `.password` masks the value (bullets idle, a secure native editor
+    // when focused - NSSecureTextField on macOS - and never reaches the clipboard);
+    // `.number` rejects non-numeric keystrokes in the native editor. The eye toggle
+    // (password) and steppers (number) render only when their handler is supplied.
+    kind: input_kit.InputKind = .text,
+    reveal: bool = false, // password: show the plaintext (caller-owned toggle state)
+    on_reveal_toggle: ?callbacks.ToggleFn = null,
+    on_increment: ?callbacks.ClickFn = null,
+    on_decrement: ?callbacks.ClickFn = null,
 };
 
 const TextInputSpec = struct {
@@ -1785,14 +1800,21 @@ const TextInputSpec = struct {
             .value = self.field.slice(),
             .placeholder = self.o.placeholder,
             .size = self.o.size,
+            .kind = self.o.kind,
+            .reveal = self.o.reveal,
             .focused = self.o.focused,
             .theme = self.theme,
             .paint = self.o.paint,
             .on_focus = self.o.on_focus,
+            .on_reveal_toggle = self.o.on_reveal_toggle,
+            .on_increment = self.o.on_increment,
+            .on_decrement = self.o.on_decrement,
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family);
+            // A revealed password shows plaintext, so its focused editor is not secure.
+            const secure = self.o.kind == .password and !self.o.reveal;
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family, secure, self.o.kind == .number);
         };
     }
 };
@@ -1836,7 +1858,7 @@ const TextEditableSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null, false, false);
         };
     }
 };
