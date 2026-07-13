@@ -55,14 +55,28 @@ void main() {
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
 
-    // Dashed border: drop the border in the dash gaps, walking the coordinate
-    // along whichever edge this fragment sits on.
+    // Dashed border: drop the border in the dash gaps. The dash coordinate is a
+    // CONTINUOUS clockwise arc length around the whole perimeter (top-centre = 0),
+    // so dashes flow through the corners instead of each edge phasing on its own.
     if (v_border_dash.x > 0.0) {
-        float along = (abs(center_pos.y) > abs(center_pos.x)) ? center_pos.x : center_pos.y;
+        float hw = half_size.x;
+        float hh = half_size.y;
+        float perim = 4.0 * (hw + hh);
+        float t;
+        if (abs(center_pos.y) * hw >= abs(center_pos.x) * hh) {
+            if (center_pos.y < 0.0)
+                t = center_pos.x >= 0.0 ? center_pos.x : perim + center_pos.x;
+            else
+                t = hw + 2.0 * hh + (hw - center_pos.x);
+        } else if (center_pos.x > 0.0) {
+            t = hw + (center_pos.y + hh);
+        } else {
+            t = 3.0 * hw + 2.0 * hh + (hh - center_pos.y);
+        }
         float period = v_border_dash.x + v_border_dash.y;
         float duty = v_border_dash.x / period;
-        float dc = fract(along / period);
-        float aa = max(fwidth(along) / period, 0.001);
+        float dc = fract(t / period);
+        float aa = max(fwidth(t) / period, 0.001);
         border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
     }
 
