@@ -1100,6 +1100,13 @@ pub const LayoutEngine = struct {
         std.debug.assert(child_id.index < self.nodes.items.len);
         const child = &self.nodes.items[child_id.index];
 
+        // An explicit min on the main axis overrides the automatic min-content probe
+        // (CSS: an explicit min-size replaces the content minimum). This is what lets
+        // a scroll viewport (min-height:0) report a 0 min so a fixed-height ancestor
+        // can bound it, instead of inheriting its tall, clipped child's height.
+        const explicit_min = if (is_row) child.style.min_width else child.style.min_height;
+        if (explicit_min != .auto) return self.resolve_length(explicit_min, 0) orelse 0;
+
         if (child.measure_fn) |measure_fn| {
             if (is_row) {
                 const m = finite_size(measure_fn(child.measure_ctx.?, .{ .min_content = true }));

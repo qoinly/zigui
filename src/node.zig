@@ -304,9 +304,15 @@ pub const ScrollOpts = struct {
 pub fn scroll(a: A, state: *ScrollState, o: ScrollOpts, child: *Node) *Node {
     child.style.flex_shrink = 0;
     const cfg = Cfg{ .grow = o.grow, .width = o.width, .height = o.height };
+    var style = style_of(cfg, .column);
+    // A scroll viewport clips its child, so it may shrink below the child's height
+    // (CSS overflow:scroll => min-size:0 on the scroll axis). Without this its
+    // min-content height is the tall child, so a fixed-height ancestor can't bound
+    // it and the content overflows the container instead of scrolling within it.
+    style.min_height = .{ .px = 0 };
     return make(a, .{
         .kind = .box,
-        .style = style_of(cfg, .column),
+        .style = style,
         .bg = o.bg,
         .scroll = state,
         .scroll_bar = o.bar,
