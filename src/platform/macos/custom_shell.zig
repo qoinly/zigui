@@ -21,6 +21,7 @@ const NSWindowStyleMaskResizable: NSUInteger = 1 << 3;
 const NSWindowStyleMaskFullScreen: NSUInteger = 1 << 14;
 const NSWindowStyleMaskFullSizeContentView: NSUInteger = 1 << 15;
 const NSBackingStoreBuffered: NSUInteger = 2;
+const NSWindowOcclusionStateVisible: NSUInteger = 1 << 1;
 
 const NSViewWidthSizable: NSUInteger = 1 << 1;
 const NSViewHeightSizable: NSUInteger = 1 << 4;
@@ -244,12 +245,13 @@ pub const HitTestFn = *const fn (ctx: *anyopaque, x: f32, y: f32, band_h: f32) b
 pub const RedrawFn = *const fn (ctx: *anyopaque) void;
 var g_hit_test: ?HitTestFn = null;
 var g_hit_ctx: ?*anyopaque = null;
+var g_redraw: ?RedrawFn = null;
 var g_titlebar_band_h: f32 = 0;
 
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
     g_hit_test = hit_test_cb;
     g_hit_ctx = ctx;
-    _ = redraw_cb; // macOS redraws on its own; only Windows needs the paint poke
+    g_redraw = redraw_cb; // occlusion flips poke exactly the flipped window with it
 }
 
 fn is_flipped_yes_imp(_: Id, _: Sel) callconv(.c) bool {
@@ -677,6 +679,11 @@ pub const CustomShellHandle = struct {
         return (mask & NSWindowStyleMaskFullScreen) != 0;
     }
 
+    pub fn is_occluded(self: CustomShellHandle) bool {
+        const state: NSUInteger = objc.msg_send(NSUInteger, self.window, "occlusionState", .{});
+        return (state & NSWindowOcclusionStateVisible) == 0;
+    }
+
     // Whether this window currently has keyboard focus. With more than one window
     // the app uses this so only the key window drives the shared native editor.
     pub fn is_key(self: CustomShellHandle) bool {
@@ -756,6 +763,21 @@ fn window_did_resize_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     if (@intFromPtr(win) != 0) recenter_traffic_lights(win);
 }
 
+// Occlusion flips need one frame either way: on hide so a view can park its
+// scheduled redraws (is_occluded), on reveal so the parked UI catches up. The
+// flipped window's own context is armed via its content-view ivar; a global
+// edge would race other windows' ticks and could leave this one stale. Strictly
+// the ivar, no global fallback: both go stale when a closing window's context is
+// freed, and the ivar is the one cleared on close.
+fn window_occlusion_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
+    const cb = g_redraw orelse return;
+    const win = objc.msg_send(Id, notif, "object", .{});
+    if (@intFromPtr(win) == 0) return;
+    const cv = objc.msg_send(?Id, win, "contentView", .{}) orelse return;
+    const ctx = objc.get_ivar(anyopaque, cv, CTX_IVAR) orelse return;
+    cb(ctx);
+}
+
 // Fired when any of our windows is closing; the runtime stops that window's
 // render loop so its display link can't keep driving a torn-down surface.
 pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
@@ -769,13 +791,18 @@ pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
 
 fn window_will_close_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     const win = objc.msg_send(Id, notif, "object", .{});
+    var cv: ?Id = null;
     if (@intFromPtr(win) != 0) {
-        const cv = objc.msg_send(?Id, win, "contentView", .{});
+        cv = objc.msg_send(?Id, win, "contentView", .{});
         if (cv) |v| release_editor_if_owned(v);
     }
-    const cb = g_window_close orelse return;
-    const ctx = g_window_close_ctx orelse return;
-    cb(ctx, win);
+    if (g_window_close) |cb| {
+        if (g_window_close_ctx) |ctx| cb(ctx, win);
+    }
+    // The close callback frees the window's render context, but AppKit keeps the
+    // window (and delegate) alive until the close finishes - a late occlusion
+    // notification must find no stale ivar to dereference.
+    if (cv) |v| objc.set_ivar(v, CTX_IVAR, @as(?*anyopaque, null));
 }
 
 // Drop the editor's owner when the owning window goes away, so a later window's
@@ -817,6 +844,12 @@ fn ensure_window_delegate() ?Id {
             c,
             objc.sel("windowWillClose:"),
             @ptrCast(&window_will_close_imp),
+            "v@:@",
+        );
+        _ = objc.class_addMethod(
+            c,
+            objc.sel("windowDidChangeOcclusionState:"),
+            @ptrCast(&window_occlusion_imp),
             "v@:@",
         );
         objc.objc_registerClassPair(c);

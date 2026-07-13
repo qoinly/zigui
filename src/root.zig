@@ -211,6 +211,16 @@ pub fn set_fullscreen(enable: bool) void {
 pub fn fullscreen() bool {
     return frame_ctx.get().paint.handle.is_fullscreen();
 }
+
+// Whether this window is fully hidden (covered, minimized, or on another Space).
+// A periodic view (a meter re-arming request_redraw_after) can park itself on
+// true; the shell renders one frame on each occlusion flip so it re-arms on
+// reveal. False where the platform doesn't report occlusion.
+pub fn window_occluded() bool {
+    const h = frame_ctx.get().paint.handle;
+    if (@hasDecl(@TypeOf(h), "is_occluded")) return h.is_occluded();
+    return false;
+}
 // Whether the window rendering this frame holds keyboard focus. A multi-window
 // app gates its focused input on this so only the key window drives the editor.
 pub fn window_is_key() bool {
