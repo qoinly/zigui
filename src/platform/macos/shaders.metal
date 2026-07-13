@@ -37,6 +37,7 @@ struct Quad {
     float4 border_widths;
     float4 transform;
     float4 clip_bounds;
+    float4 border_dash; // .x dash px, .y gap px (both 0 = solid)
 };
 
 struct QuadFragmentIn {
@@ -47,6 +48,7 @@ struct QuadFragmentIn {
     float4 corner_radii;
     float4 border_widths;
     float2 quad_size;
+    float2 border_dash;
 };
 
 struct QuadVertexOut {
@@ -90,6 +92,7 @@ vertex QuadVertexOut quad_vertex(
     out.frag.corner_radii = quad.corner_radii;
     out.frag.border_widths = quad.border_widths;
     out.frag.quad_size = quad.bounds.zw;
+    out.frag.border_dash = quad.border_dash.xy;
 
     float4 clip = compute_clip_distance(pixel_pos, quad.clip_bounds);
     out.clip_distance[0] = clip.x;
@@ -131,6 +134,17 @@ fragment float4 quad_fragment(QuadFragmentIn in [[stage_in]]) {
     }
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
+
+    // Dashed border: drop the border in the gaps of the dash pattern, walking the
+    // coordinate along whichever edge this fragment sits on.
+    if (in.border_dash.x > 0.0) {
+        float along = (abs(center_pos.y) > abs(center_pos.x)) ? center_pos.x : center_pos.y;
+        float period = in.border_dash.x + in.border_dash.y;
+        float duty = in.border_dash.x / period;
+        float dc = fract(along / period);
+        float aa = max(fwidth(along) / period, 0.001);
+        border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
+    }
 
     float4 bg = in.background * (1.0 - border_blend);
     float4 border = in.border_color * border_blend;

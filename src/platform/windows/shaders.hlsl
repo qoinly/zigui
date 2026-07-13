@@ -60,6 +60,7 @@ struct Quad {
     float4 border_widths;
     float4 transform;
     float4 clip_bounds;
+    float4 border_dash; // .x dash px, .y gap px (both 0 = solid)
 };
 
 StructuredBuffer<Quad> quads : register(t0);
@@ -72,6 +73,7 @@ struct QuadOut {
     float4 corner_radii : TEXCOORD1;
     float4 border_widths : TEXCOORD2;
     float2 quad_size : TEXCOORD3;
+    float2 border_dash : TEXCOORD4;
     float4 clip : SV_ClipDistance0;
 };
 
@@ -102,6 +104,7 @@ QuadOut quad_vertex(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.corner_radii = q.corner_radii;
     o.border_widths = q.border_widths;
     o.quad_size = q.bounds.zw;
+    o.border_dash = q.border_dash.xy;
     o.clip = compute_clip_distance(pixel_pos, q.clip_bounds);
     return o;
 }
@@ -128,6 +131,18 @@ float4 quad_fragment(QuadOut input) : SV_Target {
     }
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
+
+    // Dashed border: drop the border in the dash gaps, walking the coordinate
+    // along whichever edge this fragment sits on.
+    if (input.border_dash.x > 0.0) {
+        float along = (abs(center_pos.y) > abs(center_pos.x)) ? center_pos.x : center_pos.y;
+        float period = input.border_dash.x + input.border_dash.y;
+        float duty = input.border_dash.x / period;
+        float dc = frac(along / period);
+        float aa = max(fwidth(along) / period, 0.001);
+        border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
+    }
+
     float4 bg = input.background * (1.0 - border_blend);
     float4 border = input.border_color * border_blend;
     float4 color = bg + border;

@@ -70,6 +70,7 @@ pub const Node = struct {
     radius: f32 = 0,
     corner_radii: ?[4]f32 = null, // per-corner tl,tr,bl,br; overrides `radius` when set
     border_width: f32 = 1,
+    border_dash: [2]f32 = .{ 0, 0 }, // dash px, gap px; (0,0) = solid
     // text (colour resolved at draw: explicit override, else muted/foreground)
     text: []const u8 = "",
     color: ?Rgba = null,
@@ -150,6 +151,7 @@ pub const Cfg = struct {
     // rounded footer / top-rounded header flush inside a rounded card.
     radii: ?[4]f32 = null,
     border_width: f32 = 1,
+    border_dash: [2]f32 = .{ 0, 0 }, // dash px, gap px; (0,0) = solid border
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
     hover_id: []const u8 = "",
@@ -213,6 +215,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .radius = cfg.radius,
         .corner_radii = cfg.radii,
         .border_width = cfg.border_width,
+        .border_dash = cfg.border_dash,
         .on_click = cfg.on_click,
         .click_ctx = cfg.click_ctx,
         .hover_id = cfg.hover_id,
@@ -478,7 +481,10 @@ fn draw_tree(
                 } else {
                     _ = q.set_corner_radius(n.radius);
                 }
-                if (n.border) |bc| _ = q.set_border_color(bc).set_border_width(n.border_width);
+                if (n.border) |bc| {
+                    _ = q.set_border_color(bc).set_border_width(n.border_width);
+                    if (n.border_dash[0] > 0) _ = q.set_border_dash(n.border_dash[0], n.border_dash[1]);
+                }
                 try b.append_quad(q);
             }
         },

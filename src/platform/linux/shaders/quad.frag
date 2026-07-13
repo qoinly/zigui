@@ -8,6 +8,7 @@ layout(location = 2) in vec2 v_quad_pos;
 layout(location = 3) in vec4 v_corner_radii;
 layout(location = 4) in vec4 v_border_widths;
 layout(location = 5) in vec2 v_quad_size;
+layout(location = 6) in vec2 v_border_dash;
 
 layout(location = 0) out vec4 out_color;
 
@@ -53,6 +54,18 @@ void main() {
     }
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
+
+    // Dashed border: drop the border in the dash gaps, walking the coordinate
+    // along whichever edge this fragment sits on.
+    if (v_border_dash.x > 0.0) {
+        float along = (abs(center_pos.y) > abs(center_pos.x)) ? center_pos.x : center_pos.y;
+        float period = v_border_dash.x + v_border_dash.y;
+        float duty = v_border_dash.x / period;
+        float dc = fract(along / period);
+        float aa = max(fwidth(along) / period, 0.001);
+        border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
+    }
+
     vec4 bg = v_background * (1.0 - border_blend);
     vec4 border = v_border_color * border_blend;
     vec4 color = bg + border;
