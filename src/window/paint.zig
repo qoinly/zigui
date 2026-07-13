@@ -24,7 +24,9 @@ const Quad = primitives.Quad;
 // them each round; ignored where rendering is display-link driven). The loop
 // resets them before tick_all, then every PaintContext.tick() reports whether it
 // needs vsync-rate frames (an animation) and how soon its next scheduled redraw is,
-// so the loop can idle-sleep instead of spinning at a fixed tick.
+// so the loop can idle-sleep instead of spinning at a fixed tick. paint_tick_thunk
+// also sets the fast flag after a keyed frame (its follow-up frame must not wait
+// out the idle sleep).
 pub var wants_fast_poll: bool = false;
 pub var soonest_deadline_ms: i32 = -1; // -1 = nothing scheduled this round
 
@@ -922,12 +924,22 @@ fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
     s.user_cb(s.user_ctx, s.paint_ctx, frame) catch return;
+    // Keys are consumed mid-build, so a handler in a late-built view (the body)
+    // can mutate state an earlier-built view (the overlay) already rendered.
+    // One follow-up frame converges. The request lands after draw_frame (which
+    // clears the dirty flag); wants_fast_poll re-arms the linux idle sleep,
+    // whose note_poll report predates the key handling this round.
+    const keyed = s.paint_ctx.key_len > 0;
     s.paint_ctx.key_len = 0;
     s.paint_ctx.raw_len = 0;
     s.paint_ctx.wheel_dy = 0; // per-frame delta; consumer reads it in the callback above
     s.paint_ctx.wheel_dx = 0;
     custom_shell.apply_cursor(s.paint_ctx.cursor);
     s.paint_ctx.draw_frame(frame);
+    if (keyed) {
+        s.paint_ctx.request_redraw();
+        wants_fast_poll = true;
+    }
 }
 
 fn mouse_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
