@@ -118,7 +118,9 @@ const MAX_FRAMES = 8;
 // Drawables the layer keeps in flight. Pinned (not left to the CAMetalLayer
 // default) because the external-frame texture ring sizes itself off this to know
 // when a slot is safe to overwrite; an unpinned value would silently break that.
-pub const max_frames_in_flight: NSUInteger = 3;
+// 2, not 3: rendering is dirty-gated (sparse frames), so double buffering saves a
+// full-window drawable (~15 MB at 1200x800@2x) and nextDrawable rarely contends.
+pub const max_frames_in_flight: NSUInteger = 2;
 
 // CPU->GPU uniform for one external-frame draw; mirrors FrameUniform in
 // shaders.metal. 96 bytes (multiple of 16) so each element stays float4-aligned at
