@@ -967,6 +967,9 @@ pub fn show_text_field(
         g_active_secure = secure;
         g_active_id = id;
         g_field_owner = handle.content_view;
+        // setStringValue: above reset the storage to the plain text color; force the
+        // next color_text_field to reapply the token colors + mono font.
+        g_recolor_hash = 0;
     }
     return true;
 }
@@ -996,6 +999,10 @@ pub fn text_field_value(buf: []u8) []const u8 {
 
 const NSRange = extern struct { location: objc.NSUInteger, length: objc.NSUInteger };
 
+// Hash of the last text+color applied by color_text_field; its dirty gate. Reset to
+// 0 on every show_text_field (re)seed so a newly seeded field always recolors.
+var g_recolor_hash: u64 = 0;
+
 // Live per-token coloring for the focused (non-secure) native editor: recolors the
 // field editor's textStorage each frame and applies a mono font, so a single-line
 // input highlights its {{var}} tokens WHILE the user types (the NSTextField draws
@@ -1010,6 +1017,15 @@ pub fn color_text_field(
     font_size: f32,
 ) void {
     if (spans.len == 0 or g_active_secure) return; // never color masked plaintext
+    // Dirty gate: recolor only when the text changed. Mutating textStorage every
+    // frame restarts NSTextView's caret-blink timer, so an idle field's caret would
+    // never blink; skipping unchanged frames lets the native blink run. Reset to 0
+    // on every (re)seed (show_text_field) so a freshly seeded field always recolors.
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(value);
+    hasher.update(std.mem.asBytes(&base));
+    const h = hasher.final();
+    if (h == g_recolor_hash) return;
     const f = g_field orelse return;
     const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return;
     // During IME / dead-key composition the field editor holds provisional marked
@@ -1055,6 +1071,7 @@ pub fn color_text_field(
     }
 
     objc.msg_send(void, storage, "endEditing", .{});
+    g_recolor_hash = h; // colored this text; skip until it changes so the caret blinks
 }
 
 fn ns_color(NSColor: objc.Class, c: types.Rgba) Id {
