@@ -473,8 +473,8 @@ float4 blit_fragment(BlitOut input) : SV_Target {
     return blit_tex.Sample(atlas_sampler, input.uv);
 }
 
-// Separable Gaussian (the MPSImageGaussianBlur stand-in): one pass per axis,
-// pinned to a static radius so the loop unrolls. texel is 1/size in pixels;
+// Separable Gaussian (the macOS shaders.metal blur counterpart): one pass per
+// axis, pinned to a static radius so the loop unrolls. texel is 1/size in pixels;
 // sigma rides in the same constant so the weight falloff tracks the DPI scale.
 cbuffer BlurParams : register(b1) {
     float2 blur_texel;

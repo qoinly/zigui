@@ -32,8 +32,12 @@ const MAX_FRAME_DIM: u32 = 16384;
 pub const max_frames_in_flight: u32 = 3;
 
 // Modal-backdrop blur radius in points; scaled to pixels at draw time so the
-// frost tracks DPI. Mirrors the macOS MPSImageGaussianBlur sigma (12px at 2x).
+// frost tracks DPI. Mirrors the macOS quarter-res blur look (12px at 2x).
 const BLUR_SIGMA_PT: f32 = 6.0;
+
+// Drawn frames without a modal pass before the offscreen pair is released
+// (two full-window BGRA targets); the next modal recreates it. Mirrors macOS.
+const OFFSCREEN_IDLE_FRAMES: u32 = 8;
 
 pub const ClearColor = extern struct {
     rgba: [4]f32,
@@ -310,6 +314,7 @@ pub const Renderer = struct {
     blur_target: Offscreen = .{},
     offscreen_w: u32 = 0,
     offscreen_h: u32 = 0,
+    offscreen_idle_frames: u32 = 0,
 
     last_w: u32 = 0,
     last_h: u32 = 0,
@@ -1211,8 +1216,26 @@ pub const Renderer = struct {
             self.encode_scene(prims, sprites, mono_atlas, color_sprites, color_atlas);
         }
 
+        if (drew_modal) {
+            self.offscreen_idle_frames = 0;
+        } else if (self.scene_target.tex != null) {
+            self.offscreen_idle_frames += 1;
+            std.debug.assert(self.offscreen_idle_frames <= OFFSCREEN_IDLE_FRAMES);
+            if (self.offscreen_idle_frames == OFFSCREEN_IDLE_FRAMES) self.release_offscreen();
+        }
+
         _ = self.swapchain.present(0, 0);
         self.dirty = false;
+    }
+
+    fn release_offscreen(self: *Renderer) void {
+        std.debug.assert(self.scene_target.tex != null);
+        std.debug.assert(self.offscreen_w > 0 and self.offscreen_h > 0);
+        self.scene_target.release();
+        self.blur_target.release();
+        self.offscreen_w = 0;
+        self.offscreen_h = 0;
+        self.offscreen_idle_frames = 0;
     }
 
     // Render backdrop -> offscreen, separable-blur it, composite onto the
