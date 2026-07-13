@@ -206,7 +206,14 @@ pub const LayoutEngine = struct {
         const content_height = @max(final_height - padding_v, 0);
 
         var children_size = Size(f32){ .width = 0, .height = 0 };
-        if (style.display == .flex and node.children.items.len > 0) {
+        if (style.layers and node.children.items.len > 0) {
+            // Z-stack: every child gets the full content box, overlapping.
+            const box = Bounds(f32){ .origin = available.origin, .size = .{ .width = content_width, .height = content_height } };
+            for (node.children.items) |child_id| {
+                self.layout_node(child_id, box, depth + 1, box.size);
+            }
+            children_size = box.size;
+        } else if (style.display == .flex and node.children.items.len > 0) {
             children_size = self.layout_flex_children(
                 node,
                 available.origin,

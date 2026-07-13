@@ -145,6 +145,9 @@ pub fn Corners(comptime T: type) type {
 // on them.
 pub const Style = struct {
     display: Display = .flex,
+    // Z-stack: lay out every child at this node's full content box (overlapping),
+    // drawn in order (later child on top). For layered overlays (a menu above a modal).
+    layers: bool = false,
     position: Position = .relative, // NYI: absolute stays in flow
     overflow_x: Overflow = .visible, // NYI: no clip / no scroll content-size
     overflow_y: Overflow = .visible, // NYI

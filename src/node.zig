@@ -232,6 +232,16 @@ pub fn row(a: A, cfg: Cfg, kids: []const *Node) *Node {
     return box(a, .row, cfg, kids);
 }
 
+// Z-stack: children overlap at the same full box, drawn in order (last on top).
+// For layered overlays — e.g. a dropdown menu above an open modal.
+pub fn layers(a: A, kids: []const *Node) *Node {
+    return make(a, .{
+        .kind = .box,
+        .style = .{ .layers = true, .flex_grow = 1 },
+        .children = own_kids(a, kids),
+    });
+}
+
 // Greedy wrap row: children size themselves and wrap by width. For a fixed or
 // responsive column count, use grid_cols instead.
 pub fn grid(a: A, cfg: Cfg, kids: []const *Node) *Node {

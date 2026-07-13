@@ -47,6 +47,11 @@ pub fn row(cfg: node.Cfg, kids: []const *node.Node) *node.Node {
     const fc = frame_ctx.get();
     return node.row(fc.arena, with_state_ctx(fc, cfg), kids);
 }
+// Z-stack: children overlap at the full box, drawn in order (last on top). For a
+// dropdown/menu rendered above an open modal in the overlay slot.
+pub fn layers(kids: []const *node.Node) *node.Node {
+    return node.layers(frame_ctx.get().arena, kids);
+}
 pub fn grid(cfg: node.Cfg, kids: []const *node.Node) *node.Node {
     const fc = frame_ctx.get();
     return node.grid(fc.arena, with_state_ctx(fc, cfg), kids);
