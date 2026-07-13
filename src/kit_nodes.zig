@@ -2158,6 +2158,10 @@ fn toast_icon(v: toast_kit.ToastVariant) icon_render.Icon {
 pub const Toasts = struct {
     slots: []ToastSlot, // caller-owned, cross-frame
     paint: ?*custom_paint.PaintContext = null,
+    // Extra space reserved at the bottom of the hud region, so the stack floats
+    // above a footer/status bar the hud draws over (the hud fills the whole window).
+    // The bottom margin is then measured from the top of that reserved band.
+    bottom_inset: f32 = 0,
 };
 
 const ToastsSpec = struct {
@@ -2207,7 +2211,7 @@ const ToastsSpec = struct {
             }
             any = true;
             const tx = r.size.width - TOAST_W - TOAST_MARGIN;
-            const ty = r.size.height - TOAST_MARGIN - th - stack * (th + TOAST_GAP) + off;
+            const ty = r.size.height - self.o.bottom_inset - TOAST_MARGIN - th - stack * (th + TOAST_GAP) + off;
             const sz = try toast_kit.render(b, tx, ty, TOAST_W, .{
                 .title = t.text,
                 .variant = t.variant,
