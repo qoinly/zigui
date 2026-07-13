@@ -1295,6 +1295,8 @@ const SelectOverlaySpec = struct {
                         sr[3],
                         fld.slice(),
                         theme,
+                        &.{},
+                        null,
                     );
                 }
             }
@@ -1589,6 +1591,8 @@ fn edit_native(
     field: *TextField,
     theme: *const Theme,
     id: u32,
+    spans: []const textarea_kit.TextSpan,
+    font: ?[]const u8,
 ) RenderError!void {
     std.debug.assert(id != 0); // 0 is the native editor's inactive sentinel
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
@@ -1611,7 +1615,7 @@ fn edit_native(
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
     if (!custom_shell.text_field_native_paint)
-        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme);
+        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font);
 }
 
 // On a backend whose editor is state-only (no native control to float), the
@@ -1627,16 +1631,20 @@ fn draw_field_overlay(
     h: f32,
     value: []const u8,
     theme: *const Theme,
+    spans: []const textarea_kit.TextSpan,
+    font: ?[]const u8,
 ) RenderError!void {
     std.debug.assert(!custom_shell.text_field_native_paint);
     // A secure field must never paint its plaintext; bullets carry the same
     // caret/selection offsets because the mask is per-codepoint.
     var mask_buf: [256 * 3]u8 = undefined;
-    const shown_value = if (custom_shell.text_field_secure())
+    const secure = custom_shell.text_field_secure();
+    const shown_value = if (secure)
         field_mask(value, &mask_buf)
     else
         value;
-    const sty = label_render.Style{ .font_size = theme.font_size, .color = theme.foreground };
+    var sty = label_render.Style{ .font_size = theme.font_size, .color = theme.foreground };
+    if (font) |ff| sty.font_family = ff;
     // An empty value measures zero; a reference glyph keeps the caret's
     // vertical metrics stable while the field is empty.
     const m = label_render.measure(b, if (shown_value.len == 0) "M" else shown_value, sty);
@@ -1664,7 +1672,13 @@ fn draw_field_overlay(
     }
 
     const t0 = b.sprites.items.len;
-    _ = try label_render.render(b, x - shift, top, shown_value, sty);
+    // Colored token runs (never on a secure field: its plaintext must not leak, and
+    // the mask offsets would not line up with the value's spans).
+    if (spans.len > 0 and !secure) {
+        try render_field_runs(b, x - shift, top, shown_value, sty, spans);
+    } else {
+        _ = try label_render.render(b, x - shift, top, shown_value, sty);
+    }
     for (b.sprites.items[t0..]) |*sp| {
         sp.clip_bounds = theme_resolve.clip_intersect(sp.clip_bounds, clip);
     }
@@ -1674,6 +1688,34 @@ fn draw_field_overlay(
         _ = caret_q.set_background(theme.foreground).set_clip_bounds(clip);
         try b.append_quad(caret_q);
     }
+}
+
+// Render `value` as base-colored text with `spans` recolored, left to right. Spans
+// are expected sorted and non-overlapping; offsets are clamped to the value, and a
+// span that starts before the pen (overlap/out-of-order) is skipped, so bad input
+// degrades to plain text rather than misdrawing.
+fn render_field_runs(
+    b: *RenderBuilder,
+    x: f32,
+    top: f32,
+    value: []const u8,
+    base: label_render.Style,
+    spans: []const textarea_kit.TextSpan,
+) RenderError!void {
+    var pen = x;
+    var i: usize = 0; // byte cursor into value
+    for (spans) |sp| {
+        const s = @min(@as(usize, sp.start), value.len);
+        const e = @min(@as(usize, sp.end), value.len);
+        if (e <= s or s < i) continue;
+        if (s > i) pen += try label_render.render(b, pen, top, value[i..s], base);
+        var run = base;
+        run.color = sp.color;
+        run.weight = sp.weight;
+        pen += try label_render.render(b, pen, top, value[s..e], run);
+        i = e;
+    }
+    if (i < value.len) _ = try label_render.render(b, pen, top, value[i..], base);
 }
 
 // One U+2022 (3 bytes) per codepoint; a 256-byte value caps the buffer.
@@ -1703,6 +1745,15 @@ pub const TextInputOpts = struct {
     on_focus: ?callbacks.FocusFn = null,
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
+    // Optional token/syntax coloring of the value while editing (single-line
+    // highlight, e.g. {{var}} in a URL). Offsets index the value's bytes and are
+    // clamped to it; empty = plain foreground. Honored where the kit draws the text
+    // (overlay backends, incl. Linux); native-painted fields (macOS/Windows) draw
+    // plain until their native side adopts spans.
+    spans: []const textarea_kit.TextSpan = &.{},
+    // Editor overlay font; null keeps the theme UI font. A URL/code field passes a
+    // mono family so the idle and editing text read as one.
+    font_family: ?[]const u8 = null,
 };
 
 const TextInputSpec = struct {
@@ -1728,7 +1779,7 @@ const TextInputSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family);
         };
     }
 };
@@ -1772,7 +1823,7 @@ const TextEditableSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null);
         };
     }
 };
