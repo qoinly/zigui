@@ -994,6 +994,102 @@ pub fn text_field_value(buf: []u8) []const u8 {
     return buf[0..i];
 }
 
+const NSRange = extern struct { location: objc.NSUInteger, length: objc.NSUInteger };
+
+// Live per-token coloring for the focused (non-secure) native editor: recolors the
+// field editor's textStorage each frame and applies a mono font, so a single-line
+// input highlights its {{var}} tokens WHILE the user types (the NSTextField draws
+// the text itself, so the kit's overlay path can't reach it). Everything allocated
+// here is autoreleased and drained by a per-frame pool, so nothing is cached across
+// frames (a cached NSColor/NSFont without an explicit retain would be a UAF).
+pub fn color_text_field(
+    value: []const u8,
+    spans: []const types.FieldSpan,
+    base: types.Rgba,
+    font: ?[]const u8,
+    font_size: f32,
+) void {
+    if (spans.len == 0 or g_active_secure) return; // never color masked plaintext
+    const f = g_field orelse return;
+    const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return;
+    // During IME / dead-key composition the field editor holds provisional marked
+    // text our byte-offset spans don't describe; mutating it corrupts the compose.
+    if (objc.msg_send(objc.BOOL, editor, "hasMarkedText", .{}) != objc.NO) return;
+    const storage = objc.msg_send(?Id, editor, "textStorage", .{}) orelse return;
+    const len = objc.msg_send(objc.NSUInteger, storage, "length", .{});
+    if (len == 0) return;
+    const NSColor = objc.get_class("NSColor") orelse return;
+
+    const pool = objc.autorelease_pool_push();
+    defer objc.autorelease_pool_pop(pool);
+
+    // Attribute-name keys = the underlying string values of the
+    // NSForegroundColorAttributeName / NSFontAttributeName constants (the working
+    // pattern in status_bar.zig, rather than linking the AppKit globals).
+    var ck: [8]u8 = undefined;
+    const key_color = nsstring_from_stack(&ck, "NSColor");
+    var fk: [8]u8 = undefined;
+    const key_font = nsstring_from_stack(&fk, "NSFont");
+
+    objc.msg_send(void, storage, "beginEditing", .{});
+
+    // Reset the whole run to the base color (+ mono font) first, so a color from a
+    // now-deleted or retyped token can't linger.
+    const full = NSRange{ .location = 0, .length = len };
+    objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_color, ns_color(NSColor, base), full });
+    if (mono_font(font, font_size)) |mf|
+        objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_font, mf, full });
+
+    for (spans) |sp| {
+        const b0 = @min(@as(usize, sp.start), value.len);
+        const b1 = @min(@as(usize, sp.end), value.len);
+        if (b1 <= b0) continue;
+        // Offsets are UTF-8 bytes; NSTextStorage ranges are UTF-16 code units. Map,
+        // and drop a range that falls outside the live text so addAttribute can't
+        // raise NSRangeException (which would abort - Zig has no @catch for it).
+        const lo = utf16_units(value[0..b0]);
+        const hi = utf16_units(value[0..b1]);
+        if (lo >= len or hi <= lo) continue;
+        const rng = NSRange{ .location = lo, .length = @min(hi, len) - lo };
+        objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_color, ns_color(NSColor, sp.color), rng });
+    }
+
+    objc.msg_send(void, storage, "endEditing", .{});
+}
+
+fn ns_color(NSColor: objc.Class, c: types.Rgba) Id {
+    return objc.msg_send(Id, NSColor, "colorWithSRGBRed:green:blue:alpha:", .{
+        @as(CGFloat, c.r), @as(CGFloat, c.g), @as(CGFloat, c.b), @as(CGFloat, c.a),
+    });
+}
+
+// A mono NSFont for `font` family; falls back to the system monospaced face, then
+// the plain system face. Autoreleased - the caller's frame pool drains it.
+fn mono_font(font: ?[]const u8, size: f32) ?Id {
+    const NSFont = objc.get_class("NSFont") orelse return null;
+    const fs = @as(CGFloat, size);
+    if (font) |fam| {
+        var buf: [MAX_NSSTRING_BYTES]u8 = undefined;
+        const name = nsstring_from_stack(&buf, fam);
+        if (objc.msg_send(?Id, NSFont, "fontWithName:size:", .{ name, fs })) |face| return face;
+    }
+    if (objc.msg_send(?Id, NSFont, "monospacedSystemFontOfSize:weight:", .{ fs, @as(CGFloat, 0) })) |m| return m;
+    return objc.msg_send(?Id, NSFont, "systemFontOfSize:", .{fs});
+}
+
+// UTF-16 code-unit count of a UTF-8 slice (an astral codepoint is a surrogate pair).
+fn utf16_units(s: []const u8) objc.NSUInteger {
+    var n: objc.NSUInteger = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        const step: usize = if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+        n += if (step == 4) 2 else 1;
+        i += step;
+    }
+    return n;
+}
+
 fn nsstring_from_stack(buf: []u8, s: []const u8) Id {
     std.debug.assert(buf.len > 0); // buf.len - 1 below underflows on an empty buffer
     const NSString = objc.get_class("NSString") orelse unreachable;

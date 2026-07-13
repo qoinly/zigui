@@ -1614,8 +1614,21 @@ fn edit_native(
     pc.animating = true;
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
-    if (!custom_shell.text_field_native_paint)
+    if (!custom_shell.text_field_native_paint) {
         try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font);
+    } else if (spans.len > 0) {
+        // Native-painted backends (macOS) draw the text themselves, so the overlay
+        // above can't reach it; hand the token colors to the native editor instead.
+        // Flatten to the platform span type (no weight; native coloring is fg-only).
+        var fs: [64]types.FieldSpan = undefined;
+        var n: usize = 0;
+        for (spans) |s| {
+            if (n >= fs.len) break;
+            fs[n] = .{ .start = s.start, .end = s.end, .color = s.color };
+            n += 1;
+        }
+        pc.color_text_field(field.slice(), fs[0..n], theme.foreground, font, theme.font_size);
+    }
 }
 
 // On a backend whose editor is state-only (no native control to float), the

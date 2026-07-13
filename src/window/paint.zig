@@ -417,6 +417,21 @@ pub const PaintContext = struct {
         custom_shell.hide_text_field(self.handle);
     }
 
+    // Colorize the focused native editor's text per `spans` and set `font` live
+    // while editing (native-painted backends only; a no-op on the overlay ones,
+    // which the kit colors itself). See custom_shell.color_text_field.
+    pub fn color_text_field(
+        self: *PaintContext,
+        value: []const u8,
+        spans: []const types.FieldSpan,
+        base: types.Rgba,
+        font: ?[]const u8,
+        font_size: f32,
+    ) void {
+        _ = self;
+        custom_shell.color_text_field(value, spans, base, font, font_size);
+    }
+
     pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {
         self.mouse_x = x;
         self.mouse_y = y;

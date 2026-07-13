@@ -3,6 +3,13 @@ const icon_set = @import("../icon.zig");
 
 pub const Rgba = color.Rgba;
 
+// A colored byte-range over a text field's value, for native-painted single-line
+// editors that colorize their text themselves (see custom_shell.color_text_field).
+// Offsets are UTF-8 byte offsets into the value (converted per platform). A flat
+// struct here (not kit.textarea.TextSpan) keeps the platform layer free of a kit
+// import, which would cycle through custom_shell.
+pub const FieldSpan = struct { start: u32, end: u32, color: Rgba };
+
 pub const ChromeKind = enum { native, custom };
 
 pub const Feel = enum { flat, liquid_glass, transparent };

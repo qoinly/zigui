@@ -3,6 +3,7 @@
 // loop can reach the platform custom shell through one switch.
 
 const builtin = @import("builtin");
+const types = @import("window/types.zig");
 
 // Android is os.tag == .linux but has no desktop shell (NativeActivity owns one
 // fullscreen surface, no CSD, no clipboard/grab); it gets its own arm ahead of
@@ -40,6 +41,21 @@ pub const current_shift_down = impl.current_shift_down;
 pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
+
+// Recolor a native-painted single-line editor's text per `spans` and set `font`,
+// live while editing. Only meaningful where the native control draws the text
+// (macOS today); the overlay backends (Linux) already colorize via the kit, so
+// this is a no-op there. `value` is the field's current UTF-8 text (spans index
+// its bytes); `base` is the default color; `font` null keeps the system font.
+pub fn color_text_field(
+    value: []const u8,
+    spans: []const types.FieldSpan,
+    base: types.Rgba,
+    font: ?[]const u8,
+    font_size: f32,
+) void {
+    if (builtin.os.tag == .macos) impl.color_text_field(value, spans, base, font, font_size);
+}
 
 // Whether the platform's text-field overlay paints itself (a real native
 // control floats above the surface). When false the platform owns only the
