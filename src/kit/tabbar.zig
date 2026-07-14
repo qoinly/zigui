@@ -346,7 +346,9 @@ fn render_tab(
         try b.append_quad(hl);
     }
     if (!active) {
-        var sep = Quad.init(tx + tab_w - 1, y + GAP, 1, h - GAP * 2);
+        // Full-height divider on the tab's right edge (flush with the strip's top
+        // and bottom borders), so tabs read as adjacent cells rather than floating.
+        var sep = Quad.init(tx + tab_w - 1, y, 1, h);
         _ = sep.set_background(theme.border);
         try b.append_quad(sep);
     }
