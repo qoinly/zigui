@@ -57,7 +57,14 @@ pub const TabBarOptions = struct {
     scroll_x: f32 = 0, // caller-owned horizontal pan; clamped on render
     min_tab_w: f32 = 120, // shrink floor; past it the strip scrolls
     max_tab_w: f32 = 220, // grow ceiling so few tabs don't stretch edge-to-edge
+    // Title point size; 0 = the theme's font_size. The prefix chip renders 2pt
+    // smaller and bold, matching a sidebar's method-label look.
+    label_size: f32 = 0,
 };
+
+fn title_size(opts: *const TabBarOptions) f32 {
+    return if (opts.label_size > 0) opts.label_size else opts.theme.font_size;
+}
 
 pub const NEW_BTN_W: f32 = 36;
 pub const MAX_TABS = 32;
@@ -378,8 +385,8 @@ fn render_tab(
 
     if (tab.prefix.len > 0) {
         const psty = label.Style{
-            .font_size = theme.font_size,
-            .weight = .semi_bold,
+            .font_size = title_size(opts) - 2,
+            .weight = .bold,
             .color = tab.prefix_color orelse theme.muted_foreground,
         };
         const pm = label.measure(b, tab.prefix, psty);
@@ -388,7 +395,7 @@ fn render_tab(
     }
 
     const sty = label.Style{
-        .font_size = theme.font_size,
+        .font_size = title_size(opts),
         .weight = if (active) .semi_bold else .medium,
         .color = if (active) theme.foreground else theme.muted_foreground,
     };
@@ -586,7 +593,7 @@ fn render_drag_visuals(
         .set_border_width(1);
     try b.append_quad(gbg);
     const sty = label.Style{
-        .font_size = theme.font_size,
+        .font_size = title_size(opts),
         .weight = .medium,
         .color = theme.accent_foreground,
     };

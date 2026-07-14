@@ -1895,6 +1895,7 @@ pub const Tabbar = struct {
     on_move: ?tabbar_kit.TabMoveFn = null,
     on_pin: ?tabbar_kit.TabPinFn = null,
     on_context: ?tabbar_kit.TabContextFn = null,
+    label_size: f32 = 0, // 0 = theme font size
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
 };
@@ -1917,6 +1918,7 @@ const TabbarSpec = struct {
             .ctx = self.o.ctx,
             .height = self.o.height,
             .scroll_x = self.o.scroll_x.*,
+            .label_size = self.o.label_size,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
