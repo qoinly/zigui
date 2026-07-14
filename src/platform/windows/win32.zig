@@ -386,6 +386,14 @@ pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
 pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn CreateEventW(
+    attrs: ?*anyopaque,
+    manual_reset: BOOL,
+    initial_state: BOOL,
+    name: ?LPCWSTR,
+) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn SetEvent(event: HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn WaitForSingleObject(handle: HANDLE, ms: DWORD) callconv(.winapi) DWORD;
 // Idle-sleep inhibitor: ES_CONTINUOUS holds the state until the next call, the
 // DISPLAY/SYSTEM bits keep the screen + machine awake.
 pub const ES_CONTINUOUS: u32 = 0x80000000;

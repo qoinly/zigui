@@ -9,6 +9,7 @@ const win32 = @import("win32.zig");
 const com = @import("com.zig");
 const dxgi = @import("dxgi.zig");
 const d3d11 = @import("d3d11.zig");
+const loop = @import("loop.zig");
 const primitives = @import("../../primitives.zig");
 
 const Quad = primitives.Quad;
@@ -1056,6 +1057,9 @@ pub const Renderer = struct {
 
     pub fn request_redraw(self: *Renderer) void {
         self.dirty = true;
+        // Snap an idle vsync wait so this frame lands within one compositor
+        // frame instead of the idle-poll interval.
+        loop.wake_all();
     }
 
     fn ensure_rtv(self: *Renderer) Error!void {

@@ -1114,12 +1114,16 @@ pub fn set_ligatures(enabled: bool) void {
 // Toggle adaptive idle polling and set the idle wakeup interval (ms, clamped to a
 // sane floor). When on (the default), the desktop loop sleeps up to `interval_ms`
 // between wakeups while nothing animates instead of spinning at the fixed tick, so
-// an idle window costs far fewer wakeups. Effective on the X11 poll loop; a no-op
-// where rendering is display-link driven (macOS) or on a compositor with its own
-// pacing. Safe to call at runtime (e.g. from a settings toggle).
+// an idle window costs far fewer wakeups. Effective on the X11 poll loop and the
+// Windows vsync thread; a no-op where rendering is display-link driven (macOS) or
+// on a compositor with its own pacing. Safe to call at runtime (e.g. from a
+// settings toggle).
 pub fn set_idle_poll(enabled: bool, interval_ms: u32) void {
-    if (builtin.os.tag != .linux) return;
-    @import("platform/linux/app.zig").set_idle_poll(enabled, interval_ms);
+    switch (builtin.os.tag) {
+        .linux => @import("platform/linux/app.zig").set_idle_poll(enabled, interval_ms),
+        .windows => @import("platform/windows/loop.zig").set_idle_poll(enabled, interval_ms),
+        else => {},
+    }
 }
 
 // Swap the window theme at runtime (e.g. a light/dark toggle). Safe to call from

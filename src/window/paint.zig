@@ -917,9 +917,34 @@ pub const RunState = struct {
 // paint context. Normal Windows WM_SIZE now arrives with the per-window context.
 var g_resize_state: ?*RunState = null;
 
+// The Windows vsync thread paces on the demand each tick publishes (the X11
+// loop reads wants_fast_poll/soonest_deadline_ms around tick_all instead).
+// Resolved at comptime; never analyzed on the other platforms.
+const windows_loop = if (builtin.os.tag == .windows)
+    @import("../platform/windows/loop.zig")
+else
+    struct {};
+
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     // The RunState arrives as the display-link callback's type-erased context.
     const s: *RunState = @ptrCast(@alignCast(p orelse return));
+    // Windows has no round wrapper like the linux tick_all, so the reset that
+    // precedes a round happens here; ticks are serialized on the GUI thread, so
+    // each publish below reports exactly this window's round.
+    if (builtin.os.tag == .windows) {
+        wants_fast_poll = false;
+        soonest_deadline_ms = -1;
+    }
+    // Publish on every exit: the dirty-gated early return IS the idle path. A
+    // still-dirty renderer (keyed follow-up) or an animation keeps vsync pacing;
+    // otherwise the nearest scheduled redraw (or full idle) sizes the wait.
+    defer if (builtin.os.tag == .windows) {
+        const demand: i32 = if (wants_fast_poll or s.paint_ctx.renderer.dirty)
+            0
+        else
+            soonest_deadline_ms;
+        windows_loop.publish_demand(@ptrCast(s), demand);
+    };
     custom_shell.release_grab_if_blurred();
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge

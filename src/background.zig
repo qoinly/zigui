@@ -15,8 +15,21 @@
 // A result that needs a JNI call is handed back first, then made on the UI thread.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const MAX_INFLIGHT = 8; // bounded concurrency; past this a submit runs inline
+
+// The Windows vsync thread parks between frames while idle; a completion must
+// snap that wait or the render-and-poll would lag by the idle interval. The
+// other desktop loops poll took_completion within their own tick cadence.
+const windows_loop = if (builtin.os.tag == .windows)
+    @import("platform/windows/loop.zig")
+else
+    struct {};
+
+fn wake_render_loop() void {
+    if (builtin.os.tag == .windows) windows_loop.wake_all();
+}
 
 pub const Status = enum(u8) { idle, queued, running, done, cancelled };
 
@@ -98,6 +111,7 @@ pub fn submit(
                 t.status.store(@intFromEnum(Status.cancelled), .release);
             }
             g_completion.store(true, .release); // nudge the loop to render + poll
+            wake_render_loop();
         }
         // Decrement here, not in run(): the inline fallback never claimed a slot.
         fn threaded(arg: *anyopaque) void {
@@ -134,6 +148,7 @@ pub fn took_completion() bool {
 // safe; the loop consumes it through took_completion.
 pub fn nudge() void {
     g_completion.store(true, .release);
+    wake_render_loop();
 }
 
 // Wait for in-flight jobs to finish. Desktop App.deinit calls this before tearing

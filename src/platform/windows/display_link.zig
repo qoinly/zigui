@@ -42,7 +42,11 @@ pub const DisplayLink = struct {
     }
 
     pub fn stop(self: *DisplayLink) void {
-        if (loop.get_vsync_slot(self.token)) |slot| slot.running.store(false, .seq_cst);
+        if (loop.get_vsync_slot(self.token)) |slot| {
+            slot.running.store(false, .seq_cst);
+            // Snap an in-progress idle wait so the join never sits out the cap.
+            if (slot.wake_event) |ev| _ = win32.SetEvent(ev);
+        }
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -74,6 +78,23 @@ fn vsync_loop(token: usize) void {
         if (loop.resizing.load(.seq_cst)) {
             win32.Sleep(8);
             continue;
+        }
+        // Adaptive idle: when the last tick reported nothing animating, park on
+        // the wake event (input, a redraw request, or stop() sets it) instead of
+        // pacing on DwmFlush. Falling through to DwmFlush after the wait keeps a
+        // woken frame aligned to the compositor, so a continuous input stream
+        // still renders at vsync rate rather than at input rate.
+        if (loop.adaptive_poll.load(.seq_cst)) {
+            const demand = slot.demand_ms.load(.seq_cst);
+            if (demand != 0) {
+                const cap = loop.idle_cap_ms.load(.seq_cst);
+                const timeout: u32 = if (demand < 0)
+                    cap
+                else
+                    std.math.clamp(@as(u32, @intCast(demand)), 8, cap);
+                if (slot.wake_event) |ev| _ = win32.WaitForSingleObject(ev, timeout);
+                if (!slot.running.load(.seq_cst)) return;
+            }
         }
         if (win32.DwmFlush() != 0) {
             win32.Sleep(8);
