@@ -1896,6 +1896,11 @@ pub const Tabbar = struct {
     on_pin: ?tabbar_kit.TabPinFn = null,
     on_context: ?tabbar_kit.TabContextFn = null,
     label_size: f32 = 0, // 0 = theme font size
+    // Tab width bounds. Tabs shrink to fill the strip down to min_tab_w, then it
+    // scrolls; they never grow past max_tab_w. Set min == max for a fixed tab
+    // width (opening a tab never resizes the others; the strip just scrolls).
+    min_tab_w: f32 = 120,
+    max_tab_w: f32 = 220,
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
 };
@@ -1919,6 +1924,8 @@ const TabbarSpec = struct {
             .height = self.o.height,
             .scroll_x = self.o.scroll_x.*,
             .label_size = self.o.label_size,
+            .min_tab_w = self.o.min_tab_w,
+            .max_tab_w = self.o.max_tab_w,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
