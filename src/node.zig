@@ -95,6 +95,11 @@ pub const Node = struct {
     // Laid-out absolute rect written at draw; lets a container anchor an overlay
     // (menu/popover) to itself, the way the kit triggers expose their rect_out.
     rect_out: ?*[4]f32 = null,
+    // Hides text-sprites drawn before this node (the body) behind its rect, so a
+    // custom overlay's fill renders crisp without the frost a modal backdrop adds
+    // (the quads-then-sprites renderer otherwise lets body text bleed over an
+    // overlay's fill). The same mask the menu/select overlays apply internally.
+    backdrop_mask: bool = false,
     children: []const *Node = &.{},
     // A scroll viewport: clips its child to its box and offsets it by state.y.
     scroll: ?*ScrollState = null,
@@ -156,6 +161,8 @@ pub const Cfg = struct {
     click_ctx: ?*anyopaque = null,
     hover_id: []const u8 = "",
     rect_out: ?*[4]f32 = null,
+    // Crisp custom overlay: mask body text-sprites behind this box (see Node).
+    backdrop_mask: bool = false,
 };
 
 pub const Txt = struct {
@@ -220,6 +227,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .click_ctx = cfg.click_ctx,
         .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
+        .backdrop_mask = cfg.backdrop_mask,
         .children = own_kids(a, kids),
     });
 }
@@ -473,6 +481,9 @@ fn draw_tree(
     const r = eng.get_bounds(n.id);
     const x = r.origin.x + ox;
     const y = r.origin.y + oy;
+    // For a backdrop-masking box: everything in the sprite buffer now is "behind"
+    // (the body); after this node's subtree draws, hide those sprites under its rect.
+    const mask_from: usize = if (n.backdrop_mask) b.sprites.items.len else 0;
     // Register the click target before recursing so a clickable child (added
     // later) wins over a clickable parent in the newest-first hit walk.
     if (pc) |p| if (n.on_click != null or n.hover_id.len > 0) {
@@ -529,19 +540,35 @@ fn draw_tree(
     if (n.scroll) |st| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_scroll(b, eng, theme, n, depth, ox, oy, pc, view, st);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     if (n.slide_px) |dx| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_slide(b, eng, theme, n, depth, ox, oy, view, dx);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     if (n.parallax_t) |t| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_parallax(b, eng, theme, n, depth, ox, oy, view, t);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
+    if (n.backdrop_mask) mask_backdrop(b, mask_from, .{ x, y, r.size.width, r.size.height });
+}
+
+// Hide (clip to nothing) the text-sprites in b.sprites[0..count] that fall under
+// `rect` — the body sprites drawn before a backdrop_mask box — so the box's fill
+// renders crisp over them without the full-window frost a modal backdrop adds. The
+// same mask the menu/select overlays apply to their own panels.
+fn mask_backdrop(b: *RenderBuilder, count: usize, rect: [4]f32) void {
+    for (b.sprites.items[0..count]) |*s| {
+        const hit = s.position[0] + s.size[0] > rect[0] and s.position[0] < rect[0] + rect[2] and
+            s.position[1] + s.size[1] > rect[1] and s.position[1] < rect[1] + rect[3];
+        if (hit) s.clip_bounds = .{ 0, 0, 0, 0 };
+    }
 }
 
 // The slide-viewport draw: render the page children translated by dx and clip the
