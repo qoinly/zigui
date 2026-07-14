@@ -117,6 +117,54 @@ pub const IID_IDXGIKeyedMutex = com.guid(
     0x5d,
 );
 
+pub const IID_IDXGIDevice1 = com.guid(
+    0x77db970f,
+    0x6276,
+    0x48ba,
+    0xba,
+    0x28,
+    0x07,
+    0x01,
+    0x43,
+    0xb4,
+    0x39,
+    0x2c,
+);
+
+// IDXGIDevice1 adds frame-latency control past IDXGIDevice (slots 0..11).
+pub const IDXGIDevice1 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        // IUnknown + IDXGIObject (slots 0..6).
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDXGIDevice1) callconv(.winapi) u32,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetParent: *const anyopaque,
+        // IDXGIDevice (slots 7..11).
+        GetAdapter: *const anyopaque,
+        CreateSurface: *const anyopaque,
+        QueryResourceResidency: *const anyopaque,
+        SetGPUThreadPriority: *const anyopaque,
+        GetGPUThreadPriority: *const anyopaque,
+        // IDXGIDevice1.
+        SetMaximumFrameLatency: *const fn (*IDXGIDevice1, u32) callconv(.winapi) HRESULT,
+        GetMaximumFrameLatency: *const anyopaque,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(VTable, "SetMaximumFrameLatency") ==
+            12 * @sizeOf(*const anyopaque));
+    }
+
+    pub fn set_maximum_frame_latency(self: *IDXGIDevice1, frames: u32) HRESULT {
+        return self.vtable.SetMaximumFrameLatency(self, frames);
+    }
+};
+
 pub const IDXGIResource = extern struct {
     vtable: *const VTable,
 

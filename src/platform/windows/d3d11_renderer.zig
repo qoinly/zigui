@@ -394,6 +394,16 @@ pub const Renderer = struct {
             self.device1 = @ptrCast(@alignCast(dev1.?));
         }
 
+        // DXGI queues up to 3 presents by default; a UI submits one small frame
+        // per input, so cap the queue at 1 to keep input-to-photon tight. No
+        // throughput cost at this workload; failure just keeps the default.
+        var dxgi_dev: ?*anyopaque = null;
+        if (com.succeeded(com.query_interface(self.device, &dxgi.IID_IDXGIDevice1, &dxgi_dev))) {
+            const dd: *dxgi.IDXGIDevice1 = @ptrCast(@alignCast(dxgi_dev.?));
+            _ = dd.set_maximum_frame_latency(1);
+            com.release(&dxgi_dev);
+        }
+
         return self;
     }
 
