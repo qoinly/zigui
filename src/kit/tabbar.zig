@@ -35,6 +35,9 @@ pub const TabCloseFn = *const fn (ctx: ?*anyopaque, index: usize) void;
 pub const TabNewFn = *const fn (ctx: ?*anyopaque) void;
 pub const TabMoveFn = *const fn (ctx: ?*anyopaque, from: usize, to: usize) void;
 pub const TabPinFn = *const fn (ctx: ?*anyopaque, index: usize) void;
+// Right-click on a tab body, with the pointer position so the caller can
+// anchor a context menu at the cursor (close others / close right, etc).
+pub const TabContextFn = *const fn (ctx: ?*anyopaque, index: usize, x: f32, y: f32) void;
 
 pub const TabBarOptions = struct {
     tabs: []const TabItem,
@@ -48,6 +51,7 @@ pub const TabBarOptions = struct {
     // and reports the proposed index move; caller reorders its own list.
     on_move: ?TabMoveFn = null,
     on_pin: ?TabPinFn = null,
+    on_context: ?TabContextFn = null,
     ctx: ?*anyopaque = null,
     height: f32 = 36,
     scroll_x: f32 = 0, // caller-owned horizontal pan; clamped on render
@@ -92,6 +96,7 @@ pub const TabBarState = struct {
     on_new: ?TabNewFn = null,
     on_move: ?TabMoveFn = null,
     on_pin: ?TabPinFn = null,
+    on_context: ?TabContextFn = null,
     ctx: ?*anyopaque = null,
     drag_pending: bool = false,
     drag_active: bool = false,
@@ -121,6 +126,11 @@ fn new_click(ctx: ?*anyopaque) void {
 fn pin_click(ctx: ?*anyopaque) void {
     const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
     if (s.state.on_pin) |cb| cb(s.state.ctx, s.index);
+}
+
+fn tab_context(ctx: ?*anyopaque, x: f32, y: f32) void {
+    const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
+    if (s.state.on_context) |cb| cb(s.state.ctx, s.index, x, y);
 }
 
 fn tab_point(ctx: ?*anyopaque, x: f32, y: f32) void {
@@ -242,6 +252,7 @@ pub fn render(
     state.on_new = opts.on_new;
     state.on_move = opts.on_move;
     state.on_pin = opts.on_pin;
+    state.on_context = opts.on_context;
     state.ctx = opts.ctx;
 
     var track = Quad.init(x, y, w, h);
@@ -491,6 +502,7 @@ fn push_tab_hit(
             .h = h,
             .on_point = tab_point,
             .on_drag_end = tab_drop,
+            .on_context = tab_context,
             .ctx = ctx,
         });
     } else {
@@ -500,6 +512,7 @@ fn push_tab_hit(
             .w = tab_w,
             .h = h,
             .on_click = select_click,
+            .on_context = tab_context,
             .ctx = ctx,
         });
     }

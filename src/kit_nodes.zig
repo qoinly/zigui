@@ -1894,6 +1894,7 @@ pub const Tabbar = struct {
     on_new: ?tabbar_kit.TabNewFn = null,
     on_move: ?tabbar_kit.TabMoveFn = null,
     on_pin: ?tabbar_kit.TabPinFn = null,
+    on_context: ?tabbar_kit.TabContextFn = null,
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
 };
@@ -1912,6 +1913,7 @@ const TabbarSpec = struct {
             .on_new = self.o.on_new,
             .on_move = self.o.on_move,
             .on_pin = self.o.on_pin,
+            .on_context = self.o.on_context,
             .ctx = self.o.ctx,
             .height = self.o.height,
             .scroll_x = self.o.scroll_x.*,
