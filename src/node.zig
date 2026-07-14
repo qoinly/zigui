@@ -284,6 +284,11 @@ pub const ScrollState = struct {
     y: f32 = 0,
     vel: f32 = 0, // points/sec, the coast velocity a flick leaves behind
     t_prev_s: f32 = 0, // previous frame's time, for the momentum/spring dt
+    // The viewport height draw_scroll laid out last frame (0 until first draw).
+    // A consumer building thousands of uniform rows windows them to y..y+viewport_h
+    // (real rows for the visible slice, spacers for the rest) instead of building
+    // nodes the clip would discard - and stays under the layout children cap.
+    viewport_h: f32 = 0,
 };
 
 // hidden: wheel-scrollable but no thumb drawn. auto: thumb shows while overflowing.
@@ -718,6 +723,7 @@ fn draw_scroll(
     std.debug.assert(vh >= 0);
     const content_h = eng.get_bounds(n.children[0].id).size.height;
     const max_y = @max(0, content_h - vh);
+    st.viewport_h = vh;
     if (builtin.os.tag == .ios) {
         if (pc) |p| scroll_step_ios(p, st, max_y, vh, view);
     } else {
