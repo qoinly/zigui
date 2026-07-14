@@ -36,8 +36,13 @@ pub const max_frames_in_flight: u32 = 3;
 // frost tracks DPI. Mirrors the macOS quarter-res blur look (12px at 2x).
 const BLUR_SIGMA_PT: f32 = 6.0;
 
-// Drawn frames without a modal pass before the offscreen pair is released
-// (two full-window BGRA targets); the next modal recreates it. Mirrors macOS.
+// The blur chain runs at quarter res (sigma, memory, and fill rate shrink with
+// it); the composite blit upsamples back. Mirrors the macOS Metal chain.
+const BLUR_DOWNSAMPLE: u32 = 4;
+
+// Drawn frames without a modal pass before the offscreen trio is released
+// (a full-window scene target + the quarter-res blur pair); the next modal
+// recreates it. Mirrors macOS.
 const OFFSCREEN_IDLE_FRAMES: u32 = 8;
 
 pub const ClearColor = extern struct {
@@ -312,7 +317,9 @@ pub const Renderer = struct {
     sampler_state: ?*anyopaque = null,
 
     scene_target: Offscreen = .{},
-    blur_target: Offscreen = .{},
+    // Quarter-res ping-pong pair for the separable blur; blur_a ends up blurred.
+    blur_a: Offscreen = .{},
+    blur_b: Offscreen = .{},
     offscreen_w: u32 = 0,
     offscreen_h: u32 = 0,
     offscreen_idle_frames: u32 = 0,
@@ -418,7 +425,8 @@ pub const Renderer = struct {
         com.release(&self.raster_state_scissor);
         com.release(&self.sampler_state);
         self.scene_target.release();
-        self.blur_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
         for ([_]*InstanceBuffer{
             &self.quad_buffer,     &self.sprite_buffer, &self.color_sprite_buffer,
             &self.polyline_buffer, &self.line_buffer,   &self.ring_buffer,
@@ -1190,16 +1198,7 @@ pub const Renderer = struct {
         const h_pt = @as(f32, @floatFromInt(h)) / scale;
         self.update_viewport(w_pt, h_pt);
 
-        const viewport = d3d11.D3D11_VIEWPORT{
-            .TopLeftX = 0,
-            .TopLeftY = 0,
-            .Width = @floatFromInt(w),
-            .Height = @floatFromInt(h),
-            .MinDepth = 0,
-            .MaxDepth = 1,
-        };
-        var viewports = [_]d3d11.D3D11_VIEWPORT{viewport};
-        self.context.rs_set_viewports(1, &viewports);
+        self.set_viewport(w, h);
 
         self.context.om_set_blend_state(self.blend_state, null, 0xFFFFFFFF);
         self.context.ia_set_primitive_topology(d3d11.D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1246,7 +1245,8 @@ pub const Renderer = struct {
         std.debug.assert(self.scene_target.tex != null);
         std.debug.assert(self.offscreen_w > 0 and self.offscreen_h > 0);
         self.scene_target.release();
-        self.blur_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
         self.offscreen_w = 0;
         self.offscreen_h = 0;
         self.offscreen_idle_frames = 0;
@@ -1276,8 +1276,10 @@ pub const Renderer = struct {
         self.ensure_offscreen(w, h);
         const scene_rtv = self.scene_target.rtv orelse return false;
         const scene_srv = self.scene_target.srv orelse return false;
-        const aux_rtv = self.blur_target.rtv orelse return false;
-        const aux_srv = self.blur_target.srv orelse return false;
+        const a_rtv = self.blur_a.rtv orelse return false;
+        const a_srv = self.blur_a.srv orelse return false;
+        const b_rtv = self.blur_b.rtv orelse return false;
+        const b_srv = self.blur_b.srv orelse return false;
 
         var null_srv = [_]?*anyopaque{null};
         // D3D11 errors if a subresource is bound as SRV and RTV at once; unbind first.
@@ -1296,20 +1298,40 @@ pub const Renderer = struct {
             color_atlas,
         );
 
-        self.update_blur(w, h, BLUR_SIGMA_PT * scale);
+        // The chain drops to quarter res: viewport tracks each target's size,
+        // and sigma shrinks with the downsample so the look stays a 12px-at-2x
+        // frost. Three small passes replace two full-res ones.
+        const qw = @max(w / BLUR_DOWNSAMPLE, 1);
+        const qh = @max(h / BLUR_DOWNSAMPLE, 1);
+        self.set_viewport(qw, qh);
+
+        // Down: plain blit scene -> a.
+        var d_rtvs = [_]?*anyopaque{a_rtv};
+        self.context.om_set_render_targets(1, &d_rtvs, null);
+        self.fullscreen_pass(self.blit_pipeline, scene_srv);
+
+        const down_f: f32 = @floatFromInt(BLUR_DOWNSAMPLE);
+        self.update_blur(qw, qh, BLUR_SIGMA_PT * scale / down_f);
         var blur_cbs = [_]?*anyopaque{self.blur_cb};
         self.context.ps_set_constant_buffers(1, 1, &blur_cbs);
 
-        // Pass H: horizontal blur scene -> aux.
-        var h_rtvs = [_]?*anyopaque{aux_rtv};
+        // Pass H: horizontal blur a -> b.
+        var h_rtvs = [_]?*anyopaque{b_rtv};
         self.context.om_set_render_targets(1, &h_rtvs, null);
-        self.fullscreen_pass(self.blur_h_pipeline, scene_srv);
+        self.fullscreen_pass(self.blur_h_pipeline, a_srv);
 
-        // Backbuffer: clear, then vertical blur aux -> backbuffer (full).
+        // Pass V: vertical blur b -> a. Unbind a's SRV before it becomes the RTV.
+        self.context.ps_set_shader_resources(0, 1, &null_srv);
+        var v_rtvs = [_]?*anyopaque{a_rtv};
+        self.context.om_set_render_targets(1, &v_rtvs, null);
+        self.fullscreen_pass(self.blur_v_pipeline, b_srv);
+
+        // Backbuffer: clear, then the composite blit upsamples a back to full.
+        self.set_viewport(w, h);
         var b_rtvs = [_]?*anyopaque{rtv};
         self.context.om_set_render_targets(1, &b_rtvs, null);
         self.context.clear_render_target_view(rtv, &clear.rgba);
-        self.fullscreen_pass(self.blur_v_pipeline, aux_srv);
+        self.fullscreen_pass(self.blit_pipeline, a_srv);
 
         // Crisp title-bar strip: re-blit the unblurred backdrop over the top band.
         const top_px = m.crisp_top * scale;
@@ -1339,6 +1361,19 @@ pub const Renderer = struct {
         return true;
     }
 
+    fn set_viewport(self: *Renderer, w: u32, h: u32) void {
+        const viewport = d3d11.D3D11_VIEWPORT{
+            .TopLeftX = 0,
+            .TopLeftY = 0,
+            .Width = @floatFromInt(w),
+            .Height = @floatFromInt(h),
+            .MinDepth = 0,
+            .MaxDepth = 1,
+        };
+        var viewports = [_]d3d11.D3D11_VIEWPORT{viewport};
+        self.context.rs_set_viewports(1, &viewports);
+    }
+
     fn fullscreen_pass(self: *Renderer, pipeline: Pipeline, src_srv: ?*anyopaque) void {
         self.context.vs_set_shader(pipeline.vs);
         self.context.ps_set_shader(pipeline.ps);
@@ -1364,13 +1399,23 @@ pub const Renderer = struct {
         if (self.scene_target.tex != null and self.offscreen_w == w and self.offscreen_h == h)
             return;
         self.scene_target.release();
-        self.blur_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
         self.offscreen_w = 0;
         self.offscreen_h = 0;
+        const qw = @max(w / BLUR_DOWNSAMPLE, 1);
+        const qh = @max(h / BLUR_DOWNSAMPLE, 1);
         self.scene_target = self.make_offscreen(w, h) orelse return;
-        self.blur_target = self.make_offscreen(w, h) orelse {
+        self.blur_a = self.make_offscreen(qw, qh) orelse {
             self.scene_target.release();
             self.scene_target = .{};
+            return;
+        };
+        self.blur_b = self.make_offscreen(qw, qh) orelse {
+            self.scene_target.release();
+            self.scene_target = .{};
+            self.blur_a.release();
+            self.blur_a = .{};
             return;
         };
         self.offscreen_w = w;
