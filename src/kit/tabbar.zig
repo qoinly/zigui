@@ -453,6 +453,14 @@ fn render_tab(
                 .ctx = @ptrCast(&state.close_shims[state.shim_len]),
             });
         }
+    } else if (tab.dirty and !hovered) {
+        // An unsaved tab shows a dirty dot whether or not it is active; hovering it
+        // (the branch below) swaps the dot for the close x so it can still be closed.
+        const dx = close_x + (CLOSE_SZ - DOT_SZ) / 2;
+        const dy = y + (h - DOT_SZ) / 2;
+        var dot = Quad.init(dx, dy, DOT_SZ, DOT_SZ);
+        _ = dot.set_background(theme.muted_foreground).set_corner_radius(DOT_SZ / 2);
+        try b.append_quad(dot);
     } else if (active or hovered) {
         if (p) |pp| {
             if (pp.is_hovered(close_x, cy, CLOSE_SZ, CLOSE_SZ)) {
@@ -482,12 +490,6 @@ fn render_tab(
                 .ctx = @ptrCast(&state.close_shims[state.shim_len]),
             });
         }
-    } else if (tab.dirty) {
-        const dx = close_x + (CLOSE_SZ - DOT_SZ) / 2;
-        const dy = y + (h - DOT_SZ) / 2;
-        var dot = Quad.init(dx, dy, DOT_SZ, DOT_SZ);
-        _ = dot.set_background(theme.muted_foreground).set_corner_radius(DOT_SZ / 2);
-        try b.append_quad(dot);
     }
     if (p != null) state.shim_len += 1;
 }
