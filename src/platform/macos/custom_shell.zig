@@ -364,6 +364,79 @@ fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .middle, false);
 }
 
+// Finder file drop (NSDraggingDestination on the body view). Each dropped file
+// lands as one absolute path, newline-joined, matching the X11 XDND payload the
+// shared parser accepts. The buffer matches the parser's cap; entries past it
+// are dropped, and the callee consumes the bytes before the call returns, so a
+// stack buffer suffices.
+const NSDragOperationNone: NSUInteger = 0;
+const NSDragOperationCopy: NSUInteger = 1;
+const DROP_BUF_CAP = 8 * 1024;
+
+// Whether the drag carries file URLs, via the same class filter the drop reads
+// with - so entered/updated and perform can never disagree.
+fn drop_url_classes(sender: Id) ?struct { pb: Id, classes: Id } {
+    const pb = objc.msg_send(Id, sender, "draggingPasteboard", .{});
+    if (@intFromPtr(pb) == 0) return null;
+    const NSURL = objc.get_class("NSURL") orelse return null;
+    const NSArray = objc.get_class("NSArray") orelse return null;
+    const classes = objc.msg_send(Id, NSArray, "arrayWithObject:", .{@as(Id, @ptrCast(NSURL))});
+    return .{ .pb = pb, .classes = classes };
+}
+
+fn dragging_entered_imp(_: Id, _: Sel, sender: Id) callconv(.c) NSUInteger {
+    const c = drop_url_classes(sender) orelse return NSDragOperationNone;
+    const ok = objc.msg_send(bool, c.pb, "canReadObjectForClasses:options:", .{
+        c.classes, @as(?Id, null),
+    });
+    return if (ok) NSDragOperationCopy else NSDragOperationNone;
+}
+
+fn prepare_drag_operation_imp(_: Id, _: Sel, _: Id) callconv(.c) bool {
+    return true;
+}
+
+fn perform_drag_operation_imp(self: Id, _: Sel, sender: Id) callconv(.c) bool {
+    const d = g_mouse_dispatch orelse return false;
+    const c = drop_url_classes(sender) orelse return false;
+    const urls = objc.msg_send(Id, c.pb, "readObjectsForClasses:options:", .{
+        c.classes, @as(?Id, null),
+    });
+    if (@intFromPtr(urls) == 0) return false;
+    const count: NSUInteger = objc.msg_send(NSUInteger, urls, "count", .{});
+    var buf: [DROP_BUF_CAP]u8 = undefined;
+    var len: usize = 0;
+    var i: NSUInteger = 0;
+    while (i < count) : (i += 1) {
+        const url = objc.msg_send(Id, urls, "objectAtIndex:", .{i});
+        if (!objc.msg_send(bool, url, "isFileURL", .{})) continue;
+        const path = objc.msg_send(Id, url, "path", .{});
+        if (@intFromPtr(path) == 0) continue;
+        const cstr = objc.msg_send([*:0]const u8, path, "UTF8String", .{});
+        const plen = std.mem.len(cstr);
+        if (len + plen + 1 > buf.len) break;
+        if (len > 0) {
+            buf[len] = '\n';
+            len += 1;
+        }
+        @memcpy(buf[len..][0..plen], cstr[0..plen]);
+        len += plen;
+    }
+    std.debug.assert(len <= buf.len);
+    if (len == 0) return false;
+    // draggingLocation is window coords; the flipped view conversion lands it
+    // top-left origin like every mouse handler above.
+    const win_loc: NSPoint = objc.msg_send(NSPoint, sender, "draggingLocation", .{});
+    const loc: NSPoint = objc.msg_send(
+        NSPoint,
+        self,
+        "convertPoint:fromView:",
+        .{ win_loc, @as(?Id, null) },
+    );
+    d.on_file_drop(view_ctx(self, d.ctx), &buf, len, @floatCast(loc.x), @floatCast(loc.y));
+    return true;
+}
+
 fn custom_body_mouse_exited_imp(self: Id, _: Sel, _: Id) callconv(.c) void {
     if (g_grabbed) return; // a hidden, decoupled cursor cannot exit the view
     const d = g_mouse_dispatch orelse return;
@@ -664,6 +737,30 @@ fn ensure_custom_body_class() ?Class {
         objc.sel("updateTrackingAreas"),
         @ptrCast(&custom_body_update_tracking_areas_imp),
         "v@:",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("draggingEntered:"),
+        @ptrCast(&dragging_entered_imp),
+        "Q@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("draggingUpdated:"),
+        @ptrCast(&dragging_entered_imp),
+        "Q@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("prepareForDragOperation:"),
+        @ptrCast(&prepare_drag_operation_imp),
+        "B@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("performDragOperation:"),
+        @ptrCast(&perform_drag_operation_imp),
+        "B@:@",
     );
     objc.objc_registerClassPair(cls);
     g_custom_body_class = cls;
@@ -1153,6 +1250,23 @@ fn utf16_units(s: []const u8) objc.NSUInteger {
     return n;
 }
 
+// Accept Finder drags on the body view. The modern file-URL UTI plus the legacy
+// filenames type, so drags from older apps register too; both read back as NSURL
+// through readObjectsForClasses.
+fn register_file_drop(view: Id) void {
+    const NSArray = objc.get_class("NSArray") orelse return;
+    var b1: [32]u8 = undefined;
+    var b2: [32]u8 = undefined;
+    const drag_types = [2]Id{
+        nsstring_from_stack(&b1, "public.file-url"),
+        nsstring_from_stack(&b2, "NSFilenamesPboardType"),
+    };
+    const arr = objc.msg_send(Id, NSArray, "arrayWithObjects:count:", .{
+        @as([*]const Id, &drag_types), @as(NSUInteger, drag_types.len),
+    });
+    objc.msg_send(void, view, "registerForDraggedTypes:", .{arr});
+}
+
 fn nsstring_from_stack(buf: []u8, s: []const u8) Id {
     std.debug.assert(buf.len > 0); // buf.len - 1 below underflows on an empty buffer
     const NSString = objc.get_class("NSString") orelse unreachable;
@@ -1345,6 +1459,7 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     }});
     objc.msg_send(void, metal_view, "setAutoresizingMask:", .{autoresize_mask});
     objc.msg_send(void, metal_view, "setWantsLayer:", .{objc.YES});
+    register_file_drop(metal_view);
 
     const metal_layer = objc.msg_send(Id, CAMetalLayer, "layer", .{});
     const scale: CGFloat = objc.msg_send(CGFloat, window, "backingScaleFactor", .{});
