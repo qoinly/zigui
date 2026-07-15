@@ -126,6 +126,10 @@ pub const Icon = enum {
     folder_plus,
     file_plus,
     file_up,
+    eclipse,
+    dog,
+    telescope,
+    loader_pinwheel,
 };
 
 pub const IconParams = struct {

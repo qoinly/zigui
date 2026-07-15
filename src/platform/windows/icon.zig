@@ -164,6 +164,10 @@ pub const WinIconSystem = struct {
             .folder_plus => "", // -> bundled Lucide
             .file_plus => "", // -> bundled Lucide
             .file_up => "", // -> bundled Lucide
+            .eclipse => "", // bundled Lucide
+            .dog => "", // bundled Lucide
+            .telescope => "", // bundled Lucide
+            .loader_pinwheel => "", // bundled Lucide
         };
     }
 

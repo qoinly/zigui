@@ -488,6 +488,10 @@ const MAP = [_]Map{
     .{ .icon = "folder_plus", .lucide = "folder-plus" },
     .{ .icon = "file_plus", .lucide = "file-plus" },
     .{ .icon = "file_up", .lucide = "file-up" },
+    .{ .icon = "eclipse", .lucide = "eclipse" },
+    .{ .icon = "dog", .lucide = "dog" },
+    .{ .icon = "telescope", .lucide = "telescope" },
+    .{ .icon = "loader_pinwheel", .lucide = "loader-pinwheel" },
 };
 
 const Entry = struct { name: []const u8, cmds: []Cmd };

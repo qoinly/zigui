@@ -129,6 +129,10 @@ pub const MacIconSystem = struct {
             .folder_plus => "folder.badge.plus",
             .file_plus => "doc.badge.plus",
             .file_up => "arrow.up.doc",
+            .eclipse => "", // bundled Lucide
+            .dog => "", // bundled Lucide
+            .telescope => "", // bundled Lucide
+            .loader_pinwheel => "", // bundled Lucide
         };
     }
 
