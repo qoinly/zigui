@@ -278,6 +278,7 @@ pub fn kbd(keys: []const []const u8) *node.Node {
 pub const key_command = @import("kit/kbd.zig").command;
 pub const key_shift = @import("kit/kbd.zig").shift;
 pub const key_option = @import("kit/kbd.zig").option;
+pub const key_return = @import("kit/kbd.zig").enter;
 pub fn toggle_button(label: []const u8, o: kit_nodes.ToggleBtn) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;

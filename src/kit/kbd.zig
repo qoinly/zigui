@@ -20,6 +20,10 @@ const mac = builtin.os.tag == .macos;
 pub const command = if (mac) "\u{2318}" else "Ctrl";
 pub const shift = if (mac) "\u{21E7}" else "Shift";
 pub const option = if (mac) "\u{2325}" else "Alt";
+// The return-key hint follows the same rule: only macOS system fonts are
+// guaranteed to carry the arrow glyph (Inter lacks U+21B5, and the Windows/
+// Linux text systems have no font fallback to rescue it - it renders as tofu).
+pub const enter = if (mac) "\u{21B5}" else "Enter";
 
 pub const KbdSize = enum { sm, default };
 
