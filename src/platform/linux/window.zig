@@ -233,14 +233,100 @@ pub fn native_image_named(name: []const u8) ?*anyopaque {
     return null;
 }
 
+// Linux has no native file dialog in a non-GTK app, so shell out to `zenity` (the
+// common portable choice; `xdg-desktop-portal` would be the sandboxed alternative).
+// Blocks the loop while the dialog is up, like macOS runModal. Returns "" on cancel
+// or if zenity is absent.
 pub fn open_file(opts: types.FilePickerOptions, out_buf: []u8) []const u8 {
-    _ = opts;
-    _ = out_buf;
-    return "";
+    return run_zenity(opts, out_buf, false);
 }
 
 pub fn save_file(opts: types.FilePickerOptions, out_buf: []u8) []const u8 {
-    _ = opts;
-    _ = out_buf;
-    return "";
+    return run_zenity(opts, out_buf, true);
+}
+
+// 0.16's std has no process.run over the blocking Io and no posix fork/exec, so shell
+// out with a direct libc fork/exec (Dover links libc). The child only calls
+// async-signal-safe dup2/close/execvp before exec, so it is safe after GPU init.
+extern "c" fn fork() std.c.pid_t;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn _exit(code: c_int) noreturn;
+
+fn run_zenity(opts: types.FilePickerOptions, out_buf: []u8, save: bool) []const u8 {
+    var title_buf: [256]u8 = undefined;
+    var name_buf: [256]u8 = undefined;
+    var filter_buf: [512]u8 = undefined;
+    var argv: [12]?[*:0]const u8 = undefined;
+    var argc: usize = 0;
+    const push = struct {
+        fn f(av: []?[*:0]const u8, i: *usize, s: [*:0]const u8) void {
+            av[i.*] = s;
+            i.* += 1;
+        }
+    }.f;
+    push(&argv, &argc, "zenity");
+    push(&argv, &argc, "--file-selection");
+    if (save) {
+        push(&argv, &argc, "--save");
+        push(&argv, &argc, "--confirm-overwrite");
+    }
+    if (opts.allow_directories and !opts.allow_files) push(&argv, &argc, "--directory");
+    if (opts.title.len > 0) {
+        const s: [:0]const u8 = std.fmt.bufPrintZ(&title_buf, "--title={s}", .{opts.title}) catch "--title=Open";
+        push(&argv, &argc, s.ptr);
+    }
+    if (opts.default_filename.len > 0) {
+        const s = std.fmt.bufPrintZ(&name_buf, "--filename={s}", .{opts.default_filename}) catch return "";
+        push(&argv, &argc, s.ptr);
+    }
+    if (opts.allowed_extensions.len > 0)
+        push(&argv, &argc, build_filter(&filter_buf, opts.allowed_extensions));
+    argv[argc] = null; // execvp sentinel
+
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return "";
+    const pid = fork();
+    if (pid < 0) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        return "";
+    }
+    if (pid == 0) {
+        _ = std.c.dup2(fds[1], 1); // child stdout -> pipe
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        _ = execvp("zenity", @ptrCast(&argv));
+        _exit(127); // exec failed (zenity absent)
+    }
+    _ = std.c.close(fds[1]);
+    var total: usize = 0;
+    while (total < out_buf.len) {
+        const n = std.c.read(fds[0], out_buf[total..].ptr, out_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+    }
+    _ = std.c.close(fds[0]);
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    // WIFEXITED && WEXITSTATUS == 0; a cancel is exit 1, a missing zenity is 127.
+    if ((status & 0x7f) != 0 or ((status >> 8) & 0xff) != 0) return "";
+    return std.mem.trim(u8, out_buf[0..total], "\r\n");
+}
+
+// zenity glob filter arg, null-terminated: "--file-filter=Collections | *.json *.yaml ...".
+fn build_filter(buf: []u8, exts: []const []const u8) [*:0]const u8 {
+    const prefix = "--file-filter=Collections |";
+    @memcpy(buf[0..prefix.len], prefix);
+    var n: usize = prefix.len;
+    for (exts) |e| {
+        if (n + 4 + e.len > buf.len) break; // room for " *." + ext + trailing NUL
+        buf[n] = ' ';
+        buf[n + 1] = '*';
+        buf[n + 2] = '.';
+        n += 3;
+        @memcpy(buf[n..][0..e.len], e);
+        n += e.len;
+    }
+    buf[n] = 0;
+    return @ptrCast(buf.ptr);
 }
