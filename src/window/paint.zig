@@ -489,6 +489,24 @@ pub const PaintContext = struct {
         }
     }
 
+    pub fn on_middle_mouse_down(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        var i: usize = self.hitboxes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const hb = self.hitboxes.items[i];
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                if (hb.on_middle) |cb| {
+                    cb(hb.ctx);
+                    self.renderer.request_redraw();
+                    return;
+                }
+            }
+        }
+    }
+
     pub fn on_mouse_dragged(self: *PaintContext, x: f32, y: f32) void {
         self.mouse_x = x;
         self.mouse_y = y;
@@ -1012,6 +1030,11 @@ fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     paint.on_right_mouse_down(x, y);
 }
 
+fn middle_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_middle_mouse_down(x, y);
+}
+
 fn mouse_up_thunk(ctx: *anyopaque) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_mouse_up();
@@ -1065,6 +1088,7 @@ pub fn start_paint_loop(
         .on_exit = mouse_exit_thunk,
         .on_down = mouse_down_thunk,
         .on_right_down = right_mouse_down_thunk,
+        .on_middle_down = middle_mouse_down_thunk,
         .on_drag = mouse_drag_thunk,
         .on_up = mouse_up_thunk,
         .on_scroll = scroll_thunk,

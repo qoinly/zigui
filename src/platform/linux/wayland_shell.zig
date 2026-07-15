@@ -912,6 +912,8 @@ fn on_pointer_button(
         }
     } else if (button == BTN_RIGHT and pressed) {
         if (g_dispatch) |d| d.on_right_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
+    } else if (button == BTN_MIDDLE and pressed) {
+        if (g_dispatch) |d| d.on_middle_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
     }
 }
 

@@ -87,6 +87,12 @@ pub const Node = struct {
     // boxes/leaves.
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    // Make this box draggable (e.g. a sidebar row): on_drag fires on press and each
+    // pointer move with (x, y), on_drag_end on release, both with click_ctx. A drag
+    // capture supersedes on_click, so do a plain-click action inside on_drag_end when
+    // no movement happened (distinguish via a small threshold), the way the tabbar does.
+    on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
+    on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
     // A stable id recorded as "hovered" while the pointer is over this box; the
     // frame exposes the topmost one so a view can reveal-on-hover without a callback.
     hover_id: []const u8 = "",
@@ -159,6 +165,8 @@ pub const Cfg = struct {
     border_dash: [2]f32 = .{ 0, 0 }, // dash px, gap px; (0,0) = solid border
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
+    on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
     hover_id: []const u8 = "",
     rect_out: ?*[4]f32 = null,
     // Crisp custom overlay: mask body text-sprites behind this box (see Node).
@@ -225,6 +233,8 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .border_dash = cfg.border_dash,
         .on_click = cfg.on_click,
         .click_ctx = cfg.click_ctx,
+        .on_drag = cfg.on_drag,
+        .on_drag_end = cfg.on_drag_end,
         .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
         .backdrop_mask = cfg.backdrop_mask,
@@ -486,13 +496,17 @@ fn draw_tree(
     const mask_from: usize = if (n.backdrop_mask) b.sprites.items.len else 0;
     // Register the click target before recursing so a clickable child (added
     // later) wins over a clickable parent in the newest-first hit walk.
-    if (pc) |p| if (n.on_click != null or n.hover_id.len > 0) {
+    if (pc) |p| if (n.on_click != null or n.on_drag != null or n.hover_id.len > 0) {
         try p.add_hitbox(.{
             .x = x,
             .y = y,
             .w = r.size.width,
             .h = r.size.height,
-            .on_click = n.on_click,
+            // A drag capture (on_point) supersedes on_click in the press dispatch, so a
+            // draggable box does its click via on_drag_end (no-movement release).
+            .on_click = if (n.on_drag == null) n.on_click else null,
+            .on_point = n.on_drag,
+            .on_drag_end = n.on_drag_end,
             .hover_id = n.hover_id,
             .ctx = n.click_ctx,
         });

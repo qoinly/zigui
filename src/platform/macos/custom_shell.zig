@@ -90,6 +90,7 @@ pub const MouseDispatch = struct {
     on_exit: *const fn (ctx: *anyopaque) void,
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,
@@ -343,8 +344,19 @@ fn custom_body_right_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .right, false);
 }
 
-fn custom_body_other_mouse_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
-    if (g_grabbed) raw_button(event, .middle, true);
+fn custom_body_other_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_button(event, .middle, true);
+    // otherMouseDown fires for any non-left/right button; buttonNumber 2 is middle.
+    if (objc.msg_send(isize, event, "buttonNumber", .{}) != 2) return;
+    const d = g_mouse_dispatch orelse return;
+    const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
+    const loc: NSPoint = objc.msg_send(
+        NSPoint,
+        self,
+        "convertPoint:fromView:",
+        .{ win_loc, @as(?Id, null) },
+    );
+    d.on_middle_down(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {

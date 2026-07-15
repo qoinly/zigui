@@ -657,6 +657,9 @@ fn on_button_press(ev: *const xcb.InputDeviceEvent) void {
     sync_mods(ev.state);
     switch (ev.detail) {
         1 => handle_left_press(win, ev),
+        2 => if (g_dispatch) |d| {
+            d.on_middle_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
+        },
         3 => if (g_dispatch) |d| {
             d.on_right_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
         },

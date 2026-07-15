@@ -50,6 +50,7 @@ pub const MouseDispatch = struct {
     on_exit: *const fn (ctx: *anyopaque) void,
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,
@@ -898,9 +899,9 @@ fn handle_mouse_message(
         win32.WM_LBUTTONDOWN => handle_mouse_down(hwnd, l),
         win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(dispatch_ctx(hwnd, d.ctx)),
         win32.WM_RBUTTONDOWN => handle_mouse_right_down(hwnd, l),
+        win32.WM_MBUTTONDOWN => handle_mouse_middle_down(hwnd, l),
         win32.WM_MOUSEWHEEL => handle_mouse_wheel(hwnd, w),
         win32.WM_RBUTTONUP,
-        win32.WM_MBUTTONDOWN,
         win32.WM_MBUTTONUP,
         win32.WM_MOUSEHWHEEL,
         => {},
@@ -934,6 +935,13 @@ fn handle_mouse_right_down(hwnd: win32.HWND, l: win32.LPARAM) void {
     if (g_dispatch) |d| {
         const p = dispatch_point(hwnd, l);
         d.on_right_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
+    }
+}
+
+fn handle_mouse_middle_down(hwnd: win32.HWND, l: win32.LPARAM) void {
+    if (g_dispatch) |d| {
+        const p = dispatch_point(hwnd, l);
+        d.on_middle_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
 }
 

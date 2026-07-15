@@ -140,6 +140,12 @@ fn tab_context(ctx: ?*anyopaque, x: f32, y: f32) void {
     if (s.state.on_context) |cb| cb(s.state.ctx, s.index, x, y);
 }
 
+// Middle-click a tab closes it, routed through the same on_close as the X button.
+fn tab_middle(ctx: ?*anyopaque) void {
+    const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
+    if (s.state.on_close) |cb| cb(s.state.ctx, s.index);
+}
+
 fn tab_point(ctx: ?*anyopaque, x: f32, y: f32) void {
     _ = y;
     const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
@@ -512,6 +518,7 @@ fn push_tab_hit(
             .on_point = tab_point,
             .on_drag_end = tab_drop,
             .on_context = tab_context,
+            .on_middle = tab_middle,
             .ctx = ctx,
         });
     } else {
@@ -522,6 +529,7 @@ fn push_tab_hit(
             .h = h,
             .on_click = select_click,
             .on_context = tab_context,
+            .on_middle = tab_middle,
             .ctx = ctx,
         });
     }
