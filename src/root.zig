@@ -202,6 +202,13 @@ pub fn key_presses() []const KeyEvent {
     return frame_ctx.get().paint.keys();
 }
 
+// The OS file drop (drag-and-drop from a file manager) that landed this frame, or
+// null. paths are decoded absolute paths (valid this frame); x/y is the drop point.
+pub const FileDrop = window.FileDrop;
+pub fn dropped_files() ?FileDrop {
+    return frame_ctx.get().paint.dropped_files();
+}
+
 // Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
 // window; display_bounds(i) gives monitor i's frame in points so the app can size a
 // stream or place a window per screen.

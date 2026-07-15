@@ -91,6 +91,7 @@ pub const MouseDispatch = struct {
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_file_drop: *const fn (ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,

@@ -119,6 +119,27 @@ var g_atom_incr: u32 = 0;
 var g_atom_text: u32 = 0;
 var g_atom_clip_prop: u32 = 0;
 
+// ---- XDND (drag-and-drop of files onto the window) ----
+var g_atom_xdnd_aware: u32 = 0;
+var g_atom_xdnd_enter: u32 = 0;
+var g_atom_xdnd_position: u32 = 0;
+var g_atom_xdnd_status: u32 = 0;
+var g_atom_xdnd_drop: u32 = 0;
+var g_atom_xdnd_finished: u32 = 0;
+var g_atom_xdnd_selection: u32 = 0;
+var g_atom_xdnd_action_copy: u32 = 0;
+var g_atom_xdnd_type_list: u32 = 0;
+var g_atom_uri_list: u32 = 0;
+var g_atom_xdnd_prop: u32 = 0;
+// The in-flight drag: the source window and whether it offered text/uri-list, kept
+// from XdndEnter to the XdndDrop's selection reply.
+var g_xdnd_source: u32 = 0;
+var g_xdnd_win: u32 = 0;
+var g_xdnd_accept: bool = false;
+var g_xdnd_x: f32 = 0;
+var g_xdnd_y: f32 = 0;
+var g_xdnd_scratch: [16384]u8 = undefined; // the dropped uri-list (own buffer, not the clipboard's)
+
 // ---- clipboard state (the X CLIPBOARD selection) ----
 const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 const CLIPBOARD_POLL_MS: c_int = 10;
@@ -250,6 +271,7 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     apply_motif_undecorated(win.window);
     apply_title(win.window, opts.title);
     apply_delete_protocol(win.window);
+    apply_xdnd_aware(win.window);
     if (xcb_xfixes.first_event != 0 and g_atom_clipboard != 0) {
         xcb_xfixes.watch_selection(win.window, g_atom_clipboard);
     }
@@ -321,6 +343,24 @@ fn intern_atoms() void {
     g_atom_incr = xcb.intern_atom("INCR");
     g_atom_text = xcb.intern_atom("TEXT");
     g_atom_clip_prop = xcb.intern_atom("ZIGUI_CLIP");
+    g_atom_xdnd_aware = xcb.intern_atom("XdndAware");
+    g_atom_xdnd_enter = xcb.intern_atom("XdndEnter");
+    g_atom_xdnd_position = xcb.intern_atom("XdndPosition");
+    g_atom_xdnd_status = xcb.intern_atom("XdndStatus");
+    g_atom_xdnd_drop = xcb.intern_atom("XdndDrop");
+    g_atom_xdnd_finished = xcb.intern_atom("XdndFinished");
+    g_atom_xdnd_selection = xcb.intern_atom("XdndSelection");
+    g_atom_xdnd_action_copy = xcb.intern_atom("XdndActionCopy");
+    g_atom_xdnd_type_list = xcb.intern_atom("XdndTypeList");
+    g_atom_uri_list = xcb.intern_atom("text/uri-list");
+    g_atom_xdnd_prop = xcb.intern_atom("ZIGUI_XDND");
+}
+
+// Advertise XDND v5 so file managers offer file drops onto this window.
+fn apply_xdnd_aware(window: u32) void {
+    if (g_atom_xdnd_aware == 0) return;
+    const version: u32 = 5;
+    xcb.change_property(window, g_atom_xdnd_aware, xcb.ATOM_ATOM, 32, 1, &version);
 }
 
 fn apply_motif_undecorated(window: u32) void {
@@ -458,6 +498,9 @@ fn handle_event(event: *xcb.GenericEvent) void {
         },
         xcb.CLIENT_MESSAGE => {
             const message: *const xcb.ClientMessageEvent = @ptrCast(event);
+            if (message.type == g_atom_xdnd_enter) return xdnd_enter(message);
+            if (message.type == g_atom_xdnd_position) return xdnd_position(message);
+            if (message.type == g_atom_xdnd_drop) return xdnd_drop(message);
             if (message.type != g_atom_protocols) return;
             if (message.data32[0] != g_atom_delete_window) return;
             const win = window_by_id(message.window) orelse return;
@@ -481,6 +524,7 @@ fn handle_event(event: *xcb.GenericEvent) void {
         // Replies to our convert_selection; the read loop consumes the stash.
         xcb.SELECTION_NOTIFY => {
             const notify: *const xcb.SelectionNotifyEvent = @ptrCast(event);
+            if (notify.selection == g_atom_xdnd_selection) return xdnd_selection_notify(notify);
             g_selection_notify = notify.*;
         },
         xcb.GE_GENERIC => on_ge_event(@ptrCast(event)),
@@ -843,6 +887,86 @@ fn send_net_message(window: u32, message_type: u32, data: [5]u32) void {
     message.type = message_type;
     message.data32 = data;
     xcb.send_event_to_root(@ptrCast(&buf));
+}
+
+// ---- XDND target: receive a file drop (advertised via apply_xdnd_aware) ----
+
+fn xdnd_enter(m: *const xcb.ClientMessageEvent) void {
+    g_xdnd_source = m.data32[0];
+    g_xdnd_win = m.window;
+    g_xdnd_accept = false;
+    if ((m.data32[1] & 1) == 0) {
+        // Up to three offered types are inline in data32[2..5].
+        for (m.data32[2..5]) |ty| {
+            if (ty != 0 and ty == g_atom_uri_list) g_xdnd_accept = true;
+        }
+    } else {
+        // More than three types: read the full list from the source's XdndTypeList.
+        var buf: [1024]u8 = undefined;
+        if (xcb.get_property_into(g_xdnd_source, g_atom_xdnd_type_list, xcb.ATOM_ATOM, &buf)) |bytes| {
+            var i: usize = 0;
+            while (i + 4 <= bytes.len) : (i += 4) {
+                if (std.mem.readInt(u32, bytes[i..][0..4], .little) == g_atom_uri_list) g_xdnd_accept = true;
+            }
+        }
+    }
+}
+
+fn xdnd_position(m: *const xcb.ClientMessageEvent) void {
+    // data32[2] packs the pointer's root coords as (x << 16 | y).
+    const packed_xy = m.data32[2];
+    g_xdnd_x = @floatFromInt(@as(u16, @truncate(packed_xy >> 16)));
+    g_xdnd_y = @floatFromInt(@as(u16, @truncate(packed_xy & 0xffff)));
+    // Reply with our willingness: accept the whole window (no per-region rects).
+    const accept: u32 = if (g_xdnd_accept) 1 else 0;
+    const action: u32 = if (g_xdnd_accept) g_atom_xdnd_action_copy else 0;
+    send_client_message(g_xdnd_source, g_atom_xdnd_status, .{ m.window, accept, 0, 0, action });
+}
+
+fn xdnd_drop(m: *const xcb.ClientMessageEvent) void {
+    if (!g_xdnd_accept or g_xdnd_source == 0) {
+        send_client_message(m.data32[0], g_atom_xdnd_finished, .{ m.window, 0, 0, 0, 0 });
+        g_xdnd_source = 0;
+        return;
+    }
+    // Ask the source for the file list; the reply arrives as SELECTION_NOTIFY below.
+    xcb.convert_selection(m.window, g_atom_xdnd_selection, g_atom_uri_list, g_atom_xdnd_prop);
+    xcb.flush();
+}
+
+fn xdnd_selection_notify(n: *const xcb.SelectionNotifyEvent) void {
+    var delivered = false;
+    if (n.property != 0) {
+        if (xcb.read_property(n.requestor, g_atom_xdnd_prop, true, &g_xdnd_scratch)) |pv| {
+            if (pv.bytes.len > 0) if (g_dispatch) |d| {
+                const win = window_by_id(n.requestor);
+                d.on_file_drop(ctx_for(win, d.ctx), pv.bytes.ptr, pv.bytes.len, g_xdnd_x, g_xdnd_y);
+                delivered = true;
+            };
+        }
+    }
+    // Tell the source the transfer finished (accepted iff we delivered the data).
+    if (g_xdnd_source != 0) {
+        const flags: u32 = if (delivered) 1 else 0;
+        const action: u32 = if (delivered) g_atom_xdnd_action_copy else 0;
+        send_client_message(g_xdnd_source, g_atom_xdnd_finished, .{ g_xdnd_win, flags, action, 0, 0 });
+    }
+    g_xdnd_source = 0;
+    g_xdnd_accept = false;
+}
+
+// A 32-byte ClientMessage delivered to one window (the XDND status/finished replies).
+fn send_client_message(dest: u32, message_type: u32, data: [5]u32) void {
+    if (dest == 0 or message_type == 0) return;
+    var buf = [_]u32{0} ** 8;
+    const message: *xcb.ClientMessageEvent = @ptrCast(&buf);
+    message.response_type = xcb.CLIENT_MESSAGE;
+    message.format = 32;
+    message.window = dest;
+    message.type = message_type;
+    message.data32 = data;
+    xcb.send_event_to(dest, @ptrCast(&buf));
+    xcb.flush();
 }
 
 // ---- cursor ----

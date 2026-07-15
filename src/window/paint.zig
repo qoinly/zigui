@@ -91,6 +91,30 @@ pub const Frame = struct {
     titlebar: BoundsF,
 };
 
+// A file drop delivered this frame: the decoded absolute paths + the drop point.
+pub const FileDrop = struct {
+    paths: []const []const u8,
+    x: f32,
+    y: f32,
+};
+
+// The path portion of a `file://[host]/abs/path` URI (from "/abs" on), or null for a
+// non-file URI. The path starts at the first '/' after the "file://" host.
+fn file_uri_path_start(uri: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, uri, "file://")) return null;
+    const slash = std.mem.indexOfScalar(u8, uri["file://".len..], '/') orelse return null;
+    return "file://".len + slash;
+}
+
+fn hex_val(c: u8) u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => 0,
+    };
+}
+
 pub const PaintContext = struct {
     handle: CustomShellHandle,
     allocator: std.mem.Allocator,
@@ -133,6 +157,14 @@ pub const PaintContext = struct {
     // buttons/wheel). Drained by the paint callback, cleared after, same as keys.
     raw_events: [MAX_RAW_EVENTS]input.InputEvent = undefined,
     raw_len: u32 = 0,
+    // A file drop landed this frame (OS drag-and-drop): the decoded paths are packed
+    // into drop_buf, sliced by drop_paths[0..drop_count]. One-shot, cleared post-frame.
+    drop_buf: [8192]u8 = undefined,
+    drop_paths: [32][]const u8 = undefined,
+    drop_count: usize = 0,
+    drop_x: f32 = 0,
+    drop_y: f32 = 0,
+    has_drop: bool = false,
     // Cursor the consumer wants this frame (resets to .default each frame; set it
     // while hovering a resize edge etc). Applied after the paint callback.
     cursor: custom_shell.CursorKind = .default,
@@ -360,6 +392,49 @@ pub const PaintContext = struct {
 
     pub fn raw_inputs(self: *const PaintContext) []const input.InputEvent {
         return self.raw_events[0..self.raw_len];
+    }
+
+    // The file drop that landed this frame, or null. Paths are decoded absolute paths
+    // (slices into drop_buf, valid this frame); x/y is the window-space drop point.
+    pub fn dropped_files(self: *const PaintContext) ?FileDrop {
+        if (!self.has_drop or self.drop_count == 0) return null;
+        return .{ .paths = self.drop_paths[0..self.drop_count], .x = self.drop_x, .y = self.drop_y };
+    }
+
+    // Decode a platform file drop's uri-list into drop_buf/drop_paths. `data` is the
+    // raw `text/uri-list` (CRLF-separated `file://` URIs, percent-encoded).
+    pub fn on_file_drop_data(self: *PaintContext, data: [*]const u8, len: usize, x: f32, y: f32) void {
+        self.drop_count = 0;
+        var out: usize = 0;
+        var lines = std.mem.tokenizeAny(u8, data[0..len], "\r\n");
+        while (lines.next()) |raw| {
+            if (self.drop_count >= self.drop_paths.len) break;
+            const line = std.mem.trim(u8, raw, " \t");
+            if (line.len == 0 or line[0] == '#') continue; // uri-list comment
+            const path_at = file_uri_path_start(line) orelse continue; // local files only
+            const start = out;
+            var i: usize = path_at;
+            while (i < line.len and out < self.drop_buf.len) {
+                if (line[i] == '%' and i + 2 < line.len) {
+                    self.drop_buf[out] = (hex_val(line[i + 1]) << 4) | hex_val(line[i + 2]);
+                    i += 3;
+                } else {
+                    self.drop_buf[out] = line[i];
+                    i += 1;
+                }
+                out += 1;
+            }
+            if (out > start) {
+                self.drop_paths[self.drop_count] = self.drop_buf[start..out];
+                self.drop_count += 1;
+            }
+        }
+        if (self.drop_count > 0) {
+            self.drop_x = x;
+            self.drop_y = y;
+            self.has_drop = true;
+            self.renderer.request_redraw();
+        }
     }
 
     // Enter/leave relative capture; while grabbed, input arrives via raw_inputs()
@@ -967,19 +1042,20 @@ fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
     s.user_cb(s.user_ctx, s.paint_ctx, frame) catch return;
-    // Keys are consumed mid-build, so a handler in a late-built view (the body)
-    // can mutate state an earlier-built view (the overlay) already rendered.
-    // One follow-up frame converges. The request lands after draw_frame (which
-    // clears the dirty flag); wants_fast_poll re-arms the linux idle sleep,
-    // whose note_poll report predates the key handling this round.
-    const keyed = s.paint_ctx.key_len > 0;
+    // Keys (and a file drop) are consumed mid-build, so a handler in a late-built
+    // view (the body) can mutate state an earlier-built view (the overlay) already
+    // rendered - e.g. a drop opens the import dialog. One follow-up frame converges.
+    // The request lands after draw_frame (which clears the dirty flag); wants_fast_poll
+    // re-arms the linux idle sleep, whose note_poll report predates this round.
+    const converge = s.paint_ctx.key_len > 0 or s.paint_ctx.has_drop;
     s.paint_ctx.key_len = 0;
     s.paint_ctx.raw_len = 0;
+    s.paint_ctx.has_drop = false; // one-shot: the drop was drained in the callback above
     s.paint_ctx.wheel_dy = 0; // per-frame delta; consumer reads it in the callback above
     s.paint_ctx.wheel_dx = 0;
     custom_shell.apply_cursor(s.paint_ctx.cursor);
     s.paint_ctx.draw_frame(frame);
-    if (keyed) {
+    if (converge) {
         s.paint_ctx.request_redraw();
         wants_fast_poll = true;
     }
@@ -1033,6 +1109,11 @@ fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
 fn middle_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_middle_mouse_down(x, y);
+}
+
+fn file_drop_thunk(ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_file_drop_data(data, len, x, y);
 }
 
 fn mouse_up_thunk(ctx: *anyopaque) void {
@@ -1089,6 +1170,7 @@ pub fn start_paint_loop(
         .on_down = mouse_down_thunk,
         .on_right_down = right_mouse_down_thunk,
         .on_middle_down = middle_mouse_down_thunk,
+        .on_file_drop = file_drop_thunk,
         .on_drag = mouse_drag_thunk,
         .on_up = mouse_up_thunk,
         .on_scroll = scroll_thunk,
