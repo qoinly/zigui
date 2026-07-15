@@ -1974,6 +1974,8 @@ pub const MenuOverlay = struct {
     trigger: *const [4]f32, // read at draw, after the trigger wrote it this frame
     view_y: f32 = 0, // body inset (content top) for edge-flip + clip
     view_h: f32 = 0, // content height; 0 disables vertical flip/clip
+    min_width: f32 = 200, // panel floor; lower it for a menu that should hug short content
+    hug: bool = false, // unmarked plain items left-align + don't pad the panel (short pickers)
     on_select: ?callbacks.SelectIdFn = null,
     on_dismiss: ?callbacks.ClickFn = null,
     paint: ?*custom_paint.PaintContext = null,
@@ -2011,6 +2013,8 @@ const MenuOverlaySpec = struct {
             .paint = pc,
             .on_select = o.on_select,
             .ctx = o.ctx,
+            .min_width = o.min_width,
+            .hug = o.hug,
             .view_x = 0,
             .view_y = o.view_y,
             .view_w = r.size.width,
