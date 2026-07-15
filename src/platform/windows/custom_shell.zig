@@ -418,6 +418,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     }
     g_main_hwnd = hwnd;
     try register_raw_devices(hwnd);
+    // Native Explorer drops: WM_DROPFILES lands in wnd_proc and feeds the shared
+    // file-drop dispatch (the XDND / Finder counterpart). Note for an elevated
+    // process: UIPI filters drops from a non-elevated Explorer; allowing them
+    // needs ChangeWindowMessageFilterEx(WM_DROPFILES + WM_COPYDATA + 0x0049).
+    win32.DragAcceptFiles(hwnd, win32.TRUE);
 
     style_shell_window(hwnd);
     resize_shell_window(hwnd, opts.width, opts.height);
@@ -727,6 +732,7 @@ fn wnd_proc(
         win32.WM_SYSKEYUP,
         win32.WM_CHAR,
         => if (handle_key_message(hwnd, msg, w)) |r| return r,
+        win32.WM_DROPFILES => return handle_drop_files(hwnd, w),
         else => {},
     }
     return win32.DefWindowProcW(hwnd, msg, w, l);
@@ -944,6 +950,46 @@ fn handle_mouse_middle_down(hwnd: win32.HWND, l: win32.LPARAM) void {
         const p = dispatch_point(hwnd, l);
         d.on_middle_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
+}
+
+// Newline-joined plain absolute paths, the form the shared decoder accepts
+// directly. Sized to the decoder's own capacity; GUI-thread only, and consumed
+// (copied) inside the dispatch below, so one static scratch is enough.
+var g_drop_scratch: [8192]u8 = undefined;
+
+fn handle_drop_files(hwnd: win32.HWND, w: win32.WPARAM) win32.LRESULT {
+    if (w == 0) return 0;
+    const hdrop: win32.HDROP = @ptrFromInt(w);
+    defer win32.DragFinish(hdrop);
+    const d = g_dispatch orelse return 0;
+
+    // The drop point arrives in client px; points = px / scale (dispatch_point's math).
+    var pt = win32.POINT{ .x = 0, .y = 0 };
+    _ = win32.DragQueryPoint(hdrop, &pt);
+    const scale = scale_for(hwnd);
+    std.debug.assert(scale > 0); // divisor below
+    const x = @as(f32, @floatFromInt(pt.x)) / scale;
+    const y = @as(f32, @floatFromInt(pt.y)) / scale;
+
+    const count = win32.DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
+    var out: usize = 0;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var wbuf: [1024]u16 = undefined;
+        const n = win32.DragQueryFileW(hdrop, i, &wbuf, wbuf.len);
+        if (n == 0) continue;
+        // Worst case 3 UTF-8 bytes per UTF-16 unit, +1 for the separator; a
+        // drop past the scratch keeps what already fit (decoder caps at 32 anyway).
+        if (out + 1 + @as(usize, n) * 3 > g_drop_scratch.len) break;
+        if (out > 0) {
+            g_drop_scratch[out] = '\n';
+            out += 1;
+        }
+        const written = std.unicode.utf16LeToUtf8(g_drop_scratch[out..], wbuf[0..n]) catch continue;
+        out += written;
+    }
+    if (out > 0) d.on_file_drop(dispatch_ctx(hwnd, d.ctx), &g_drop_scratch, out, x, y);
+    return 0;
 }
 
 fn handle_mouse_wheel(hwnd: win32.HWND, w: win32.WPARAM) void {

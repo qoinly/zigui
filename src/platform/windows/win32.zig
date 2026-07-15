@@ -394,6 +394,20 @@ pub extern "kernel32" fn CreateEventW(
 ) callconv(.winapi) ?HANDLE;
 pub extern "kernel32" fn SetEvent(event: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn WaitForSingleObject(handle: HANDLE, ms: DWORD) callconv(.winapi) DWORD;
+
+// Explorer file drop (WM_DROPFILES). DragQueryFileW with index 0xFFFFFFFF
+// returns the file count; with a null buffer, the required length for a file.
+pub const WM_DROPFILES: UINT = 0x0233;
+pub const HDROP = *opaque {};
+pub extern "shell32" fn DragAcceptFiles(hwnd: HWND, accept: BOOL) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryFileW(
+    hdrop: HDROP,
+    index: UINT,
+    file: ?[*]u16,
+    cch: UINT,
+) callconv(.winapi) UINT;
+pub extern "shell32" fn DragQueryPoint(hdrop: HDROP, pt: *POINT) callconv(.winapi) BOOL;
+pub extern "shell32" fn DragFinish(hdrop: HDROP) callconv(.winapi) void;
 // Idle-sleep inhibitor: ES_CONTINUOUS holds the state until the next call, the
 // DISPLAY/SYSTEM bits keep the screen + machine awake.
 pub const ES_CONTINUOUS: u32 = 0x80000000;

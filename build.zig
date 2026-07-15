@@ -154,6 +154,7 @@ fn link_windows(zigui: *std.Build.Module) void {
     zigui.linkSystemLibrary("dwmapi", .{});
     zigui.linkSystemLibrary("shcore", .{});
     zigui.linkSystemLibrary("ole32", .{});
+    zigui.linkSystemLibrary("shell32", .{}); // DragAcceptFiles / DragQueryFileW (file drop)
 }
 
 fn add_examples(
