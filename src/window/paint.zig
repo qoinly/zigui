@@ -115,6 +115,14 @@ fn hex_val(c: u8) u8 {
     };
 }
 
+// A plain absolute path: unix `/...` or a windows drive `C:\...` / `C:/...`. Filters a
+// non-file drop line (e.g. an http URI) out of the plain-path branch.
+fn looks_absolute(p: []const u8) bool {
+    if (p.len == 0) return false;
+    if (p[0] == '/') return true;
+    return p.len >= 3 and std.ascii.isAlphabetic(p[0]) and p[1] == ':' and (p[2] == '\\' or p[2] == '/');
+}
+
 pub const PaintContext = struct {
     handle: CustomShellHandle,
     allocator: std.mem.Allocator,
@@ -401,8 +409,11 @@ pub const PaintContext = struct {
         return .{ .paths = self.drop_paths[0..self.drop_count], .x = self.drop_x, .y = self.drop_y };
     }
 
-    // Decode a platform file drop's uri-list into drop_buf/drop_paths. `data` is the
-    // raw `text/uri-list` (CRLF-separated `file://` URIs, percent-encoded).
+    // Decode a platform file drop into drop_buf/drop_paths. `data` is newline-separated
+    // (CR/LF), one entry per file, in EITHER form so every backend can pass what its OS
+    // hands it: a `file://` URI (percent-encoded - what X11 XDND delivers) OR a plain
+    // absolute path (`/Users/...` or `C:\...` - what macOS NSURL.path / Windows
+    // DragQueryFile give). `#` lines and non-absolute/non-file entries are skipped.
     pub fn on_file_drop_data(self: *PaintContext, data: [*]const u8, len: usize, x: f32, y: f32) void {
         self.drop_count = 0;
         var out: usize = 0;
@@ -410,12 +421,15 @@ pub const PaintContext = struct {
         while (lines.next()) |raw| {
             if (self.drop_count >= self.drop_paths.len) break;
             const line = std.mem.trim(u8, raw, " \t");
-            if (line.len == 0 or line[0] == '#') continue; // uri-list comment
-            const path_at = file_uri_path_start(line) orelse continue; // local files only
+            if (line.len == 0 or line[0] == '#') continue;
+            const is_uri = std.mem.startsWith(u8, line, "file://");
+            const path_at: usize = if (is_uri)
+                (file_uri_path_start(line) orelse continue)
+            else if (looks_absolute(line)) 0 else continue; // drop non-file URIs / junk
             const start = out;
             var i: usize = path_at;
             while (i < line.len and out < self.drop_buf.len) {
-                if (line[i] == '%' and i + 2 < line.len) {
+                if (is_uri and line[i] == '%' and i + 2 < line.len) {
                     self.drop_buf[out] = (hex_val(line[i + 1]) << 4) | hex_val(line[i + 2]);
                     i += 3;
                 } else {
