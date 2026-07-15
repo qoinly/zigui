@@ -9,6 +9,7 @@ const win32 = @import("win32.zig");
 const com = @import("com.zig");
 const dxgi = @import("dxgi.zig");
 const d3d11 = @import("d3d11.zig");
+const dcomp = @import("dcomp.zig");
 const loop = @import("loop.zig");
 const primitives = @import("../../primitives.zig");
 
@@ -282,6 +283,11 @@ pub const Renderer = struct {
     context: *d3d11.ID3D11DeviceContext,
     swapchain: *dxgi.IDXGISwapChain,
     hwnd: win32.HWND,
+    // DirectComposition wiring: the visual DWM composes atomically with the
+    // window frame. All null on the HWND-swapchain fallback (no dcomp.dll).
+    dcomp_device: ?*anyopaque = null,
+    dcomp_target: ?*anyopaque = null,
+    dcomp_visual: ?*anyopaque = null,
     rtv: ?*anyopaque = null,
     // ID3D11Device1 (Windows 8+), QI'd once at init; gates
     // imported_nv12_handle_supported and opens NT-handle shared frames. Null when
@@ -346,6 +352,64 @@ pub const Renderer = struct {
         const w: u32 = @intCast(@max(rect.right - rect.left, 1));
         const h: u32 = @intCast(@max(rect.bottom - rect.top, 1));
 
+        // DirectComposition first: DWM composes the swapchain visual atomically
+        // with the window frame, so a live resize never shows the previous frame
+        // stretched to the new size (the Zed / macOS feel). The plain HWND
+        // swapchain stays as the fallback when dcomp.dll is unavailable.
+        const parts = create_composition_parts(hwnd, w, h) orelse
+            try create_hwnd_parts(hwnd, w, h);
+
+        var self = Renderer{
+            .device = parts.device,
+            .context = parts.context,
+            .swapchain = parts.swapchain,
+            .dcomp_device = parts.dcomp_device,
+            .dcomp_target = parts.dcomp_target,
+            .dcomp_visual = parts.dcomp_visual,
+            .hwnd = hwnd,
+            .last_w = w,
+            .last_h = h,
+        };
+        errdefer self.deinit();
+
+        try self.ensure_rtv();
+        try self.build_pipelines();
+        try self.build_instance_buffers();
+        try self.build_states();
+
+        // imported_nv12 needs ID3D11Device1::OpenSharedResource1; its absence just
+        // disables that path, leaving the CPU staging path as the fallback.
+        var dev1: ?*anyopaque = null;
+        if (com.succeeded(com.query_interface(self.device, &d3d11.IID_ID3D11Device1, &dev1))) {
+            self.device1 = @ptrCast(@alignCast(dev1.?));
+        }
+
+        // DXGI queues up to 3 presents by default; a UI submits one small frame
+        // per input, so cap the queue at 1 to keep input-to-photon tight. No
+        // throughput cost at this workload; failure just keeps the default.
+        var dxgi_dev: ?*anyopaque = null;
+        if (com.succeeded(com.query_interface(self.device, &dxgi.IID_IDXGIDevice1, &dxgi_dev))) {
+            const dd: *dxgi.IDXGIDevice1 = @ptrCast(@alignCast(dxgi_dev.?));
+            _ = dd.set_maximum_frame_latency(1);
+            com.release(&dxgi_dev);
+        }
+
+        return self;
+    }
+
+    const Parts = struct {
+        device: *d3d11.ID3D11Device,
+        context: *d3d11.ID3D11DeviceContext,
+        swapchain: *dxgi.IDXGISwapChain,
+        dcomp_device: ?*anyopaque = null,
+        dcomp_target: ?*anyopaque = null,
+        dcomp_visual: ?*anyopaque = null,
+    };
+
+    // The pre-composition path: a swapchain bound to the HWND directly. DWM
+    // stretches its last frame across live-resize gaps, so this is only the
+    // fallback when DirectComposition is unavailable.
+    fn create_hwnd_parts(hwnd: win32.HWND, w: u32, h: u32) Error!Parts {
         var desc = dxgi.DXGI_SWAP_CHAIN_DESC{
             .BufferDesc = .{ .Width = w, .Height = h, .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM },
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
@@ -382,40 +446,121 @@ pub const Renderer = struct {
         if (com.failed(hr) or device == null or swapchain == null or context == null) {
             return error.DeviceCreateFailed;
         }
+        return .{ .device = device.?, .context = context.?, .swapchain = swapchain.? };
+    }
 
-        var self = Renderer{
-            .device = device.?,
-            .context = context.?,
-            .swapchain = swapchain.?,
-            .hwnd = hwnd,
-            .last_w = w,
-            .last_h = h,
-        };
-        errdefer self.deinit();
+    // Device + composition swapchain + DComp visual tree, or null to fall back
+    // (dcomp.dll absent, or any step failing). Failure releases every partial.
+    fn create_composition_parts(hwnd: win32.HWND, w: u32, h: u32) ?Parts {
+        const dcomp_create = dcomp.create_device_proc() orelse return null;
 
-        try self.ensure_rtv();
-        try self.build_pipelines();
-        try self.build_instance_buffers();
-        try self.build_states();
+        const levels = [_]u32{d3d11.D3D_FEATURE_LEVEL_11_0};
+        var device: ?*d3d11.ID3D11Device = null;
+        var context: ?*d3d11.ID3D11DeviceContext = null;
+        const hr = d3d11.D3D11CreateDevice(
+            null,
+            d3d11.D3D_DRIVER_TYPE_HARDWARE,
+            null,
+            0,
+            &levels,
+            levels.len,
+            d3d11.D3D11_SDK_VERSION,
+            &device,
+            null,
+            &context,
+        );
+        if (com.failed(hr) or device == null or context == null) return null;
 
-        // imported_nv12 needs ID3D11Device1::OpenSharedResource1; its absence just
-        // disables that path, leaving the CPU staging path as the fallback.
-        var dev1: ?*anyopaque = null;
-        if (com.succeeded(com.query_interface(self.device, &d3d11.IID_ID3D11Device1, &dev1))) {
-            self.device1 = @ptrCast(@alignCast(dev1.?));
+        if (compose(hwnd, w, h, device.?, dcomp_create)) |c| {
+            return .{
+                .device = device.?,
+                .context = context.?,
+                .swapchain = c.swapchain,
+                .dcomp_device = c.device,
+                .dcomp_target = c.target,
+                .dcomp_visual = c.visual,
+            };
         }
+        _ = context.?.vtable.Release(context.?);
+        _ = device.?.vtable.Release(device.?);
+        return null;
+    }
 
-        // DXGI queues up to 3 presents by default; a UI submits one small frame
-        // per input, so cap the queue at 1 to keep input-to-photon tight. No
-        // throughput cost at this workload; failure just keeps the default.
+    const Composition = struct {
+        swapchain: *dxgi.IDXGISwapChain,
+        device: ?*anyopaque,
+        target: ?*anyopaque,
+        visual: ?*anyopaque,
+    };
+
+    // Wire hwnd -> DComp target -> visual -> composition swapchain and commit
+    // the tree once; afterwards plain Present() publishes frames through it.
+    fn compose(
+        hwnd: win32.HWND,
+        w: u32,
+        h: u32,
+        device: *d3d11.ID3D11Device,
+        dcomp_create: dcomp.CreateDeviceFn,
+    ) ?Composition {
         var dxgi_dev: ?*anyopaque = null;
-        if (com.succeeded(com.query_interface(self.device, &dxgi.IID_IDXGIDevice1, &dxgi_dev))) {
-            const dd: *dxgi.IDXGIDevice1 = @ptrCast(@alignCast(dxgi_dev.?));
-            _ = dd.set_maximum_frame_latency(1);
-            com.release(&dxgi_dev);
+        if (com.failed(com.query_interface(device, &dxgi.IID_IDXGIDevice1, &dxgi_dev)) or dxgi_dev == null)
+            return null;
+        defer com.release(&dxgi_dev);
+
+        var factory_raw: ?*anyopaque = null;
+        if (com.failed(dxgi.CreateDXGIFactory1(&dxgi.IID_IDXGIFactory2, &factory_raw)) or factory_raw == null)
+            return null;
+        defer com.release(&factory_raw);
+        const factory: *dxgi.IDXGIFactory2 = @ptrCast(@alignCast(factory_raw.?));
+
+        const desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
+            .Width = w,
+            .Height = h,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            // Same triple-buffer rationale as the HWND path.
+            .BufferCount = 3,
+            .Scaling = dxgi.DXGI_SCALING_STRETCH,
+            .SwapEffect = dxgi.DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            .AlphaMode = dxgi.DXGI_ALPHA_MODE_IGNORE,
+            .Flags = 0,
+        };
+        var swapchain: ?*dxgi.IDXGISwapChain = null;
+        if (com.failed(factory.create_swap_chain_for_composition(@ptrCast(device), &desc, &swapchain)) or
+            swapchain == null)
+        {
+            return null;
         }
 
-        return self;
+        var dev_raw: ?*anyopaque = null;
+        var target_raw: ?*anyopaque = null;
+        var visual_raw: ?*anyopaque = null;
+        const ok = blk: {
+            if (com.failed(dcomp_create(dxgi_dev.?, &dcomp.IID_IDCompositionDevice, &dev_raw)) or
+                dev_raw == null) break :blk false;
+            const dd: *dcomp.IDCompositionDevice = @ptrCast(@alignCast(dev_raw.?));
+            var comp_target: ?*dcomp.IDCompositionTarget = null;
+            if (com.failed(dd.create_target_for_hwnd(hwnd, win32.TRUE, &comp_target)) or
+                comp_target == null) break :blk false;
+            target_raw = @ptrCast(comp_target.?);
+            var visual: ?*dcomp.IDCompositionVisual = null;
+            if (com.failed(dd.create_visual(&visual)) or visual == null) break :blk false;
+            visual_raw = @ptrCast(visual.?);
+            if (com.failed(visual.?.set_content(@ptrCast(swapchain.?)))) break :blk false;
+            if (com.failed(comp_target.?.set_root(visual.?))) break :blk false;
+            if (com.failed(dd.commit())) break :blk false;
+            break :blk true;
+        };
+        if (!ok) {
+            com.release(&visual_raw);
+            com.release(&target_raw);
+            com.release(&dev_raw);
+            swapchain.?.release();
+            std.log.warn("d3d11: DirectComposition setup failed; using HWND swapchain", .{});
+            return null;
+        }
+        return .{ .swapchain = swapchain.?, .device = dev_raw, .target = target_raw, .visual = visual_raw };
     }
 
     pub fn deinit(self: *Renderer) void {
@@ -447,6 +592,9 @@ pub const Renderer = struct {
             com.release(&p.vs);
             com.release(&p.ps);
         }
+        com.release(&self.dcomp_visual);
+        com.release(&self.dcomp_target);
+        com.release(&self.dcomp_device);
         _ = self.swapchain.vtable.Release(self.swapchain);
         _ = self.context.vtable.Release(self.context);
         _ = self.device.vtable.Release(self.device);

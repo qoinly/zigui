@@ -11,6 +11,7 @@
 const std = @import("std");
 const win32 = @import("win32.zig");
 const loop = @import("loop.zig");
+const dcomp = @import("dcomp.zig");
 const types = @import("../../window/types.zig");
 const input = @import("../../input.zig");
 const geometry = @import("../../geometry.zig");
@@ -472,8 +473,15 @@ fn create_shell_window(
     height: f64,
 ) Error!win32.HWND {
     // WS_OVERLAPPEDWINDOW keeps native snap; WM_NCCALCSIZE removes the frame.
+    // WS_EX_NOREDIRECTIONBITMAP drops the GDI redirection surface: the renderer
+    // presents through a DirectComposition visual instead (d3d11_renderer),
+    // which DWM moves atomically with the frame during a live resize. Only set
+    // when dcomp is available, since without it that surface is the window's
+    // only image source (the renderer keys its fallback off the same probe).
+    const ex_style: win32.DWORD = win32.WS_EX_APPWINDOW |
+        (if (dcomp.available()) win32.WS_EX_NOREDIRECTIONBITMAP else 0);
     return win32.CreateWindowExW(
-        win32.WS_EX_APPWINDOW,
+        ex_style,
         CLASS_NAME,
         title,
         win32.WS_OVERLAPPEDWINDOW | win32.WS_CLIPCHILDREN,
@@ -1210,7 +1218,10 @@ fn key_state_toggled(vk: win32.WPARAM) bool {
     return (state & 1) != 0;
 }
 
-// Focused text fields use one native EDIT child so IME/caret behavior stays native.
+// Focused text fields use one native EDIT child so IME/caret behavior stays
+// native. The control is never shown (seed_text_field only focuses it); the kit
+// draws the text, selection, and caret itself, so the child needs no surface -
+// which is what keeps this working under WS_EX_NOREDIRECTIONBITMAP too.
 fn ensure_edit(parent: win32.HWND) ?win32.HWND {
     if (g_edit) |e| return e;
     const instance = win32.GetModuleHandleW(null);

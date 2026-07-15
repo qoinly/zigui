@@ -30,6 +30,11 @@ pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: u32 = 0x00000020;
 pub const DXGI_SWAP_EFFECT_DISCARD: u32 = 0;
 pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: u32 = 4;
 
+// Composition swapchains require STRETCH scaling; the visual draws at pixel
+// size regardless, so no stretching actually happens.
+pub const DXGI_SCALING_STRETCH: u32 = 0;
+pub const DXGI_ALPHA_MODE_IGNORE: u32 = 3;
+
 pub const DXGI_RATIONAL = extern struct {
     Numerator: u32 = 0,
     Denominator: u32 = 0,
@@ -58,6 +63,98 @@ pub const DXGI_SWAP_CHAIN_DESC = extern struct {
     Windowed: BOOL = win32.TRUE,
     SwapEffect: u32 = 0,
     Flags: u32 = 0,
+};
+
+// The DXGI 1.2 descriptor (CreateSwapChainForComposition takes no HWND).
+pub const DXGI_SWAP_CHAIN_DESC1 = extern struct {
+    Width: u32 = 0,
+    Height: u32 = 0,
+    Format: u32 = 0,
+    Stereo: BOOL = win32.FALSE,
+    SampleDesc: DXGI_SAMPLE_DESC = .{},
+    BufferUsage: u32 = 0,
+    BufferCount: u32 = 0,
+    Scaling: u32 = 0,
+    SwapEffect: u32 = 0,
+    AlphaMode: u32 = 0,
+    Flags: u32 = 0,
+};
+
+pub const IID_IDXGIFactory2 = com.guid(
+    0x50c83a1c,
+    0xe072,
+    0x4c48,
+    0x87,
+    0xb0,
+    0x36,
+    0x30,
+    0xfa,
+    0x36,
+    0xa6,
+    0xd0,
+);
+
+pub extern "dxgi" fn CreateDXGIFactory1(
+    riid: *const GUID,
+    out: *?*anyopaque,
+) callconv(.winapi) HRESULT;
+
+// IDXGIFactory2; only CreateSwapChainForComposition (slot 24) is called. The
+// returned IDXGISwapChain1 is used through its IDXGISwapChain base vtable.
+pub const IDXGIFactory2 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        // IUnknown + IDXGIObject (slots 0..6).
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDXGIFactory2) callconv(.winapi) u32,
+        SetPrivateData: *const anyopaque,
+        SetPrivateDataInterface: *const anyopaque,
+        GetPrivateData: *const anyopaque,
+        GetParent: *const anyopaque,
+        // IDXGIFactory (slots 7..11).
+        EnumAdapters: *const anyopaque,
+        MakeWindowAssociation: *const anyopaque,
+        GetWindowAssociation: *const anyopaque,
+        CreateSwapChain: *const anyopaque,
+        CreateSoftwareAdapter: *const anyopaque,
+        // IDXGIFactory1 (slots 12..13).
+        EnumAdapters1: *const anyopaque,
+        IsCurrent: *const anyopaque,
+        // IDXGIFactory2 (slots 14..24).
+        IsWindowedStereoEnabled: *const anyopaque,
+        CreateSwapChainForHwnd: *const anyopaque,
+        CreateSwapChainForCoreWindow: *const anyopaque,
+        GetSharedResourceAdapterLuid: *const anyopaque,
+        RegisterStereoStatusWindow: *const anyopaque,
+        RegisterStereoStatusEvent: *const anyopaque,
+        UnregisterStereoStatus: *const anyopaque,
+        RegisterOcclusionStatusWindow: *const anyopaque,
+        RegisterOcclusionStatusEvent: *const anyopaque,
+        UnregisterOcclusionStatus: *const anyopaque,
+        CreateSwapChainForComposition: *const fn (
+            *IDXGIFactory2,
+            device: *anyopaque,
+            desc: *const DXGI_SWAP_CHAIN_DESC1,
+            restrict_output: ?*anyopaque,
+            out: *?*IDXGISwapChain,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(VTable, "CreateSwapChainForComposition") ==
+            24 * @sizeOf(*const anyopaque));
+    }
+
+    pub fn create_swap_chain_for_composition(
+        self: *IDXGIFactory2,
+        device: *anyopaque,
+        desc: *const DXGI_SWAP_CHAIN_DESC1,
+        out: *?*IDXGISwapChain,
+    ) HRESULT {
+        return self.vtable.CreateSwapChainForComposition(self, device, desc, null, out);
+    }
 };
 
 // __uuidof(ID3D11Texture2D), for IDXGISwapChain::GetBuffer.
