@@ -870,8 +870,16 @@ fn resize_paint_step(hwnd: win32.HWND) void {
     if (g_qpc_freq == 0) _ = win32.QueryPerformanceFrequency(&g_qpc_freq);
     var now: i64 = 0;
     _ = win32.QueryPerformanceCounter(&now);
-    const min_ticks = @divTrunc(g_qpc_freq * RESIZE_PAINT_MIN_MS, 1000);
-    if (now - g_resize_last_qpc < min_ticks) {
+    // One paint per compositor frame, gated on the vblank the vsync thread
+    // publishes during the drag: a free-running paint grid (any fixed interval)
+    // beats against the refresh rate, which the eye reads as micro-stutter.
+    // Falls back to a fixed throttle until the first vblank lands.
+    const vblank = loop.vblank_qpc.load(.seq_cst);
+    const gate_open = if (vblank != 0)
+        vblank > g_resize_last_qpc
+    else
+        now - g_resize_last_qpc >= @divTrunc(g_qpc_freq * RESIZE_PAINT_MIN_MS, 1000);
+    if (!gate_open) {
         g_resize_paint_due = true; // coalesce: the next WM_SIZE or WM_TIMER paints
         return;
     }

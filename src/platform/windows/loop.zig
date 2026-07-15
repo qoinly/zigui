@@ -36,6 +36,12 @@ pub var vsync_slots: [MAX_VSYNC_LINKS]VsyncSlot = init: {
 // message outranks input in GetMessage, and the flood would starve the mouse-move
 // input that drives the resize, making the drag stutter.
 pub var resizing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+// QPC timestamp of the latest compositor vblank, published by the vsync thread
+// while the modal resize loop runs. The WM_SIZE handler paints at most once per
+// published vblank, locking resize paints to the compositor clock; a paint grid
+// that free-runs (any fixed interval) beats against the refresh rate and reads
+// as micro-stutter even at high paint rates.
+pub var vblank_qpc: std.atomic.Value(i64) = std.atomic.Value(i64).init(0);
 // Set on WM_DESTROY: stops the vsync thread flooding WM_VSYNC (so WM_QUIT is not
 // starved) and tells the loop to skip painting a window that is going away.
 pub var quitting: bool = false;
