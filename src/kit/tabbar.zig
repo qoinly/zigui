@@ -459,7 +459,7 @@ fn render_tab(
         const dx = close_x + (CLOSE_SZ - DOT_SZ) / 2;
         const dy = y + (h - DOT_SZ) / 2;
         var dot = Quad.init(dx, dy, DOT_SZ, DOT_SZ);
-        _ = dot.set_background(theme.muted_foreground).set_corner_radius(DOT_SZ / 2);
+        _ = dot.set_background(theme.primary).set_corner_radius(DOT_SZ / 2);
         try b.append_quad(dot);
     } else if (active or hovered) {
         if (p) |pp| {
