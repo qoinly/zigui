@@ -155,6 +155,7 @@ fn link_windows(zigui: *std.Build.Module) void {
     zigui.linkSystemLibrary("shcore", .{});
     zigui.linkSystemLibrary("ole32", .{});
     zigui.linkSystemLibrary("shell32", .{}); // DragAcceptFiles / DragQueryFileW (file drop)
+    zigui.linkSystemLibrary("comdlg32", .{}); // GetOpenFileNameW / GetSaveFileNameW (file pickers)
 }
 
 fn add_examples(

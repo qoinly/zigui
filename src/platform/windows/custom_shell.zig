@@ -306,6 +306,12 @@ fn grab_target_hwnd() ?win32.HWND {
     return g_main_hwnd orelse g_root_hwnd;
 }
 
+// Owner for native modal dialogs (the file pickers): parented to the shell
+// window they center over it and block its input, like NSOpenPanel runModal.
+pub fn dialog_owner_hwnd() ?win32.HWND {
+    return g_main_hwnd orelse g_root_hwnd;
+}
+
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
 // an interactive component (-> HTCLIENT) and lets caption hover request a redraw.
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {

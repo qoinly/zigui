@@ -395,6 +395,41 @@ pub extern "kernel32" fn CreateEventW(
 pub extern "kernel32" fn SetEvent(event: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn WaitForSingleObject(handle: HANDLE, ms: DWORD) callconv(.winapi) DWORD;
 
+// Native file dialogs (comdlg32). lpstrFilter is label/pattern pairs, each
+// NUL-terminated, the whole list double-NUL-terminated.
+pub const OPENFILENAMEW = extern struct {
+    lStructSize: DWORD,
+    hwndOwner: ?HWND,
+    hInstance: ?HINSTANCE,
+    lpstrFilter: ?[*:0]const u16,
+    lpstrCustomFilter: ?[*]u16,
+    nMaxCustFilter: DWORD,
+    nFilterIndex: DWORD,
+    lpstrFile: [*]u16,
+    nMaxFile: DWORD,
+    lpstrFileTitle: ?[*]u16,
+    nMaxFileTitle: DWORD,
+    lpstrInitialDir: ?[*:0]const u16,
+    lpstrTitle: ?[*:0]const u16,
+    Flags: DWORD,
+    nFileOffset: u16,
+    nFileExtension: u16,
+    lpstrDefExt: ?[*:0]const u16,
+    lCustData: LPARAM,
+    lpfnHook: ?*anyopaque,
+    lpTemplateName: ?[*:0]const u16,
+    pvReserved: ?*anyopaque,
+    dwReserved: DWORD,
+    FlagsEx: DWORD,
+};
+pub const OFN_OVERWRITEPROMPT: DWORD = 0x0002;
+pub const OFN_NOCHANGEDIR: DWORD = 0x0008;
+pub const OFN_PATHMUSTEXIST: DWORD = 0x0800;
+pub const OFN_FILEMUSTEXIST: DWORD = 0x1000;
+pub extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+pub extern "comdlg32" fn GetSaveFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+pub extern "comdlg32" fn CommDlgExtendedError() callconv(.winapi) DWORD;
+
 // Explorer file drop (WM_DROPFILES). DragQueryFileW with index 0xFFFFFFFF
 // returns the file count; with a null buffer, the required length for a file.
 pub const WM_DROPFILES: UINT = 0x0233;
