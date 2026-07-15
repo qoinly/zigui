@@ -120,9 +120,17 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, opts: InputOptions) Ren
         const m = label.measure(b, shown, sty);
         const t0 = b.sprites.items.len;
         _ = try label.render(b, x + PAD, label.centered_top(y, h, m), shown, sty);
-        // Keep the value clear of the right-slot button.
+        // Clip the value so a long one is cut at the field edge instead of bleeding
+        // into the next column. A freshly rendered glyph carries the {0,0,0,0}
+        // "no-clip" sentinel; intersecting that would collapse to zero (it reads as a
+        // real empty rect), so set tclip directly there and intersect only a real one.
         const tclip: [4]f32 = .{ x, y, w - PAD - right_slot, h };
-        for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, tclip);
+        for (b.sprites.items[t0..]) |*sp| {
+            sp.clip_bounds = if (sp.clip_bounds[2] <= 0 or sp.clip_bounds[3] <= 0)
+                tclip
+            else
+                tr.clip_intersect(sp.clip_bounds, tclip);
+        }
     }
 
     if (has_eye) try render_eye(b, &opts, x + w - EYE_SLOT, y, h);
