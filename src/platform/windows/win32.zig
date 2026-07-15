@@ -271,6 +271,7 @@ pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
 pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_DPICHANGED: UINT = 0x02E0;
+pub const WM_TIMER: UINT = 0x0113;
 // First message id free for application use; the vsync tick rides on it.
 pub const WM_APP: UINT = 0x8000;
 
@@ -385,6 +386,8 @@ pub extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.wina
 pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
+pub extern "kernel32" fn QueryPerformanceCounter(count: *i64) callconv(.winapi) BOOL;
+pub extern "kernel32" fn QueryPerformanceFrequency(freq: *i64) callconv(.winapi) BOOL;
 pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn CreateEventW(
     attrs: ?*anyopaque,
@@ -503,6 +506,16 @@ pub extern "user32" fn PostThreadMessageW(
     w: WPARAM,
     l: LPARAM,
 ) callconv(.winapi) BOOL;
+// WM_TIMER is delivered inside the Win32 modal size/move loop whenever the input
+// burst pauses, which makes it the standard vehicle for repainting during a live
+// resize. The callback stays null; the timer id is dispatched through wnd_proc.
+pub extern "user32" fn SetTimer(
+    hwnd: ?HWND,
+    id: usize,
+    elapse_ms: UINT,
+    callback: ?*const anyopaque,
+) callconv(.winapi) usize;
+pub extern "user32" fn KillTimer(hwnd: ?HWND, id: usize) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?HMONITOR;

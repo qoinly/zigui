@@ -350,7 +350,11 @@ pub const Renderer = struct {
             .BufferDesc = .{ .Width = w, .Height = h, .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM },
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = 2,
+            // 3, not 2: with flip-model, Present(0) blocks when every buffer is
+            // still held by DWM - which happens exactly during a live resize,
+            // when the compositor sits on frames longer. A third buffer keeps
+            // the resize paints from stalling on the compositor.
+            .BufferCount = 3,
             .OutputWindow = hwnd,
             .Windowed = win32.TRUE,
             .SwapEffect = dxgi.DXGI_SWAP_EFFECT_FLIP_DISCARD,

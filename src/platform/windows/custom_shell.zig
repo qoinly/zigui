@@ -713,6 +713,7 @@ fn wnd_proc(
         win32.WM_SIZE,
         win32.WM_EXITSIZEMOVE,
         => handle_size_message(hwnd, msg),
+        win32.WM_TIMER => if (handle_resize_timer(hwnd, w)) |r| return r,
         win32.WM_DISPLAYCHANGE,
         win32.WM_DPICHANGED,
         win32.WM_SETTINGCHANGE,
@@ -820,20 +821,61 @@ fn handle_size_message(hwnd: win32.HWND, msg: win32.UINT) void {
         win32.WM_ENTERSIZEMOVE => {
             // The modal resize loop drives WM_SIZE synchronously and starves vsync.
             loop.resizing.store(true, .seq_cst);
+            g_resize_paint_due = false;
+            g_resize_last_qpc = 0; // the drag's first WM_SIZE paints immediately
+            // USER_TIMER_MINIMUM. WM_TIMER is delivered inside the modal loop once
+            // the input burst pauses, so a throttled trailing size still paints.
+            _ = win32.SetTimer(hwnd, RESIZE_TIMER_ID, 10, null);
         },
         win32.WM_SIZE => {
             if (loop.resizing.load(.seq_cst)) {
-                paint_now(hwnd);
+                resize_paint_step(hwnd);
             } else {
                 request_redraw_for(hwnd);
             }
         },
         win32.WM_EXITSIZEMOVE => {
+            _ = win32.KillTimer(hwnd, RESIZE_TIMER_ID);
             loop.resizing.store(false, .seq_cst);
-            paint_now(hwnd);
+            g_resize_paint_due = false;
+            paint_now(hwnd); // the final size always renders, unthrottled
         },
         else => std.debug.assert(false),
     }
+}
+
+// Modal-resize paint pacing. WM_SIZE arrives at mouse input rate, and each
+// synchronous paint blocks the modal loop: DefWindowProc cannot process the next
+// mouse move (so the window border cannot follow the hand) until the paint
+// returns. Painting every WM_SIZE therefore makes the drag track paint latency
+// instead of the cursor, and re-runs ResizeBuffers (a full GPU drain) per mouse
+// move. Capping paints at one per ~8ms keeps content near-refresh-rate while the
+// loop drains input between frames, which is what makes the border feel glued to
+// the cursor (macOS gets the same pacing for free from the window server).
+const RESIZE_TIMER_ID: usize = 0x7A67; // arbitrary nonzero id, private to this class
+const RESIZE_PAINT_MIN_MS: i64 = 8;
+var g_resize_paint_due: bool = false; // a WM_SIZE was throttled; the timer owes a paint
+var g_resize_last_qpc: i64 = 0;
+var g_qpc_freq: i64 = 0;
+
+fn resize_paint_step(hwnd: win32.HWND) void {
+    if (g_qpc_freq == 0) _ = win32.QueryPerformanceFrequency(&g_qpc_freq);
+    var now: i64 = 0;
+    _ = win32.QueryPerformanceCounter(&now);
+    const min_ticks = @divTrunc(g_qpc_freq * RESIZE_PAINT_MIN_MS, 1000);
+    if (now - g_resize_last_qpc < min_ticks) {
+        g_resize_paint_due = true; // coalesce: the next WM_SIZE or WM_TIMER paints
+        return;
+    }
+    g_resize_last_qpc = now;
+    g_resize_paint_due = false;
+    paint_now(hwnd); // paints the CURRENT client rect, so coalescing stays correct
+}
+
+fn handle_resize_timer(hwnd: win32.HWND, w: win32.WPARAM) ?win32.LRESULT {
+    if (w != RESIZE_TIMER_ID) return null;
+    if (loop.resizing.load(.seq_cst) and g_resize_paint_due) resize_paint_step(hwnd);
+    return 0;
 }
 
 fn handle_edit_color(w: win32.WPARAM) ?win32.LRESULT {
