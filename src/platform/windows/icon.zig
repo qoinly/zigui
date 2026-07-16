@@ -168,6 +168,8 @@ pub const WinIconSystem = struct {
             .dog => "", // bundled Lucide
             .telescope => "", // bundled Lucide
             .loader_pinwheel => "", // bundled Lucide
+            .git_branch => "", // bundled Lucide
+            .cloud => "\u{E753}", // Cloud
         };
     }
 

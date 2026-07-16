@@ -130,6 +130,8 @@ pub const Icon = enum {
     dog,
     telescope,
     loader_pinwheel,
+    git_branch,
+    cloud,
 };
 
 pub const IconParams = struct {

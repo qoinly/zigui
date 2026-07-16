@@ -492,6 +492,8 @@ const MAP = [_]Map{
     .{ .icon = "dog", .lucide = "dog" },
     .{ .icon = "telescope", .lucide = "telescope" },
     .{ .icon = "loader_pinwheel", .lucide = "loader-pinwheel" },
+    .{ .icon = "git_branch", .lucide = "git-branch" },
+    .{ .icon = "cloud", .lucide = "cloud" },
 };
 
 const Entry = struct { name: []const u8, cmds: []Cmd };

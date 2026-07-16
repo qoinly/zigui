@@ -133,6 +133,8 @@ pub const MacIconSystem = struct {
             .dog => "", // bundled Lucide
             .telescope => "", // bundled Lucide
             .loader_pinwheel => "", // bundled Lucide
+            .git_branch => "arrow.triangle.branch",
+            .cloud => "cloud",
         };
     }
 
