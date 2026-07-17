@@ -672,20 +672,59 @@ pub const Renderer = struct {
         height: u32,
     };
 
-    // Static image textures (ImageSource): not yet implemented on this backend (init_bgra
-    // exists, so a create+upload could mirror the Linux path). Null falls back gracefully.
+    // Static image textures (ImageSource): one immutable BGRA texture + SRV per image,
+    // uploaded at creation. Pixels are only read during this call, so the caller may
+    // free them afterward.
     pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
-        _ = self;
-        _ = bgra;
-        _ = width;
-        _ = height;
-        return null;
+        if (width == 0 or height == 0 or width > MAX_FRAME_DIM or height > MAX_FRAME_DIM) return null;
+        if (bgra.len < @as(usize, width) * height * 4) return null;
+        const surface = std.heap.page_allocator.create(FrameSurface) catch return null;
+        surface.* = FrameSurface.init_bgra(width, height, width * 4, @constCast(bgra.ptr));
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_IMMUTABLE,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        const initial = d3d11.D3D11_SUBRESOURCE_DATA{
+            .pSysMem = bgra.ptr,
+            .SysMemPitch = width * 4,
+            .SysMemSlicePitch = 0,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, &initial, &surface.state.tex))) {
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        if (com.failed(self.device.create_srv(surface.state.tex.?, &srv_desc, &surface.state.srv))) {
+            com.release(&surface.state.tex);
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        return @ptrCast(surface);
     }
+
+    // The sampleable SRV for primitives.Frame.tex.
     pub fn image_texture_view(handle: *anyopaque) *anyopaque {
-        return handle;
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        return surface.state.srv.?;
     }
+
     pub fn destroy_image_texture(handle: *anyopaque) void {
-        _ = handle;
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        surface.deinit();
+        std.heap.page_allocator.destroy(surface);
     }
 
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
