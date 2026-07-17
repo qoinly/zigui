@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const objc = @import("objc.zig");
 const primitives = @import("../../primitives.zig");
 
@@ -59,8 +60,19 @@ pub const MTLTextureUsage = struct {
 
 pub const MTLStorageMode = struct {
     pub const Shared: NSUInteger = 0;
+    pub const Managed: NSUInteger = 1;
     pub const Private: NSUInteger = 2;
 };
+
+// iOS has no Managed storage (it aborts Metal validation); macOS keeps Managed so
+// CPU-uploaded textures also work on discrete-GPU Intel machines.
+const image_storage_mode: NSUInteger = if (builtin.os.tag == .ios)
+    MTLStorageMode.Shared
+else
+    MTLStorageMode.Managed;
+
+// Every supported Metal GPU allows at least 8192 per texture side.
+const MAX_IMAGE_DIM: u32 = 8192;
 
 // The backdrop blur runs at quarter res (sigma and memory shrink with it); the
 // composite blit upsamples back. Factor 4 keeps a 12px full-res look via the
@@ -355,25 +367,64 @@ pub const Renderer = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    // Bind an NV12 CVPixelBuffer to Metal textures with no copy. Returns null if
-    // the cache is absent or either plane fails to map. The caller owns the two CV
-    // refs and must release them (after the GPU is done) with release_cv_texture.
-    // Static image textures (ImageSource): not yet implemented on this backend. Returning
-    // null makes zigui.image() fall back gracefully; Linux/Vulkan has the real path.
-    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
-        _ = self;
-        _ = bgra;
-        _ = width;
-        _ = height;
-        return null;
+    // Upload BGRA pixels into a new MTLTexture and return it (+1 from new*) as the
+    // opaque handle. Pixels are only read during this call, so the caller may free
+    // them afterward.
+    pub fn create_image_texture(
+        self: *Renderer,
+        bgra: []const u8,
+        width: u32,
+        height: u32,
+    ) ?*anyopaque {
+        if (width == 0 or height == 0 or width > MAX_IMAGE_DIM or height > MAX_IMAGE_DIM)
+            return null;
+        if (bgra.len < @as(usize, width) * height * 4) return null;
+        std.debug.assert(width >= 1);
+        std.debug.assert(height >= 1);
+        std.debug.assert(bgra.len >= @as(usize, width) * height * 4);
+        const descriptor_class = objc.get_class("MTLTextureDescriptor") orelse return null;
+        const desc = objc.msg_send(
+            Id,
+            descriptor_class,
+            "texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
+            .{
+                MTLPixelFormat.BGRA8Unorm,
+                @as(NSUInteger, width),
+                @as(NSUInteger, height),
+                objc.NO,
+            },
+        );
+        objc.msg_send(void, desc, "setUsage:", .{MTLTextureUsage.ShaderRead});
+        objc.msg_send(void, desc, "setStorageMode:", .{image_storage_mode});
+        const tex = objc.msg_send(?Id, self.device, "newTextureWithDescriptor:", .{desc}) orelse
+            return null;
+        const region = MTLRegion{
+            .origin = .{ .x = 0, .y = 0, .z = 0 },
+            .size = .{ .width = width, .height = height, .depth = 1 },
+        };
+        objc.msg_send(void, tex, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
+            region,
+            @as(NSUInteger, 0),
+            @as(*const anyopaque, bgra.ptr),
+            @as(NSUInteger, width * 4),
+        });
+        return @ptrCast(tex);
     }
+
+    // The MTLTexture is directly sampleable; the handle is the view.
     pub fn image_texture_view(handle: *anyopaque) *anyopaque {
         return handle;
     }
+
+    // Balances the +1 from create_image_texture. Safe while a frame is in flight:
+    // the command buffer retains every resource it references.
     pub fn destroy_image_texture(handle: *anyopaque) void {
-        _ = handle;
+        objc.msg_send(void, @as(Id, @ptrCast(handle)), "release", .{});
     }
 
+    // Bind an NV12 CVPixelBuffer to Metal textures with no copy. Returns null if
+    // the cache is absent or either plane fails to map. The caller owns the two CV
+    // refs and must release them (after the GPU is done) with release_cv_texture.
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
         const cache = self.metal_texture_cache orelse return null;
         const w = CVPixelBufferGetWidth(pixel_buffer);
