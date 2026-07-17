@@ -52,6 +52,8 @@ const custom_shell = @import("custom_shell.zig");
 const theme_resolve = @import("kit/theme_resolve.zig");
 const primitives = @import("primitives.zig");
 const frame_mod = @import("frame.zig");
+const image_mod = @import("image_source.zig");
+const frame_ctx = @import("frame_ctx.zig");
 
 const Node = node.Node;
 const Theme = types.Theme;
@@ -509,6 +511,42 @@ pub fn frame(a: A, source: *frame_mod.FrameSource, opts: frame_mod.FrameOpts) *N
     const spec = a.create(FrameSpec) catch @panic("node arena oom");
     spec.* = .{ .source = source, .opts = opts };
     const n = node.leaf(a, FrameSpec.measure, FrameSpec.draw, spec);
+    n.style.flex_grow = 1;
+    return n;
+}
+
+const ImageSpec = struct {
+    source: *image_mod.ImageSource,
+    opts: frame_mod.FrameOpts,
+
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, 0); // fills its cell; draw() letterboxes per fit
+    }
+
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *ImageSpec = @ptrCast(@alignCast(ctx));
+        const rend = &frame_ctx.get().paint.renderer;
+        const tex = self.source.acquire(rend) orelse return; // not ready / unsupported backend
+        const d = self.source.dims();
+        const box = fit_rect(r, d[0], d[1], self.opts.fit);
+        try b.append_frame(.{
+            .bounds = box,
+            .clip_bounds = .{ r.origin.x, r.origin.y, r.size.width, r.size.height },
+            .tex = tex,
+            .opacity = self.opts.opacity, // tex_cbcr null + csc zero: the frame_rgba path
+        });
+    }
+};
+
+// A static decoded image (PNG/JPEG), uploaded once. Fills its cell (grow 1); opts.fit controls
+// aspect. The texture is owned by `source`; this node only references it. Unlike frame(), it
+// does not keep the loop animating - a still image needs no per-frame repaint.
+pub fn image(a: A, source: *image_mod.ImageSource, opts: frame_mod.FrameOpts) *Node {
+    const spec = a.create(ImageSpec) catch @panic("node arena oom");
+    spec.* = .{ .source = source, .opts = opts };
+    const n = node.leaf(a, ImageSpec.measure, ImageSpec.draw, spec);
     n.style.flex_grow = 1;
     return n;
 }

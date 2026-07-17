@@ -358,6 +358,22 @@ pub const Renderer = struct {
     // Bind an NV12 CVPixelBuffer to Metal textures with no copy. Returns null if
     // the cache is absent or either plane fails to map. The caller owns the two CV
     // refs and must release them (after the GPU is done) with release_cv_texture.
+    // Static image textures (ImageSource): not yet implemented on this backend. Returning
+    // null makes zigui.image() fall back gracefully; Linux/Vulkan has the real path.
+    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
+        _ = self;
+        _ = bgra;
+        _ = width;
+        _ = height;
+        return null;
+    }
+    pub fn image_texture_view(handle: *anyopaque) *anyopaque {
+        return handle;
+    }
+    pub fn destroy_image_texture(handle: *anyopaque) void {
+        _ = handle;
+    }
+
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
         const cache = self.metal_texture_cache orelse return null;
         const w = CVPixelBufferGetWidth(pixel_buffer);

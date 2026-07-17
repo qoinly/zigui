@@ -672,6 +672,22 @@ pub const Renderer = struct {
         height: u32,
     };
 
+    // Static image textures (ImageSource): not yet implemented on this backend (init_bgra
+    // exists, so a create+upload could mirror the Linux path). Null falls back gracefully.
+    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
+        _ = self;
+        _ = bgra;
+        _ = width;
+        _ = height;
+        return null;
+    }
+    pub fn image_texture_view(handle: *anyopaque) *anyopaque {
+        return handle;
+    }
+    pub fn destroy_image_texture(handle: *anyopaque) void {
+        _ = handle;
+    }
+
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
         const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
         std.debug.assert(surface.width > 0);

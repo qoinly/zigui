@@ -3050,6 +3050,47 @@ pub const Renderer = struct {
         };
     }
 
+    // --- static RGBA image textures (the ImageSource path) -----------------
+    // Reuses the bgra frame plane + staging upload, but as a one-shot texture with no
+    // video ring / refcount: create once, sample forever, destroy on drop.
+
+    // Upload BGRA pixels into a new GPU texture and return an opaque handle. Pixels are
+    // only read during this call, so the caller may free them afterward.
+    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
+        if (width == 0 or height == 0 or width > MAX_FRAME_DIM or height > MAX_FRAME_DIM) return null;
+        if (bgra.len < @as(usize, width) * height * 4) return null;
+        const surface = std.heap.page_allocator.create(FrameSurface) catch return null;
+        surface.* = FrameSurface.init_bgra(width, height, width * 4, bgra.ptr);
+        if (!self.ensure_frame_planes(surface)) {
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        const mapped = surface.state.staging_mapped orelse {
+            surface.deinit();
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        };
+        copy_frame_rows(mapped, surface.pixels, surface.stride, surface.width * 4, surface.height);
+        if (!self.submit_frame_upload(surface)) {
+            surface.deinit();
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        return @ptrCast(surface);
+    }
+
+    // The sampleable texture handle for primitives.Frame.tex.
+    pub fn image_texture_view(handle: *anyopaque) *anyopaque {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        return @ptrCast(&surface.state.luma.view);
+    }
+
+    pub fn destroy_image_texture(handle: *anyopaque) void {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        surface.deinit();
+        std.heap.page_allocator.destroy(surface);
+    }
+
     fn import_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {
         std.debug.assert(surface.width % 2 == 0);
         std.debug.assert(surface.height % 2 == 0);

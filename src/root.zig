@@ -22,6 +22,7 @@ const kit_nodes = @import("kit_nodes.zig");
 const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
 const frame_mod = @import("frame.zig");
+const image_source = @import("image_source.zig");
 const input_mod = @import("input.zig");
 const custom_shell = @import("custom_shell.zig");
 const renderer = @import("renderer.zig");
@@ -164,6 +165,15 @@ pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
     // stale frames so this never queues latency and acquire() is cheap when idle.
     fc.paint.animating = true;
     return kit_nodes.frame(fc.arena, source, opts);
+}
+
+// A static decoded image (PNG / baseline JPEG). Decode once into an App-owned ImageSource,
+// then draw it with image(); the texture is uploaded lazily and the still image needs no
+// per-frame repaint. opts.fit controls aspect within the cell (default .contain).
+pub const ImageSource = image_source.ImageSource;
+pub fn image(source: *ImageSource, opts: FrameOpts) *node.Node {
+    const fc = frame_ctx.get();
+    return kit_nodes.image(fc.arena, source, opts);
 }
 
 // The backend handle a FrameSource needs to allocate its textures. Reachable only
