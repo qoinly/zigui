@@ -225,6 +225,11 @@ pub fn rect_hovered(r: [4]f32) bool {
     return frame_ctx.get().paint.is_hovered(r[0], r[1], r[2], r[3]);
 }
 
+// Write a string to the system clipboard (e.g. a "Copy" button).
+pub fn set_clipboard(s: []const u8) void {
+    custom_shell.pasteboard_write_string(s);
+}
+
 // The OS file drop (drag-and-drop from a file manager) that landed this frame, or
 // null. paths are decoded absolute paths (valid this frame); x/y is the drop point.
 pub const FileDrop = window.FileDrop;
