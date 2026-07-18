@@ -799,6 +799,8 @@ pub const Ta = struct {
     font_size: f32 = 13,
     on_focus: ?callbacks.FocusFn = null,
     ctx: ?*anyopaque = null,
+    caret_out: ?*[4]f32 = null, // window-abs caret rect, for anchoring a completion popup
+    completion: ?*textarea_kit.Completion = null, // an open completion popup's nav state
 };
 
 const TextareaSpec = struct {
@@ -822,6 +824,8 @@ const TextareaSpec = struct {
             .font_size = self.o.font_size,
             .on_focus = self.o.on_focus,
             .ctx = self.o.ctx,
+            .caret_out = self.o.caret_out,
+            .completion = self.o.completion,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {

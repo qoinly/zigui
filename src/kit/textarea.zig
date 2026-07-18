@@ -187,6 +187,21 @@ pub const TextAreaState = struct {
     }
 };
 
+// Drives an inline completion popup the caller renders (e.g. an editor autocomplete). Zero-cost
+// when the option is null. While `open`, the editor routes the navigation keys (Up/Down move the
+// selection with wrap, Enter/Tab commit, Esc dismisses) into this struct instead of the caret, so
+// those keys never edit text; every other key (typing, backspace) still edits, which lets the
+// caller refilter as the user types. The caller owns the struct: set `open`/`count` each frame
+// (clamp `selected` to the current count), read `selected` to highlight a row, and consume
+// `commit`/`dismiss` (clearing them) to accept or close.
+pub const Completion = struct {
+    open: bool = false,
+    count: u32 = 0,
+    selected: u32 = 0,
+    commit: bool = false,
+    dismiss: bool = false,
+};
+
 pub const TextAreaOptions = struct {
     state: *TextAreaState,
     spans: []const TextSpan = &.{}, // sorted by start, non-overlapping; empty = plain
@@ -211,6 +226,12 @@ pub const TextAreaOptions = struct {
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
     ctx: ?*anyopaque = null,
+    // Window-absolute caret rect [x, y, w, h], written every focused frame (zeroed when unfocused)
+    // for anchoring an overlay (a completion popup) at the caret. Like a node's rect_out: the value
+    // lands during render, so the overlay reads it the next frame.
+    caret_out: ?*[4]f32 = null,
+    // An inline completion popup's navigation state (see Completion). Null = no popup.
+    completion: ?*Completion = null,
 };
 
 fn is_cont(b: u8) bool {
@@ -1132,11 +1153,36 @@ fn drain_keys(st: *TextAreaState, opts: TextAreaOptions) bool {
     const p = opts.paint;
     var changed = false;
     for (p.keys()) |ev| {
+        if (opts.completion) |c| if (c.open and completion_key(c, ev)) continue; // popup ate the nav key
         if (apply_key(st, ev, opts.read_only, opts.code_edits)) changed = true;
         if (st.buf.edit_seq != st.index_seq) rebuild_line_index(st);
     }
     if (p.keys().len > 0) st.blink_phase_t0 = st.now_cached; // any key -> solid caret
     return changed;
+}
+
+// While a completion popup is open, the navigation keys drive it, not the caret. Returns true when
+// the key was consumed (so it must not also edit text); typing + backspace fall through to refilter.
+fn completion_key(c: *Completion, ev: custom_shell.KeyEvent) bool {
+    switch (ev.code) {
+        .up => {
+            if (c.count > 0) c.selected = (c.selected + c.count - 1) % c.count;
+            return true;
+        },
+        .down => {
+            if (c.count > 0) c.selected = (c.selected + 1) % c.count;
+            return true;
+        },
+        .enter, .tab => {
+            c.commit = true;
+            return true;
+        },
+        .escape => {
+            c.dismiss = true;
+            return true;
+        },
+        else => return false,
+    }
 }
 
 // Wheel capture + edge-drag autoscroll + caret-follow (only when the caret
@@ -1567,6 +1613,21 @@ pub fn render(
         p.animating = true;
     } else if (st.focused) {
         p.request_redraw_after(next_blink_edge_s(st, p.now_s));
+    }
+
+    // Caret rect for an overlay anchor (same geometry as draw_caret, but every focused frame, not
+    // gated on the blink). Zeroed when unfocused so a stale popup can hide.
+    if (opts.caret_out) |co| {
+        if (st.focused) {
+            const crow = vis_row_of_offset(st, st.caret);
+            const ccol = vis_col_of(st, crow, st.caret);
+            co.* = .{
+                g.text_x + @as(f32, @floatFromInt(ccol)) * st.char_w,
+                g.text_y + @as(f32, @floatFromInt(crow)) * g.line_h - st.scroll_y,
+                CARET_W,
+                g.line_h,
+            };
+        } else co.* = .{ 0, 0, 0, 0 };
     }
 
     st.last_text_x = g.text_x;
