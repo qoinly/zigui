@@ -56,7 +56,7 @@ pub fn key_event_for(sym: u32, keycode: u32, state: *xkb.State, mods: KeyMods) ?
         0xff08 => .backspace,
         0xffff => .delete_fwd,
         0xff0d, 0xff8d => .enter,
-        0xff09 => .tab,
+        0xff09, 0xfe20 => .tab, // Tab and Shift+Tab (ISO_Left_Tab); mods.shift disambiguates
         0xff1b => .escape,
         0xff50 => .home,
         0xff57 => .end,

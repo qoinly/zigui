@@ -108,6 +108,7 @@ pub const TextAreaState = struct {
     focused: bool = false,
     full: bool = false, // last insert hit capacity (caller may show a cap hint)
     scroll_y: f32 = 0, // local scroll; not the page's shared paint.scroll_y
+    scroll_to_caret: bool = false, // set by goto() so an external caret move scrolls into view
 
     // Selection: the fixed end (UTF-8 lead boundary). caret is the moving end, so
     // the range is [min(sel_anchor,caret), max). null or ==caret means none.
@@ -160,6 +161,20 @@ pub const TextAreaState = struct {
 
     // Insert text at the caret (snippet / programmatic), replacing any selection.
     // Funnels through the same recorded chokepoint, so a caller can cmd-Z it.
+    // Move the caret to a byte offset (clearing any selection) and request a scroll so the
+    // target row comes into view next render. Used by find navigation to jump to a match.
+    pub fn goto(self: *TextAreaState, off: usize) void {
+        self.sel_anchor = null;
+        self.caret = @min(off, self.buf.len);
+        self.scroll_to_caret = true;
+    }
+
+    // Replace bytes [a, b) with `text` (line index + undo maintained). Used by find & replace.
+    pub fn replace_range(self: *TextAreaState, a: usize, b: usize, text: []const u8) void {
+        if (a > b or b > self.buf.len) return;
+        _ = edit_replace(self, a, b, text, false);
+    }
+
     pub fn insert_at_caret(self: *TextAreaState, text: []const u8) void {
         const sel = sel_range(self);
         _ = edit_replace(
@@ -182,7 +197,16 @@ pub const TextAreaOptions = struct {
     pad: f32 = 10,
     read_only: bool = false,
     wrap: bool = true, // soft-wrap long lines to the view width (no h-scroll exists)
+    line_numbers: bool = false, // a left gutter numbering logical (newline) lines
+    // Find highlighting: byte ranges to band behind the text (search matches); the one at
+    // `active_match` reads brighter. Caller navigates by setting caret/sel_anchor to a match.
+    match_ranges: []const [2]u32 = &.{},
+    active_match: i32 = -1,
     bordered: bool = true, // false = fill only, no border/ring (a code pane in a panel)
+    // Code-editor smarts: bracket-pair match highlight, auto-close/skip brackets +
+    // quotes, pair backspace, Enter auto-indent, Tab/Shift+Tab indent-dedent. Off =
+    // a plain text field (Tab inserts a tab, Enter a bare newline).
+    code_edits: bool = false,
     font_family: []const u8 = "SF Mono",
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -799,7 +823,190 @@ fn move_line(st: *TextAreaState, ev: custom_shell.KeyEvent, to_end: bool) void {
     }
 }
 
-fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) bool {
+const INDENT = "  "; // code-editor indent unit (two spaces)
+
+fn is_word(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+fn is_quote(c: u8) bool {
+    return c == '"' or c == '\'' or c == '`';
+}
+fn closer_for(c: u8) ?u8 {
+    return switch (c) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        else => null,
+    };
+}
+// The two bytes are an empty auto-closed pair the caret sits inside (backspace drops both).
+fn is_empty_pair(l: u8, r: u8) bool {
+    if (is_quote(l) and l == r) return true;
+    if (closer_for(l)) |cc| return cc == r;
+    return false;
+}
+
+// Wrap the current selection [a,b) in `open`..`close`, leaving the inner text
+// selected. Two splices (a Ctrl+Z each) - offsets from the tail so they stay valid.
+fn surround(st: *TextAreaState, a: usize, b: usize, open: u8, close: u8) bool {
+    _ = edit_replace(st, b, b, &[_]u8{close}, false);
+    _ = edit_replace(st, a, a, &[_]u8{open}, false);
+    st.sel_anchor = a + 1;
+    st.caret = b + 1;
+    refresh_goal(st);
+    return true;
+}
+
+// Insert `open``close` at the caret and sit between them.
+fn insert_pair(st: *TextAreaState, open: u8, close: u8) bool {
+    if (!edit_replace(st, st.caret, st.caret, &[_]u8{ open, close }, false)) return false;
+    st.caret -= 1;
+    refresh_goal(st);
+    return true;
+}
+
+// Auto-close / skip / surround for a typed ASCII char. Returns null to fall through
+// to the plain insert; a bool means it handled the key (value = buffer changed).
+fn code_type_char(st: *TextAreaState, ch: u8) ?bool {
+    const buf = st.buf.slice();
+    const next: ?u8 = if (st.caret < buf.len) buf[st.caret] else null;
+    const prev: ?u8 = if (st.caret > 0) buf[st.caret - 1] else null;
+
+    if (sel_range(st)) |r| {
+        // Typing a bracket/quote over a selection wraps it (never destroys it).
+        if (closer_for(ch)) |cc| return surround(st, r.a, r.b, ch, cc);
+        if (is_quote(ch)) return surround(st, r.a, r.b, ch, ch);
+        return null;
+    }
+
+    // Skip over the just-typed closing char when it already sits under the caret.
+    if ((ch == ')' or ch == ']' or ch == '}' or is_quote(ch)) and next == ch) {
+        st.caret += 1;
+        refresh_goal(st);
+        return false;
+    }
+    if (closer_for(ch)) |cc| return insert_pair(st, ch, cc);
+    if (is_quote(ch)) {
+        // Don't pair inside a word (apostrophes) or right before one.
+        const in_word = (prev != null and is_word(prev.?)) or (next != null and is_word(next.?));
+        if (!in_word) return insert_pair(st, ch, ch);
+    }
+    return null;
+}
+
+// Enter with indent: carry the current line's leading whitespace; an opener just
+// before the caret adds a level, and an opener/closer straddling the caret opens a
+// blank indented line between them.
+fn code_newline(st: *TextAreaState) bool {
+    if (sel_range(st) != null) return edit_at_selection(st, "\n", false);
+    const buf = st.buf.slice();
+    const a = st.caret;
+    const ls = line_start_of(buf, a);
+    var ind_len: usize = 0;
+    while (ls + ind_len < a and (buf[ls + ind_len] == ' ' or buf[ls + ind_len] == '\t')) ind_len += 1;
+    const prev: ?u8 = if (a > 0) buf[a - 1] else null;
+    const next: ?u8 = if (a < buf.len) buf[a] else null;
+    const open_before = prev != null and closer_for(prev.?) != null;
+    const closer_after = open_before and next != null and closer_for(prev.?).? == next.?;
+
+    var scratch: [512]u8 = undefined;
+    var w: usize = 0;
+    const put = struct {
+        fn s(dst: []u8, at: *usize, bytes2: []const u8) bool {
+            if (at.* + bytes2.len > dst.len) return false;
+            @memcpy(dst[at.*..][0..bytes2.len], bytes2);
+            at.* += bytes2.len;
+            return true;
+        }
+    }.s;
+    const indent = buf[ls..][0..ind_len];
+    if (!put(&scratch, &w, "\n")) return edit_at_selection(st, "\n", false);
+    if (!put(&scratch, &w, indent)) return edit_at_selection(st, "\n", false);
+    if (open_before and !put(&scratch, &w, INDENT)) return edit_at_selection(st, "\n", false);
+    const caret_to = a + w; // caret lands at the end of the (indented) new line
+    if (closer_after) {
+        if (!put(&scratch, &w, "\n") or !put(&scratch, &w, indent)) return edit_at_selection(st, "\n", false);
+    }
+    if (!edit_replace(st, a, a, scratch[0..w], false)) return false;
+    st.caret = caret_to;
+    refresh_goal(st);
+    return true;
+}
+
+fn line_start_of(buf: []const u8, off: usize) usize {
+    var i = off;
+    while (i > 0 and buf[i - 1] != '\n') i -= 1;
+    return i;
+}
+
+// Tab / Shift+Tab in code mode: Shift dedents the touched lines; a plain Tab over a
+// multi-line selection indents them; otherwise it just inserts one indent.
+fn code_tab(st: *TextAreaState, shift: bool) bool {
+    const sel = sel_range(st);
+    if (shift) {
+        const a = if (sel) |r| r.a else st.caret;
+        const b = if (sel) |r| r.b else st.caret;
+        return block_indent(st, a, b, true, sel != null);
+    }
+    if (sel) |r| {
+        if (std.mem.indexOfScalar(u8, st.buf.slice()[r.a..r.b], '\n') != null)
+            return block_indent(st, r.a, r.b, false, true);
+    }
+    return edit_at_selection(st, INDENT, false);
+}
+
+// Indent (or dedent) every line touched by [a,b]. Splices tail-first so the line
+// starts gathered from the pre-edit buffer stay valid. Restores a block selection
+// when the caller had one, so a repeated Tab keeps working.
+fn block_indent(st: *TextAreaState, a: usize, b: usize, dedent: bool, had_sel: bool) bool {
+    const BLOCK_MAX = 1024;
+    var starts: [BLOCK_MAX]u32 = undefined;
+    var n: usize = 0;
+    {
+        const buf = st.buf.slice();
+        const stop = if (b > a) b - 1 else b;
+        var i = line_start_of(buf, a);
+        while (i <= stop and n < BLOCK_MAX) {
+            starts[n] = @intCast(i);
+            n += 1;
+            const nl = std.mem.indexOfScalarPos(u8, buf, i, '\n') orelse break;
+            i = nl + 1;
+        }
+    }
+    if (n == 0) return false;
+    var changed = false;
+    var k = n;
+    while (k > 0) {
+        k -= 1;
+        const pos: usize = starts[k];
+        if (dedent) {
+            const cur = st.buf.slice();
+            if (pos >= cur.len) continue;
+            var rm: usize = 0;
+            if (cur[pos] == '\t') rm = 1 else while (rm < INDENT.len and pos + rm < cur.len and cur[pos + rm] == ' ') : (rm += 1) {}
+            if (rm > 0 and edit_replace(st, pos, pos + rm, "", false)) changed = true;
+        } else {
+            if (edit_replace(st, pos, pos, INDENT, false)) changed = true;
+        }
+    }
+    if (had_sel) {
+        const cur = st.buf.slice();
+        var p: usize = starts[0]; // unmoved: no edit landed before it
+        var left = n;
+        while (left > 1) : (left -= 1) {
+            const nl = std.mem.indexOfScalarPos(u8, cur, p, '\n') orelse break;
+            p = nl + 1;
+        }
+        var e = p;
+        while (e < cur.len and cur[e] != '\n') e += 1;
+        st.sel_anchor = starts[0];
+        st.caret = e;
+        refresh_goal(st);
+    }
+    return changed;
+}
+
+fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, code: bool) bool {
     const bytes = st.buf.slice();
     if (ev.code != .char) st.undo_coalesce = false; // any non-typing key ends the typing run
     switch (ev.code) {
@@ -809,16 +1016,19 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             }
             if (ev.mods.cmd or ev.mods.ctrl) return false; // other shortcuts: not text
             if (read_only or ev.ch == 0) return false;
+            if (code and ev.ch < 128) if (code_type_char(st, @intCast(ev.ch))) |changed| return changed;
             var scratch: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(ev.ch, &scratch) catch return false;
             return edit_at_selection(st, scratch[0..n], true);
         },
         .enter => {
             if (read_only) return false;
+            if (code) return code_newline(st);
             return edit_at_selection(st, "\n", false);
         },
         .tab => {
             if (read_only) return false;
+            if (code) return code_tab(st, ev.mods.shift);
             return edit_at_selection(st, "\t", false);
         },
         .backspace => {
@@ -826,6 +1036,8 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             // delete the range, not one char
             if (sel_range(st)) |r| return edit_replace(st, r.a, r.b, "", false);
             if (st.caret == 0) return false;
+            if (code and st.caret < st.buf.len and is_empty_pair(bytes[st.caret - 1], bytes[st.caret]))
+                return edit_replace(st, st.caret - 1, st.caret + 1, "", false); // drop both of an empty pair
             return edit_replace(st, prev_boundary(bytes, st.caret), st.caret, "", false);
         },
         .delete_fwd => {
@@ -881,7 +1093,16 @@ const Geom = struct {
     text_y: f32,
     line_h: f32,
     view_h: f32,
+    gutter_w: f32 = 0, // left line-number column (0 = none); text_x already past it
+    num_right_x: f32 = 0, // x that line numbers right-align to
 };
+
+fn digit_count(n: usize) usize {
+    var d: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) d += 1;
+    return d;
+}
 
 // A caller-prefilled buffer could leave the caret or anchor past the end or
 // mid-codepoint; snap both so no path splits a UTF-8 sequence.
@@ -911,7 +1132,7 @@ fn drain_keys(st: *TextAreaState, opts: TextAreaOptions) bool {
     const p = opts.paint;
     var changed = false;
     for (p.keys()) |ev| {
-        if (apply_key(st, ev, opts.read_only)) changed = true;
+        if (apply_key(st, ev, opts.read_only, opts.code_edits)) changed = true;
         if (st.buf.edit_seq != st.index_seq) rebuild_line_index(st);
     }
     if (p.keys().len > 0) st.blink_phase_t0 = st.now_cached; // any key -> solid caret
@@ -929,10 +1150,11 @@ fn apply_scroll(st: *TextAreaState, opts: TextAreaOptions, g: Geom, caret_moved:
         p.wheel_dy = 0;
     }
     if (st.dragging and st.drag_autoscroll_dy != 0) st.scroll_y += st.drag_autoscroll_dy;
-    if (caret_moved) {
+    if (caret_moved or st.scroll_to_caret) {
         const top = @as(f32, @floatFromInt(vis_row_of_offset(st, st.caret))) * g.line_h;
         if (top < st.scroll_y) st.scroll_y = top;
         if (top + g.line_h > st.scroll_y + g.view_h) st.scroll_y = top + g.line_h - g.view_h;
+        st.scroll_to_caret = false;
     }
     st.scroll_y = std.math.clamp(st.scroll_y, 0, max_scroll);
 }
@@ -1065,6 +1287,159 @@ fn draw_caret(
     }
 }
 
+// Left gutter: a muted column with each logical line's number, right-aligned at its first
+// visual row (wrapped continuation rows stay blank); the caret's line reads brighter.
+fn draw_gutter(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize) RenderError!void {
+    const theme = opts.theme;
+    var col = Quad.init(g.x, g.y, g.text_x - g.x, g.h);
+    _ = col.set_background(tr.mix(theme.background, theme.muted, 0.35))
+        .set_clip_bounds(.{ g.x, g.y + 1, g.text_x - g.x, g.h - 2 });
+    try b.append_quad(col);
+
+    const caret_line = row_of_offset(st, st.caret);
+    const num_style = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
+    const cur_style = mono_style(opts.font_family, opts.font_size, theme.foreground, .normal);
+    const band: [4]f32 = .{ g.x, g.y + 1, g.text_x - g.x, g.h - 2 };
+
+    var r = first_row;
+    while (r < last_row) : (r += 1) {
+        const off = st.vis_starts[r];
+        const logical = row_of_offset(st, off);
+        if (st.line_starts[logical] != off) continue; // a soft-wrap continuation row has no number
+        const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+        var nbuf: [12]u8 = undefined;
+        const s = std.fmt.bufPrint(&nbuf, "{d}", .{logical + 1}) catch continue;
+        const sty = if (logical == caret_line and st.focused) cur_style else num_style;
+        const nw = @as(f32, @floatFromInt(s.len)) * st.char_w;
+        const t0 = b.sprites.items.len;
+        _ = try label.render(b, g.num_right_x - nw, yy, s, sty);
+        for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+    }
+}
+
+// Search-match highlight: a coloured band behind each match range (across its visual rows);
+// the active match reads warmer. Behind the text, like the selection band.
+fn draw_match_bands(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize, band: [4]f32) RenderError!void {
+    if (opts.match_ranges.len == 0) return;
+    const c_match = Rgba.from_u8(250, 204, 21, 90);
+    const c_active = Rgba.from_u8(251, 146, 60, 150);
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    for (opts.match_ranges, 0..) |m, i| {
+        const start: usize = m[0];
+        const end: usize = m[1];
+        if (end <= start or start > st.buf.len) continue;
+        const fill = if (@as(i32, @intCast(i)) == opts.active_match) c_active else c_match;
+        var r = vis_row_of_offset(st, start);
+        const end_row = vis_row_of_offset(st, end - 1);
+        while (r <= end_row) : (r += 1) {
+            if (r < first_row or r >= last_row) continue;
+            const rs = st.vis_starts[r];
+            const re = vis_line_end(st, r);
+            const sa = @max(start, rs);
+            const sb = @min(end, re);
+            if (sb <= sa) continue;
+            const col_a = vis_col_of(st, r, sa);
+            const col_b = vis_col_of(st, r, sb);
+            const bx = g.text_x + @as(f32, @floatFromInt(col_a)) * st.char_w;
+            const bw = @as(f32, @floatFromInt(col_b - col_a)) * st.char_w;
+            const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+            var q = Quad.init(bx, yy, bw, g.line_h);
+            _ = q.set_background(fill).set_clip_bounds(clip);
+            try b.append_quad(q);
+        }
+    }
+}
+
+// A faint band across the caret's visual row (behind the glyphs), only while focused.
+fn draw_current_line(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    if (!st.focused) return;
+    const row = vis_row_of_offset(st, st.caret);
+    const yy = g.text_y + @as(f32, @floatFromInt(row)) * g.line_h - st.scroll_y;
+    if (yy + g.line_h <= g.text_y or yy >= g.text_y + g.view_h) return;
+    const bw = g.w - (g.text_x - g.x) - opts.pad;
+    var q = Quad.init(g.text_x, yy, @max(@as(f32, 0), bw), g.line_h);
+    _ = q.set_background(tr.mix(opts.theme.background, opts.theme.muted, 0.4))
+        .set_clip_bounds(tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band));
+    try b.append_quad(q);
+}
+
+const BRACKETS = [_][2]u8{ .{ '(', ')' }, .{ '[', ']' }, .{ '{', '}' } };
+
+// Forward from an opener at `from` to its matching closer (nesting-aware); null if unbalanced.
+fn scan_close(buf: []const u8, from: usize, open_c: u8, close_c: u8) ?usize {
+    var depth: i32 = 1;
+    var i = from + 1;
+    while (i < buf.len) : (i += 1) {
+        if (buf[i] == open_c) depth += 1 else if (buf[i] == close_c) {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+// Backward from a closer at `from` to its matching opener (nesting-aware); null if unbalanced.
+fn scan_open(buf: []const u8, from: usize, open_c: u8, close_c: u8) ?usize {
+    var depth: i32 = 1;
+    var i = from;
+    while (i > 0) {
+        i -= 1;
+        if (buf[i] == close_c) depth += 1 else if (buf[i] == open_c) {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+// The bracket pair to highlight: the bracket just left of the caret (or under it)
+// and its partner. String-content brackets are not excluded (naive nesting) - a fine
+// trade for a read aid. Returns the two byte offsets, lower first.
+fn match_bracket(st: *TextAreaState) ?[2]usize {
+    const buf = st.buf.slice();
+    var pos: [2]usize = undefined;
+    var np: usize = 0;
+    if (st.caret > 0) {
+        pos[np] = st.caret - 1;
+        np += 1;
+    }
+    if (st.caret < buf.len) {
+        pos[np] = st.caret;
+        np += 1;
+    }
+    for (pos[0..np]) |p| {
+        const c = buf[p];
+        for (BRACKETS) |pr| {
+            if (c == pr[0]) {
+                if (scan_close(buf, p, pr[0], pr[1])) |m| return .{ p, m };
+            } else if (c == pr[1]) {
+                if (scan_open(buf, p, pr[0], pr[1])) |m| return .{ m, p };
+            }
+        }
+    }
+    return null;
+}
+
+// A thin outline box around each bracket of the caret's matched pair (focused only).
+fn draw_bracket_match(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    if (!st.focused) return;
+    const pair = match_bracket(st) orelse return;
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    for (pair) |off| {
+        const row = vis_row_of_offset(st, off);
+        const col = vis_col_of(st, row, off);
+        const bx = g.text_x + @as(f32, @floatFromInt(col)) * st.char_w;
+        const yy = g.text_y + @as(f32, @floatFromInt(row)) * g.line_h - st.scroll_y;
+        if (yy + g.line_h <= g.text_y or yy >= g.text_y + g.view_h) continue;
+        var q = Quad.init(bx, yy, st.char_w, g.line_h);
+        _ = q.set_background(tr.mix(opts.theme.background, opts.theme.muted, 0.7))
+            .set_border_color(opts.theme.ring)
+            .set_border_width(1)
+            .set_clip_bounds(clip);
+        try b.append_quad(q);
+    }
+}
+
 // Geometry prologue: bring the line + visual indexes current, ensure char_w
 // (caret nav is column-sized, so it must exist first), and return the Geom.
 fn prepare(
@@ -1081,7 +1456,11 @@ fn prepare(
     const line_h = opts.font_size * opts.line_spacing;
     std.debug.assert(line_h > 0); // row math divides by it (cull, click->row)
     const pad = opts.pad;
-    const text_w = @max(@as(f32, 0), w - pad * 2);
+    // Line-number gutter: pad + widest number + a pad-sized gap before the text.
+    const digits: usize = if (opts.line_numbers) @max(2, digit_count(st.line_count)) else 0;
+    const num_w = @as(f32, @floatFromInt(digits)) * st.char_w;
+    const gutter_w: f32 = if (opts.line_numbers) num_w + pad else 0;
+    const text_w = @max(@as(f32, 0), w - pad * 2 - gutter_w);
     // Visual index = logical lines wrapped to the columns that fit; 0 disables wrap.
     const cols_max: usize = if (opts.wrap and st.char_w > 0)
         @max(1, @as(usize, @intFromFloat(text_w / st.char_w)))
@@ -1093,10 +1472,12 @@ fn prepare(
         .y = y,
         .w = w,
         .h = h,
-        .text_x = x + pad,
+        .text_x = x + pad + gutter_w,
         .text_y = y + pad,
         .line_h = line_h,
         .view_h = @max(@as(f32, 0), h - pad * 2), // tiny h must not cast negative
+        .gutter_w = gutter_w,
+        .num_right_x = x + pad + num_w,
     };
 }
 
@@ -1165,12 +1546,16 @@ pub fn render(
     }
     try b.append_quad(box);
 
-    const band: [4]f32 = .{ g.text_x, y + 1, w - opts.pad * 2, h - 2 };
+    const band: [4]f32 = .{ g.text_x, y + 1, w - opts.pad * 2 - g.gutter_w, h - 2 };
     // Viewport cull: only shape the rows on screen.
     const first_row: usize = @intFromFloat(st.scroll_y / g.line_h);
     const rows_in_view: usize = @as(usize, @intFromFloat(@ceil(g.view_h / g.line_h))) + 1;
     const last_row = @min(st.vis_count, first_row + rows_in_view);
 
+    try draw_current_line(b, st, opts, g, band); // behind the text (quads honour order)
+    if (opts.code_edits) try draw_bracket_match(b, st, opts, g, band);
+    try draw_match_bands(b, st, opts, g, first_row, last_row, band);
+    if (opts.line_numbers) try draw_gutter(b, st, opts, g, first_row, last_row);
     try draw_rows(b, st, opts, g, first_row, last_row, band);
     try draw_caret(b, st, opts, g, band);
     try add_body_hitbox(st, opts, g);

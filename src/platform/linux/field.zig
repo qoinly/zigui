@@ -27,6 +27,13 @@ var g_buf: [FIELD_BUF_MAX]u8 = undefined;
 var g_len: usize = 0;
 var g_caret: usize = 0; // byte offset, always a codepoint boundary
 var g_anchor: usize = 0; // selection anchor; == caret means no selection
+var g_special: ?shell_types.FieldKey = null; // Enter/Shift+Enter/Escape seen this frame
+
+// Enter/Shift+Enter/Escape the focused field saw but does not act on; the app polls it once.
+pub fn take_special() ?shell_types.FieldKey {
+    defer g_special = null;
+    return g_special;
+}
 
 pub fn show(win: *anyopaque, initial: []const u8, is_secure: bool, numeric: bool, id: u32) void {
     std.debug.assert(id != 0);
@@ -169,9 +176,13 @@ pub fn apply_key(event: KeyEvent, clipboard: Clipboard) void {
             g_caret = g_len;
             if (!event.mods.shift) g_anchor = g_caret;
         },
-        .escape => g_anchor = g_caret,
+        .escape => {
+            g_anchor = g_caret;
+            g_special = .escape;
+        },
+        .enter => g_special = if (event.mods.shift) .shift_enter else .enter,
         // Consumed but inert in a single-line field, the EDIT child model.
-        .enter, .tab, .up, .down, .page_up, .page_down => {},
+        .tab, .up, .down, .page_up, .page_down => {},
     }
 }
 

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const backend = @import("backend.zig");
+const field = @import("field.zig");
 const wayland_shell = @import("wayland_shell.zig");
 const x11_shell = @import("x11_shell.zig");
 const shell_types = @import("shell_types.zig");
@@ -291,6 +292,12 @@ pub fn text_field_value(buf: []u8) []const u8 {
         .wayland => wayland_shell.text_field_value(buf),
         .x11 => x11_shell.text_field_value(buf),
     };
+}
+
+// The field module is shared by both backends (each feeds it keys), so the pending special
+// key is read straight from it, no per-backend split.
+pub fn text_field_special() ?shell_types.FieldKey {
+    return field.take_special();
 }
 
 pub fn text_field_caret() usize {

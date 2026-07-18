@@ -212,6 +212,13 @@ pub fn key_presses() []const KeyEvent {
     return frame_ctx.get().paint.keys();
 }
 
+// The special key (Enter / Shift+Enter / Escape) the focused native text field saw this frame
+// but did not act on, so app-level UI (e.g. the in-editor find bar) can. Null when none.
+pub const FieldKey = custom_shell.FieldKey;
+pub fn text_field_special() ?FieldKey {
+    return frame_ctx.get().paint.text_field_special();
+}
+
 // The OS file drop (drag-and-drop from a file manager) that landed this frame, or
 // null. paths are decoded absolute paths (valid this frame); x/y is the drop point.
 pub const FileDrop = window.FileDrop;

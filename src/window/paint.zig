@@ -506,6 +506,10 @@ pub const PaintContext = struct {
         _ = self;
         return custom_shell.text_field_value(buf);
     }
+    pub fn text_field_special(self: *PaintContext) ?custom_shell.FieldKey {
+        _ = self;
+        return custom_shell.text_field_special();
+    }
     pub fn hide_text_field(self: *PaintContext) void {
         custom_shell.hide_text_field(self.handle);
     }

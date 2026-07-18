@@ -66,6 +66,19 @@ pub fn text_field_caret() usize {
     return if (builtin.os.tag == .linux) impl.text_field_caret() else 0;
 }
 
+// A special key the focused native field saw but leaves for app-level UI (find bar Enter /
+// Shift+Enter / Escape). Only wired on Linux for now; other backends return null until their
+// native fields forward it.
+pub const FieldKey = enum { enter, shift_enter, escape };
+pub fn text_field_special() ?FieldKey {
+    if (builtin.os.tag != .linux) return null;
+    return switch (impl.text_field_special() orelse return null) {
+        .enter => .enter,
+        .shift_enter => .shift_enter,
+        .escape => .escape,
+    };
+}
+
 pub fn text_field_selection() [2]usize {
     return if (builtin.os.tag == .linux) impl.text_field_selection() else .{ 0, 0 };
 }
