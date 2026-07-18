@@ -272,6 +272,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     apply_title(win.window, opts.title);
     apply_delete_protocol(win.window);
     apply_xdnd_aware(win.window);
+    apply_size_hints(
+        win.window,
+        @intCast(@as(i32, @intFromFloat(opts.min_width)) * win.scale),
+        @intCast(@as(i32, @intFromFloat(opts.min_height)) * win.scale),
+    );
     if (xcb_xfixes.first_event != 0 and g_atom_clipboard != 0) {
         xcb_xfixes.watch_selection(win.window, g_atom_clipboard);
     }
@@ -361,6 +366,17 @@ fn apply_xdnd_aware(window: u32) void {
     if (g_atom_xdnd_aware == 0) return;
     const version: u32 = 5;
     xcb.change_property(window, g_atom_xdnd_aware, xcb.ATOM_ATOM, 32, 1, &version);
+}
+
+// WM_NORMAL_HINTS with PMinSize so the window manager refuses to resize below the min. The property
+// is the ICCCM WM_SIZE_HINTS wire format: 18 CARD32s, min_width/min_height at slots 5/6.
+fn apply_size_hints(window: u32, min_w: u32, min_h: u32) void {
+    const P_MIN_SIZE: u32 = 16;
+    var hints = [_]u32{0} ** 18;
+    hints[0] = P_MIN_SIZE;
+    hints[5] = min_w;
+    hints[6] = min_h;
+    xcb.change_property(window, xcb.ATOM_WM_NORMAL_HINTS, xcb.ATOM_WM_SIZE_HINTS, 32, 18, &hints);
 }
 
 fn apply_motif_undecorated(window: u32) void {

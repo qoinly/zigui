@@ -147,7 +147,16 @@ fn insert(bytes: []const u8) void {
 pub fn apply_key(event: KeyEvent, clipboard: Clipboard) void {
     std.debug.assert(g_visible);
     if (event.mods.cmd) {
-        apply_shortcut(event.ch, clipboard);
+        // A held primary modifier still forwards Enter/Escape as a field-special so app shortcuts
+        // (Cmd/Ctrl+Enter to send) fire; other cmd-combos are the field's own edit shortcuts.
+        switch (event.code) {
+            .enter => g_special = if (event.mods.shift) .shift_enter else .enter,
+            .escape => {
+                g_anchor = g_caret;
+                g_special = .escape;
+            },
+            else => apply_shortcut(event.ch, clipboard),
+        }
         return;
     }
     switch (event.code) {

@@ -135,6 +135,8 @@ pub const MacIconSystem = struct {
             .loader_pinwheel => "", // bundled Lucide
             .git_branch => "arrow.triangle.branch",
             .cloud => "cloud",
+            .clock => "clock",
+            .arrow_up_to_line => "arrow.up.to.line",
         };
     }
 

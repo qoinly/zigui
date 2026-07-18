@@ -219,6 +219,12 @@ pub fn text_field_special() ?FieldKey {
     return frame_ctx.get().paint.text_field_special();
 }
 
+// Whether the pointer is over the given rect (typically a node's rect_out from last frame) this
+// frame. A build-time hover query for gating hover popovers/HUDs; respects overlay hover-blocking.
+pub fn rect_hovered(r: [4]f32) bool {
+    return frame_ctx.get().paint.is_hovered(r[0], r[1], r[2], r[3]);
+}
+
 // The OS file drop (drag-and-drop from a file manager) that landed this frame, or
 // null. paths are decoded absolute paths (valid this frame); x/y is the drop point.
 pub const FileDrop = window.FileDrop;

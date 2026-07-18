@@ -6,6 +6,7 @@ const text_system = @import("../text_system.zig");
 const builder = @import("../render/builder.zig");
 const RenderError = builder.RenderError;
 const label = @import("../render/label.zig");
+const icon = @import("../render/icon.zig");
 const primitives = @import("../primitives.zig");
 const custom_paint = @import("../window/paint.zig");
 const custom_shell = @import("../custom_shell.zig");
@@ -25,6 +26,8 @@ pub const FontWeight = text_system.FontWeight;
 
 pub const MAX_LINES: usize = 4096; // a body past this clamps (asserted cap)
 pub const MAX_VIS: usize = 8192; // visual rows (logical lines split by soft wrap); clamps past this
+const MAX_FOLDS: usize = 512; // multi-line bracket regions tracked for folding; clamps past this
+const MAX_FOLD_DEPTH: usize = 64; // bracket nesting the fold scanner tracks
 const TAB: usize = 4; // tab stop width in columns (caret/layout only)
 const CARET_W: f32 = 1.5;
 const BLINK_PERIOD_S: f64 = 1.0; // caret blink: 0.5s on / 0.5s off
@@ -152,6 +155,20 @@ pub const TextAreaState = struct {
     vis_seq: u64 = std.math.maxInt(u64),
     vis_cols: usize = 0,
 
+    // Fold regions (multi-line bracket pairs), recomputed when the buffer changes; each is a
+    // logical [open_line, close_line] with close_line > open_line. `collapsed` is keyed by open
+    // line (kept across rebuilds; may drift on edits above a fold, which is fine — re-toggle).
+    fold_open: [MAX_FOLDS]u32 = undefined,
+    fold_close: [MAX_FOLDS]u32 = undefined,
+    fold_cchar: [MAX_FOLDS]u8 = undefined, // the region's closing bracket, shown in the collapsed marker
+    fold_n: usize = 0,
+    fold_seq: u64 = std.math.maxInt(u64),
+    collapsed: std.StaticBitSet(MAX_LINES) = std.StaticBitSet(MAX_LINES).initEmpty(),
+    collapse_seq: u64 = 0, // bumped on every fold toggle so the visual index rebuilds
+    vis_collapse_seq: u64 = std.math.maxInt(u64), // collapse_seq the current vis index reflects
+    vis_eof_folded: bool = false, // a collapsed region reached the last line; gutter draws a trailing number
+    folding_on: bool = false, // stashed from opts each render so edit-path re-indexing folds too
+
     char_w: f32 = 0, // mono advance, cached per font size
     char_w_size: f32 = 0,
 
@@ -160,6 +177,8 @@ pub const TextAreaState = struct {
     last_text_x: f32 = 0,
     last_text_y: f32 = 0,
     last_line_h: f32 = 0,
+    last_fold_x: f32 = 0, // fold-chevron column, so the click thunk can hit-test it
+    last_fold_w: f32 = 0,
     // Focus callback stashed from options each frame so the click handler can
     // tell the caller to unfocus its other text areas (only one drains keys).
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -240,6 +259,9 @@ pub const TextAreaOptions = struct {
     // quotes, pair backspace, Enter auto-indent, Tab/Shift+Tab indent-dedent. Off =
     // a plain text field (Tab inserts a tab, Enter a bare newline).
     code_edits: bool = false,
+    // Code folding: a fold chevron in the gutter for every multi-line {…} / […] region; a click
+    // collapses it to its header line. Requires line_numbers. Off = no fold column, no skipping.
+    folding: bool = false,
     font_family: []const u8 = "SF Mono",
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -428,13 +450,93 @@ fn wrap_point(st: *const TextAreaState, start: usize, le: usize, cols_max: usize
 // O(buffer): re-wraps every line, unlike the incremental logical index next to
 // it. Accepted, not free - a text area is a bounded GUI control and edits are
 // human-paced; an incremental re-wrap would only pay off for huge bodies.
-fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
+// Fold regions: one stack pass over the buffer pairs brackets; a pair spanning >1 logical line
+// becomes a foldable [open_line, close_line]. Gated on edit_seq, so it runs only when text changes.
+// Brackets inside strings/comments aren't excluded (a pragmatic approximation for a v1 folder).
+fn rebuild_folds(st: *TextAreaState) void {
+    if (st.fold_seq == st.buf.edit_seq) return;
+    st.fold_seq = st.buf.edit_seq;
+    st.fold_n = 0;
+    const buf = st.buf.slice();
+    var stack: [MAX_FOLD_DEPTH]u32 = undefined; // opener offsets
+    var closer: [MAX_FOLD_DEPTH]u8 = undefined; // the closer each opener expects
+    var sp: usize = 0;
+    for (buf, 0..) |c, i| {
+        switch (c) {
+            '{', '[', '(' => if (sp < stack.len) {
+                stack[sp] = @intCast(i);
+                closer[sp] = if (c == '{') '}' else if (c == '[') ']' else ')';
+                sp += 1;
+            },
+            '}', ']', ')' => if (sp > 0 and closer[sp - 1] == c) {
+                sp -= 1;
+                const ol: u32 = @intCast(row_of_offset(st, stack[sp]));
+                const cl: u32 = @intCast(row_of_offset(st, i));
+                if (cl > ol and st.fold_n < MAX_FOLDS) {
+                    st.fold_open[st.fold_n] = ol;
+                    st.fold_close[st.fold_n] = cl;
+                    st.fold_cchar[st.fold_n] = c;
+                    st.fold_n += 1;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+// If a fold opens on `line`, the close line of its widest region (so nested pairs on one header
+// line collapse as a whole); else null. O(fold_n), fold_n small.
+fn fold_end_at(st: *const TextAreaState, line: usize) ?u32 {
+    var best: ?u32 = null;
+    for (0..st.fold_n) |k| {
+        if (st.fold_open[k] == line and (best == null or st.fold_close[k] > best.?)) best = st.fold_close[k];
+    }
+    return best;
+}
+
+fn line_is_collapsed(st: *const TextAreaState, line: usize) bool {
+    return line < MAX_LINES and st.collapsed.isSet(line) and fold_end_at(st, line) != null;
+}
+
+// The closing bracket of the widest region opening on `line` (matches fold_end_at's choice), for the
+// collapsed "…}" marker.
+fn fold_cchar_at(st: *const TextAreaState, line: usize) u8 {
+    var best: ?u32 = null;
+    var ch: u8 = '}';
+    for (0..st.fold_n) |k| {
+        if (st.fold_open[k] == line and (best == null or st.fold_close[k] > best.?)) {
+            best = st.fold_close[k];
+            ch = st.fold_cchar[k];
+        }
+    }
+    return ch;
+}
+
+fn rebuild_vis_index(st: *TextAreaState, cols_max: usize, folding: bool) void {
+    if (folding) rebuild_folds(st); // cheap no-op unless the buffer changed
+    st.vis_eof_folded = false;
     if (cols_max == 0) {
-        const n = @min(st.line_count, MAX_VIS);
-        @memcpy(st.vis_starts[0..n], st.line_starts[0..n]);
-        st.vis_count = n;
+        if (!folding) {
+            const n = @min(st.line_count, MAX_VIS);
+            @memcpy(st.vis_starts[0..n], st.line_starts[0..n]);
+            st.vis_count = n;
+        } else {
+            var v: usize = 0;
+            var r: usize = 0;
+            while (r < st.line_count and v < MAX_VIS) {
+                st.vis_starts[v] = st.line_starts[r];
+                v += 1;
+                if (line_is_collapsed(st, r)) {
+                    const close = fold_end_at(st, r).?;
+                    if (close == st.line_count - 1) st.vis_eof_folded = true;
+                    r = close + 1;
+                } else r += 1;
+            }
+            st.vis_count = @max(1, v);
+        }
         st.vis_seq = st.buf.edit_seq;
         st.vis_cols = 0;
+        st.vis_collapse_seq = st.collapse_seq;
         return;
     }
     var v: usize = 0;
@@ -451,6 +553,12 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
             if (nxt >= le) break;
             seg = nxt;
         }
+        // A collapsed header shows its own (wrapped) rows; jump past the hidden body to the closer.
+        if (folding and line_is_collapsed(st, r)) {
+            const close = fold_end_at(st, r).?;
+            if (close == st.line_count - 1) st.vis_eof_folded = true;
+            r = close;
+        }
     }
     if (v == 0) {
         st.vis_starts[0] = 0;
@@ -459,6 +567,7 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
     st.vis_count = v;
     st.vis_seq = st.buf.edit_seq;
     st.vis_cols = cols_max;
+    st.vis_collapse_seq = st.collapse_seq;
 }
 
 // Largest visual row r with vis_starts[r] <= off.
@@ -476,11 +585,17 @@ fn vis_row_of_offset(st: *const TextAreaState, off: usize) usize {
 // boundary keeps every byte (the break sits between glyphs); a hard newline at
 // the next row's start is excluded.
 fn vis_line_end(st: *const TextAreaState, r: usize) usize {
-    if (r + 1 < st.vis_count) {
+    const normal = if (r + 1 < st.vis_count) blk: {
         const ns = st.vis_starts[r + 1];
-        return if (ns > 0 and st.buf.bytes[ns - 1] == '\n') ns - 1 else ns;
+        break :blk if (ns > 0 and st.buf.bytes[ns - 1] == '\n') ns - 1 else ns;
+    } else st.buf.len;
+    // A collapsed header row must not swallow the hidden body: cap it at its own logical line end
+    // (the next visual row starts at the region's closer, far past this line).
+    if (st.folding_on) {
+        const logical = row_of_offset(st, st.vis_starts[r]);
+        if (line_is_collapsed(st, logical)) return @min(normal, line_end(st, logical));
     }
-    return st.buf.len;
+    return normal;
 }
 
 fn vis_col_of(st: *const TextAreaState, row: usize, off: usize) usize {
@@ -514,8 +629,37 @@ fn refresh_goal(st: *TextAreaState) void {
 // One on_point hitbox drives both a click and a drag-select: the press sets the
 // anchor, then PaintContext re-feeds this thunk on every mouseDragged (so
 // st.dragging tells press from drag). drag_end_thunk clears the capture.
+// Collapse/expand a fold whose header is `line`. Collapsing pulls the caret out of the body it is
+// about to hide, so caret/selection stay on a visible row.
+fn toggle_fold(st: *TextAreaState, line: usize) void {
+    if (line >= MAX_LINES) return;
+    const close = fold_end_at(st, line) orelse return;
+    if (st.collapsed.isSet(line)) {
+        st.collapsed.unset(line);
+    } else {
+        st.collapsed.set(line);
+        const cl = row_of_offset(st, st.caret);
+        if (cl > line and cl <= close) {
+            st.caret = line_end(st, line);
+            st.sel_anchor = null;
+        }
+    }
+    st.collapse_seq += 1;
+}
+
 fn click_thunk(ctx: ?*anyopaque, px: f32, py: f32) void {
     const st: *TextAreaState = @ptrCast(@alignCast(ctx orelse return));
+    // A click in the fold-chevron column toggles that row's region instead of moving the caret.
+    if (st.folding_on and st.last_fold_w > 0 and px >= st.last_fold_x and px < st.last_fold_x + st.last_fold_w) {
+        const fy = py - st.last_text_y + st.scroll_y;
+        var vr: usize = if (fy <= 0 or st.last_line_h <= 0) 0 else @intFromFloat(fy / st.last_line_h);
+        if (vr >= st.vis_count) vr = st.vis_count - 1;
+        const logical = row_of_offset(st, st.vis_starts[vr]);
+        if (fold_end_at(st, logical) != null) {
+            toggle_fold(st, logical);
+            return;
+        }
+    }
     const rel_y = py - st.last_text_y + st.scroll_y;
     var row: usize =
         if (rel_y <= 0 or st.last_line_h <= 0) 0 else @intFromFloat(rel_y / st.last_line_h);
@@ -777,7 +921,7 @@ fn edit_replace(st: *TextAreaState, a: usize, b: usize, text: []const u8, coales
     st.caret = a + text.len;
     st.sel_anchor = null;
     update_line_index(st, a, rem_len, text); // incremental: O(lines after pos), not O(buffer)
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     st.undo_coalesce = coalesce;
     return true;
@@ -795,7 +939,7 @@ fn undo(st: *TextAreaState) bool {
     st.sel_anchor = null;
     st.undo_coalesce = false;
     rebuild_line_index(st);
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     return true;
 }
@@ -810,7 +954,7 @@ fn redo(st: *TextAreaState) bool {
     st.sel_anchor = null;
     st.undo_coalesce = false;
     rebuild_line_index(st);
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     return true;
 }
@@ -1179,6 +1323,8 @@ const Geom = struct {
     view_h: f32,
     gutter_w: f32 = 0, // left line-number column (0 = none); text_x already past it
     num_right_x: f32 = 0, // x that line numbers right-align to
+    fold_x: f32 = 0, // left edge of the fold-chevron column (0-width when folding is off)
+    fold_w: f32 = 0,
 };
 
 fn digit_count(n: usize) usize {
@@ -1388,6 +1534,22 @@ fn draw_rows(
         };
 
         try draw_row_glyphs(b, st, opts, g, ls, le, yy, base_style, &span_i, band);
+
+        // A collapsed region shows a muted "…}" right after its header (the ellipsis stands in for the
+        // hidden body, the closer makes the bracket read whole).
+        if (st.folding_on) {
+            const logical = row_of_offset(st, ls);
+            if (line_is_collapsed(st, logical) and le == line_end(st, logical)) {
+                const mcol = vis_col_of(st, r, le);
+                const mx = g.text_x + @as(f32, @floatFromInt(mcol)) * st.char_w;
+                const msty = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
+                var mbuf: [5]u8 = undefined;
+                const marker = std.fmt.bufPrint(&mbuf, "\u{2026}{c}", .{fold_cchar_at(st, logical)}) catch "\u{2026}";
+                const m0 = b.sprites.items.len;
+                _ = try label.render(b, mx, yy, marker, msty);
+                for (b.sprites.items[m0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+            }
+        }
     }
 }
 
@@ -1417,15 +1579,17 @@ fn draw_caret(
 // visual row (wrapped continuation rows stay blank); the caret's line reads brighter.
 fn draw_gutter(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize) RenderError!void {
     const theme = opts.theme;
-    var col = Quad.init(g.x, g.y, g.text_x - g.x, g.h);
+    // The gutter band stops a pad short of the text, leaving a gap so code doesn't hug the edge.
+    const edge = g.text_x - opts.pad;
+    var col = Quad.init(g.x, g.y, edge - g.x, g.h);
     _ = col.set_background(tr.mix(theme.background, theme.muted, 0.35))
-        .set_clip_bounds(.{ g.x, g.y + 1, g.text_x - g.x, g.h - 2 });
+        .set_clip_bounds(.{ g.x, g.y + 1, edge - g.x, g.h - 2 });
     try b.append_quad(col);
 
     const caret_line = row_of_offset(st, st.caret);
     const num_style = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
     const cur_style = mono_style(opts.font_family, opts.font_size, theme.foreground, .normal);
-    const band: [4]f32 = .{ g.x, g.y + 1, g.text_x - g.x, g.h - 2 };
+    const band: [4]f32 = .{ g.x, g.y + 1, edge - g.x, g.h - 2 };
 
     var r = first_row;
     while (r < last_row) : (r += 1) {
@@ -1440,6 +1604,31 @@ fn draw_gutter(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: 
         const t0 = b.sprites.items.len;
         _ = try label.render(b, g.num_right_x - nw, yy, s, sty);
         for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+        // Fold chevron: right for a collapsed region, down for an expanded one.
+        if (g.fold_w > 0 and fold_end_at(st, logical) != null) {
+            const chev: icon.Icon = if (line_is_collapsed(st, logical)) .chevron_right else .chevron_down;
+            const c0 = b.sprites.items.len;
+            _ = try icon.render_icon_centered_xy(b, g.fold_x, yy, g.fold_w, g.line_h, chev, .{
+                .point_size = opts.font_size - 2,
+                .color = theme.muted_foreground,
+            });
+            for (b.sprites.items[c0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+        }
+    }
+    // A region collapsed to the last line has no real row after it; draw the trailing line number
+    // below the header so the fold still reads as "one line, then the rest" (matches an editor that
+    // keeps the closing line's slot).
+    if (st.folding_on and st.vis_eof_folded) {
+        const yy = g.text_y + @as(f32, @floatFromInt(st.vis_count)) * g.line_h - st.scroll_y;
+        if (yy + g.line_h > g.text_y and yy < g.text_y + g.view_h) {
+            var nbuf: [12]u8 = undefined;
+            if (std.fmt.bufPrint(&nbuf, "{d}", .{st.line_count + 1})) |s| {
+                const nw = @as(f32, @floatFromInt(s.len)) * st.char_w;
+                const t0 = b.sprites.items.len;
+                _ = try label.render(b, g.num_right_x - nw, yy, s, num_style);
+                for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+            } else |_| {}
+        }
     }
 }
 
@@ -1582,17 +1771,21 @@ fn prepare(
     const line_h = opts.font_size * opts.line_spacing;
     std.debug.assert(line_h > 0); // row math divides by it (cull, click->row)
     const pad = opts.pad;
-    // Line-number gutter: pad + widest number + a pad-sized gap before the text.
+    // Line-number gutter: pad + widest number + a pad-sized gap to the gutter edge + another pad
+    // of breathing room before the text (so the code never hugs the gutter band).
     const digits: usize = if (opts.line_numbers) @max(2, digit_count(st.line_count)) else 0;
     const num_w = @as(f32, @floatFromInt(digits)) * st.char_w;
-    const gutter_w: f32 = if (opts.line_numbers) num_w + pad else 0;
+    // A fold-chevron column sits between the numbers and the text when folding is on.
+    const fold_w: f32 = if (opts.folding and opts.line_numbers) 12 else 0;
+    const gutter_w: f32 = if (opts.line_numbers) num_w + pad * 2 + (if (fold_w > 0) fold_w + pad else 0) else 0;
     const text_w = @max(@as(f32, 0), w - pad * 2 - gutter_w);
     // Visual index = logical lines wrapped to the columns that fit; 0 disables wrap.
     const cols_max: usize = if (opts.wrap and st.char_w > 0)
         @max(1, @as(usize, @intFromFloat(text_w / st.char_w)))
     else
         0;
-    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols) rebuild_vis_index(st, cols_max);
+    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols or
+        (opts.folding and st.collapse_seq != st.vis_collapse_seq)) rebuild_vis_index(st, cols_max, opts.folding);
     return .{
         .x = x,
         .y = y,
@@ -1604,6 +1797,8 @@ fn prepare(
         .view_h = @max(@as(f32, 0), h - pad * 2), // tiny h must not cast negative
         .gutter_w = gutter_w,
         .num_right_x = x + pad + num_w,
+        .fold_x = x + pad + num_w + pad, // chevron column starts a pad past the numbers
+        .fold_w = fold_w,
     };
 }
 
@@ -1642,6 +1837,7 @@ pub fn render(
     st.now_cached = p.now_s; // mouse thunks run between frames; they read this
     st.on_focus = opts.on_focus; // stash so the click handler (ctx = state) reaches the caller
     st.focus_ctx = opts.ctx;
+    st.folding_on = opts.folding;
 
     snap_caret(st);
     const g = prepare(b, st, opts, x, y, w, h);
@@ -1714,6 +1910,8 @@ pub fn render(
     st.last_text_y = g.text_y;
     st.last_line_h = g.line_h;
     st.last_view_h = g.view_h;
+    st.last_fold_x = g.fold_x;
+    st.last_fold_w = g.fold_w;
     return SizeF.init(w, h);
 }
 

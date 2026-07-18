@@ -56,6 +56,7 @@ pub const Icon = enum {
     arrow_clockwise,
     arrow_down_circle,
     arrow_down_to_line,
+    arrow_up_to_line,
     search,
     sidebar,
     gear,
@@ -132,6 +133,7 @@ pub const Icon = enum {
     loader_pinwheel,
     git_branch,
     cloud,
+    clock,
 };
 
 pub const IconParams = struct {
