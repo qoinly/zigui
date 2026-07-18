@@ -801,6 +801,7 @@ pub const Ta = struct {
     ctx: ?*anyopaque = null,
     caret_out: ?*[4]f32 = null, // window-abs caret rect, for anchoring a completion popup
     completion: ?*textarea_kit.Completion = null, // an open completion popup's nav state
+    snippet: ?*textarea_kit.Snippet = null, // active snippet tabstops (Tab/Esc navigation)
 };
 
 const TextareaSpec = struct {
@@ -826,6 +827,7 @@ const TextareaSpec = struct {
             .ctx = self.o.ctx,
             .caret_out = self.o.caret_out,
             .completion = self.o.completion,
+            .snippet = self.o.snippet,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {

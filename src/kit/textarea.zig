@@ -208,6 +208,18 @@ pub const Completion = struct {
     dismiss: bool = false,
 };
 
+// Drives snippet tabstops the caller manages (e.g. after accepting a function completion, its
+// argument placeholders). While `active`, Tab / Shift+Tab / Esc route into this struct instead of
+// indenting the editor, so the caller can move the selection to the next/previous placeholder or
+// exit. Typing still edits (the user replaces a placeholder). The caller owns the struct: set
+// `active`, place the selection, and consume `next`/`prev`/`cancel` (clearing them).
+pub const Snippet = struct {
+    active: bool = false,
+    next: bool = false,
+    prev: bool = false,
+    cancel: bool = false,
+};
+
 pub const TextAreaOptions = struct {
     state: *TextAreaState,
     spans: []const TextSpan = &.{}, // sorted by start, non-overlapping; empty = plain
@@ -238,6 +250,8 @@ pub const TextAreaOptions = struct {
     caret_out: ?*[4]f32 = null,
     // An inline completion popup's navigation state (see Completion). Null = no popup.
     completion: ?*Completion = null,
+    // Snippet tabstop navigation (see Snippet). Null = not in a snippet.
+    snippet: ?*Snippet = null,
 };
 
 fn is_cont(b: u8) bool {
@@ -1203,6 +1217,7 @@ fn drain_keys(st: *TextAreaState, opts: TextAreaOptions) bool {
     var changed = false;
     for (p.keys()) |ev| {
         if (opts.completion) |c| if (c.open and completion_key(c, ev)) continue; // popup ate the nav key
+        if (opts.snippet) |s| if (s.active and snippet_key(s, ev)) continue; // Tab/Esc drive the tabstops
         if (apply_key(st, ev, opts.read_only, opts.code_edits)) changed = true;
         if (st.buf.edit_seq != st.index_seq) rebuild_line_index(st);
     }
@@ -1228,6 +1243,22 @@ fn completion_key(c: *Completion, ev: custom_shell.KeyEvent) bool {
         },
         .escape => {
             c.dismiss = true;
+            return true;
+        },
+        else => return false,
+    }
+}
+
+// While a snippet is active, Tab / Shift+Tab / Esc move between tabstops instead of indenting. The
+// caller moves the selection and clears the flag; typing falls through to edit the placeholder.
+fn snippet_key(s: *Snippet, ev: custom_shell.KeyEvent) bool {
+    switch (ev.code) {
+        .tab => {
+            if (ev.mods.shift) s.prev = true else s.next = true;
+            return true;
+        },
+        .escape => {
+            s.cancel = true;
             return true;
         },
         else => return false,
