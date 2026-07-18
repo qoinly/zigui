@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../window/types.zig");
 const color = @import("../color.zig");
 const text_system = @import("../text_system.zig");
@@ -13,6 +14,11 @@ const tr = @import("theme_resolve.zig");
 pub const RenderBuilder = builder.RenderBuilder;
 pub const Theme = types.Theme;
 pub const Rgba = color.Rgba;
+
+// The platform key model surfaces `mods.cmd` as the primary shortcut modifier (Cmd on macOS, Ctrl on
+// Linux/Windows) and `mods.alt` as Option/Alt. So caret jumps split by OS: macOS uses Cmd+arrow for
+// line/doc and Option+arrow for word; elsewhere Ctrl(=cmd)+arrow jumps by word and Ctrl+Home/End by doc.
+const is_mac = builtin.os.tag == .macos;
 pub const Quad = primitives.Quad;
 pub const SizeF = @import("../geometry.zig").SizeF;
 pub const FontWeight = text_system.FontWeight;
@@ -844,6 +850,35 @@ fn move_line(st: *TextAreaState, ev: custom_shell.KeyEvent, to_end: bool) void {
     }
 }
 
+// Caret to the document start (to_end=false) or end. Cmd+Up/Down on macOS, Ctrl+Home/End elsewhere.
+fn move_doc(st: *TextAreaState, ev: custom_shell.KeyEvent, to_end: bool) void {
+    extend_begin(st, ev);
+    st.caret = if (to_end) st.buf.len else 0;
+    refresh_goal(st);
+}
+
+// Caret by one word: forward stops after the next word, backward at the start of the previous one.
+// Option+arrow on macOS, Ctrl+arrow elsewhere.
+fn move_word(st: *TextAreaState, ev: custom_shell.KeyEvent, forward: bool) void {
+    const bytes = st.buf.slice();
+    extend_begin(st, ev);
+    st.caret = if (forward) next_word(bytes, st.caret) else prev_word(bytes, st.caret);
+    refresh_goal(st);
+}
+
+fn next_word(bytes: []const u8, start: usize) usize {
+    var i = start;
+    while (i < bytes.len and !is_word(bytes[i])) i += 1; // skip separators
+    while (i < bytes.len and is_word(bytes[i])) i += 1; // then the word
+    return i;
+}
+fn prev_word(bytes: []const u8, start: usize) usize {
+    var i = start;
+    while (i > 0 and !is_word(bytes[i - 1])) i -= 1;
+    while (i > 0 and is_word(bytes[i - 1])) i -= 1;
+    return i;
+}
+
 const INDENT = "  "; // code-editor indent unit (two spaces)
 
 fn is_word(c: u8) bool {
@@ -1068,27 +1103,41 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, cod
             return edit_replace(st, st.caret, next_boundary(bytes, st.caret), "", false);
         },
         .left => {
-            move_horiz(st, ev, false);
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (is_mac and ev.mods.cmd) {
+                move_line(st, ev, false); // macOS Cmd+←: line start
+            } else if (word) {
+                move_word(st, ev, false); // Option (macOS) / Ctrl (Linux/Win): previous word
+            } else {
+                move_horiz(st, ev, false);
+            }
             return false;
         },
         .right => {
-            move_horiz(st, ev, true);
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (is_mac and ev.mods.cmd) {
+                move_line(st, ev, true);
+            } else if (word) {
+                move_word(st, ev, true);
+            } else {
+                move_horiz(st, ev, true);
+            }
             return false;
         },
         .home => {
-            move_line(st, ev, false);
+            if (ev.mods.cmd) move_doc(st, ev, false) else move_line(st, ev, false); // Ctrl/Cmd+Home: doc start
             return false;
         },
         .end => {
-            move_line(st, ev, true);
+            if (ev.mods.cmd) move_doc(st, ev, true) else move_line(st, ev, true);
             return false;
         },
         .up => {
-            move_vert(st, ev, false);
+            if (is_mac and ev.mods.cmd) move_doc(st, ev, false) else move_vert(st, ev, false); // macOS Cmd+↑: doc start
             return false;
         },
         .down => {
-            move_vert(st, ev, true);
+            if (is_mac and ev.mods.cmd) move_doc(st, ev, true) else move_vert(st, ev, true);
             return false;
         },
         .escape => {
