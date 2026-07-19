@@ -41,7 +41,7 @@ pub fn create_device_proc() ?CreateDeviceFn {
         g_probed = true;
         if (win32.LoadLibraryA("dcomp.dll")) |mod| {
             if (win32.GetProcAddress(mod, "DCompositionCreateDevice")) |proc| {
-                g_create = @ptrCast(proc);
+                g_create = @ptrCast(@alignCast(proc));
             }
         }
     }

@@ -1861,7 +1861,7 @@ pub const Renderer = struct {
             return error.ShaderCompilerMissing;
         const proc = win32.GetProcAddress(module, "D3DCompile") orelse
             return error.ShaderCompilerMissing;
-        const compile: d3d11.PFN_D3DCompile = @ptrCast(proc);
+        const compile: d3d11.PFN_D3DCompile = @ptrCast(@alignCast(proc));
 
         self.quad_pipeline = try self.make_pipeline(compile, "quad_vertex", "quad_fragment");
         self.text_pipeline = try self.make_pipeline(compile, "text_vertex", "text_fragment");
