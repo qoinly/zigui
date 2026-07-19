@@ -145,6 +145,14 @@ pub const CustomShellHandle = struct {
         return win32.IsIconic(self.window) != 0;
     }
 
+    pub fn minimize(self: CustomShellHandle) void {
+        _ = win32.ShowWindow(self.window, win32.SW_MINIMIZE);
+    }
+    // No app-hide concept; minimize instead of SW_HIDE (which drops the taskbar entry).
+    pub fn hide(self: CustomShellHandle) void {
+        _ = win32.ShowWindow(self.window, win32.SW_MINIMIZE);
+    }
+
     pub fn is_key(self: CustomShellHandle) bool {
         return win32.GetForegroundWindow() == self.window;
     }

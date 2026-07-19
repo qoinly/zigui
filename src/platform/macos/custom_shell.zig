@@ -808,6 +808,16 @@ pub const CustomShellHandle = struct {
         objc.msg_send(void, self.window, "toggleFullScreen:", .{@as(?Id, null)});
     }
 
+    pub fn minimize(self: CustomShellHandle) void {
+        std.debug.assert(@intFromPtr(self.window) != 0);
+        objc.msg_send(void, self.window, "miniaturize:", .{@as(?Id, null)});
+    }
+    pub fn hide(_: CustomShellHandle) void {
+        const app_class = objc.get_class("NSApplication") orelse return;
+        const app = objc.msg_send(Id, app_class, "sharedApplication", .{});
+        objc.msg_send(void, app, "hide:", .{@as(?Id, null)});
+    }
+
     pub fn get_content_size(self: CustomShellHandle) NSSize {
         const frame: NSRect = objc.msg_send(NSRect, self.content_view, "frame", .{});
         return frame.size;

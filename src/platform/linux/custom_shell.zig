@@ -99,6 +99,16 @@ pub const CustomShellHandle = struct {
         };
     }
 
+    pub fn minimize(self: CustomShellHandle) void {
+        switch (backend.active) {
+            .wayland => self.wl().minimize(),
+            .x11 => self.x11().minimize(),
+        }
+    }
+    pub fn hide(self: CustomShellHandle) void {
+        self.minimize(); // no app-hide on Linux; iconify instead
+    }
+
     pub fn is_key(self: CustomShellHandle) bool {
         return switch (backend.active) {
             .wayland => self.wl().is_key(),

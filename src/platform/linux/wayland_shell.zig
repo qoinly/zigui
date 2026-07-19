@@ -210,6 +210,11 @@ pub const CustomShellHandle = struct {
         return false;
     }
 
+    pub fn minimize(self: CustomShellHandle) void {
+        std.debug.assert(self.window.in_use);
+        perform_caption_action(self.window, .minimize);
+    }
+
     pub fn is_key(self: CustomShellHandle) bool {
         std.debug.assert(self.window.in_use);
         return self.window.activated;

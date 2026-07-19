@@ -246,6 +246,14 @@ pub fn set_fullscreen(enable: bool) void {
 pub fn fullscreen() bool {
     return frame_ctx.get().paint.handle.is_fullscreen();
 }
+// Minimize (iconify) the window rendering this frame, as its caption button does.
+pub fn minimize() void {
+    frame_ctx.get().paint.handle.minimize();
+}
+// Hide the app (macOS) or, where no app-hide concept exists, minimize instead.
+pub fn hide() void {
+    frame_ctx.get().paint.handle.hide();
+}
 
 // Whether this window is fully hidden (covered, minimized, or on another Space).
 // A periodic view (a meter re-arming request_redraw_after) can park itself on
