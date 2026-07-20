@@ -1678,18 +1678,27 @@ fn edit_native(
     field.set(pc.text_field_value(&tmp));
     if (!custom_shell.text_field_native_paint) {
         try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font, caret_out, caret_index_out);
-    } else if (spans.len > 0 and !secure) {
-        // Native-painted backends (macOS) draw the text themselves, so the overlay
-        // above can't reach it; hand the token colors to the native editor instead.
-        // Flatten to the platform span type (no weight; native coloring is fg-only).
-        var fs: [64]types.FieldSpan = undefined;
-        var n: usize = 0;
-        for (spans) |s| {
-            if (n >= fs.len) break;
-            fs[n] = .{ .start = s.start, .end = s.end, .color = s.color };
-            n += 1;
+    } else {
+        // draw_field_overlay never runs on a native-painted backend, so publish the
+        // caret (byte offset + window-abs rect) from the native field itself for
+        // anchoring a completion popup at the caret.
+        if (caret_index_out) |ci| ci.* = custom_shell.text_field_caret();
+        if (caret_out) |co| {
+            if (custom_shell.text_field_caret_rect()) |cr| co.* = cr;
         }
-        pc.color_text_field(field.slice(), fs[0..n], theme.foreground, font, theme.font_size);
+        if (spans.len > 0 and !secure) {
+            // Native-painted backends (macOS) draw the text themselves, so the overlay
+            // path can't reach it; hand the token colors to the native editor instead.
+            // Flatten to the platform span type (no weight; native coloring is fg-only).
+            var fs: [64]types.FieldSpan = undefined;
+            var n: usize = 0;
+            for (spans) |s| {
+                if (n >= fs.len) break;
+                fs[n] = .{ .start = s.start, .end = s.end, .color = s.color };
+                n += 1;
+            }
+            pc.color_text_field(field.slice(), fs[0..n], theme.foreground, font, theme.font_size);
+        }
     }
 }
 
