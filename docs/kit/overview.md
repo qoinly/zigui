@@ -95,8 +95,17 @@ Everything else is stateless. (`input` is the plain stateless field - you pass
 ## Groups
 
 - [Actions](actions.md) - button, toggle_button
-- [Inputs](inputs.md) - input, text_input, text_editable, textarea, checkbox, radio, toggle, toggle_group, slider, select, tabs
-- [Display](display.md) - text, badge, avatar, icon, separator, skeleton, kbd
-- [Feedback](feedback.md) - progress, spinner, alert, toasts, tooltip_overlay
-- [Containers / overlays](containers.md) - dialog, sidebar, tabbar, bottom_bar, menu_overlay, select_overlay, popover_overlay, sheet
+- [Inputs](inputs.md) - input, text_input, text_editable, textarea, checkbox, radio, toggle, toggle_group, slider, select
+- [Display](display.md) - text, badge, avatar, image, icon, separator, skeleton, kbd
+- [Feedback](feedback.md) - progress, progress_indeterminate, spinner, alert, toasts, tooltip_overlay
+- [Containers / overlays](containers.md) - card, tabs, sidebar, tabbar, bottom_bar, resize_handle, dialog, sheet, menu_overlay, select_overlay, popover_overlay, modal_backdrop
 - [Charts](charts.md) - line_chart, bar_chart, donut
+
+The structural nodes (`col`, `row`, `grid`, `grid_cols`, `spacer`, `scroll`,
+`layers`, `text`) live in [Layout](../layout.md); the media nodes `frame` (live
+video / remote screen) and `image` (a static picture) are in
+[External frames](../frames.md).
+
+Mobile-navigation widgets - `top_bar`, `app_bar`, `nav_page`, `push_slide`,
+`carousel`, `handle_back` (over a `NavStack`) - drive iOS-style push/pop screens
+and are exercised in the iOS example (`examples/ios-app`).

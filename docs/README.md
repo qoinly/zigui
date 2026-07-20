@@ -72,9 +72,9 @@ Variants exist for callbacks that carry an argument: `zigui.on_id` (an id),
 - [Theming](theming.md)
 - [Kit](kit/overview.md)
 - [Rendering](rendering.md)
-- [External frames](frames.md) - draw a decoded video / remote screen
-- [Input capture](input.md) - grab raw mouse + keyboard
-- [System integration](system.md) - clipboard, fullscreen, displays
+- [External frames](frames.md) - draw a decoded video / remote screen, or a static image
+- [Input](input.md) - raw grab, keyboard shortcuts, file drop, field completion
+- [System integration](system.md) - clipboard, fullscreen, displays, the `napi` platform surface
 - [Android](android.md) - the Vulkan backend, the APK build, the native-API surface
 - [iOS](ios.md) - the Metal backend, the Simulator build, the native-API surface
 - [CLI](cli.md) - scaffold a project, check the mobile toolchains

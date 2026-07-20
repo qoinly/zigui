@@ -25,6 +25,8 @@ takes a `Config` and a slice of children.
 | `col_gap` | `?Spacing` | `null` | horizontal gap; falls back to `gap` |
 | `pad` | `Spacing` | `.none` | inner padding, all sides |
 | `grow` | `f32` | `0` | flex-grow share of leftover main-axis space |
+| `shrink` | `f32` | `1` | flex-shrink weight when the line overflows; `0` pins the natural size so siblings absorb the overflow |
+| `basis` | `?f32` | `null` | flex-basis: main-axis start size before grow/shrink (`null` = content) |
 | `width` | `?f32` | `null` | fixed width (`null` = auto) |
 | `height` | `?f32` | `null` | fixed height (`null` = auto) |
 | `min_width` | `?f32` | `null` | min-width clamp |
@@ -36,10 +38,17 @@ takes a `Config` and a slice of children.
 | `bg` | `?Rgba` | `null` | background fill |
 | `hover_bg` | `?Rgba` | `null` | fill swapped while the pointer is over the box |
 | `border` | `?Rgba` | `null` | border color |
-| `radius` | `f32` | `0` | corner radius |
+| `radius` | `f32` | `0` | corner radius (all four corners) |
+| `radii` | `?[4]f32` | `null` | per-corner radius `(tl, tr, bl, br)`; overrides `radius` (e.g. a top-rounded header inside a rounded card) |
 | `border_width` | `f32` | `1` | border thickness |
+| `border_dash` | `[2]f32` | `.{ 0, 0 }` | dash px, gap px; `(0, 0)` = solid border |
 | `on_click` | `?ClickFn` | `null` | click handler for the whole box |
+| `click_ctx` | `?*anyopaque` | `null` | explicit callback context (else the run state) |
+| `on_drag` | `?fn(ctx, x, y)` | `null` | makes the box draggable; fires on press and each move (window-space `x`, `y`) |
+| `on_drag_end` | `?fn(ctx)` | `null` | fires on release; do plain-click work here on a no-movement release (a drag supersedes `on_click`) |
+| `hover_id` | `[]const u8` | `""` | id recorded as hovered; the frame exposes the topmost one for reveal-on-hover without a callback |
 | `rect_out` | `?*[4]f32` | `null` | laid-out abs rect, written at draw; anchor an overlay to this box |
+| `backdrop_mask` | `bool` | `false` | mask body sprites behind this box so a custom overlay fill draws crisp |
 
 `Spacing` is a token (`.none`, `.xs`, `.sm`, `.md`, ...) or `.{ .px = N }` for an
 exact value. Use the token, not a bare number: `.pad = .lg`, not `.pad = 16`. See
@@ -65,9 +74,13 @@ zigui.text("Hello", .{ .size = 16, .weight = .semi_bold })
 | `weight` | `FontWeight` | `.normal` | `.thin` ... `.normal`, `.medium`, `.semi_bold`, `.bold` ... `.black` |
 | `muted` | `bool` | `false` | resolve to `theme.muted_foreground` |
 | `color` | `?Rgba` | `null` | explicit override; else muted/foreground at draw |
+| `truncate` | `bool` | `false` | clamp to one line with a trailing ellipsis instead of wrapping |
+| `font_family` | `[]const u8` | `""` | override the font family (e.g. a mono family for code/URLs); empty inherits the theme's |
 
 Text color resolves at draw time from the theme - leave `color` null to track
-light/dark. Text wraps to the width it is handed by layout.
+light/dark. Text wraps to the width it is handed by layout; set `truncate` for a
+single ellipsized line. Register a bundled or custom family with
+`zigui.register_font_file` before naming it here - see [Theming](theming.md).
 
 ## Spacer
 
@@ -97,15 +110,39 @@ zigui.scroll(&app.body, .{ .grow = 1 }, content)
 | `bg` | `?Rgba` | `null` | viewport background |
 | `bar` | `ScrollBar` | `.hidden` | `.hidden` = wheel only; `.auto` = thumb when overflowing |
 
+`ScrollState` also carries `viewport_h: f32` - the viewport height laid out last
+frame (`0` until the first draw). Building thousands of uniform rows? Window them
+to the `y .. y + viewport_h` slice (real rows for what's visible, a spacer for the
+rest) instead of building nodes the clip would discard - it keeps you under the
+layout children cap.
+
+## Layers
+
+`layers` stacks its children on the same box - they overlap instead of flowing,
+and later children draw on top. It grows to fill its cell; each child sizes
+against the full box.
+
+```zig
+zigui.layers(&.{ base, floating_overlay })
+```
+
+Use it to place a custom overlay (a dropdown, a HUD) above content, or to lift a
+menu above an already-open modal in the overlay region.
+
 ## Flex
 
 `col` / `row` are CSS-flex containers. The main axis follows the direction
 (vertical for `col`, horizontal for `row`); the cross axis is the other one.
 
 - `grow` shares leftover main-axis space (flex-grow). `0` = take only the
-  intrinsic size; `1`+ = expand into the gap.
-- Shrink is on by default: a row that overflows shrinks its children down to
-  their min size. Pin `width` (or `min_width`) to hold a track.
+  intrinsic size; `1`+ = expand into the gap. A `grow > 0` root fills its main
+  axis instead of shrink-wrapping.
+- `shrink` is `1` by default: a row that overflows shrinks its children down to
+  their min size. Set `shrink = 0` (or pin `width` / `min_width`) to hold a track
+  while its siblings give up space.
+- `basis` sets the main-axis start size before grow/shrink resolves. `basis = 0`
+  with `grow` on two cells splits the row *equally* regardless of content width
+  (content-based grow cells otherwise drift apart by their text width).
 - `justify` packs children along the main axis: `.flex_start`, `.flex_end`,
   `.center`, `.space_between`, `.space_around`, `.space_evenly`.
 - `cross` aligns children along the cross axis: `.flex_start`, `.flex_end`,
@@ -183,6 +220,6 @@ Resolve sizes against the current frame width (`f.size.width`):
 - `fluid(width, w0, w1, lo, hi)` clamps + lerps `lo..hi` as the width moves
   `w0..w1` (asserts `w1 > w0`).
 - `bp(width)` wraps a width for breakpoint queries: `.at()`, `.ge(bp)`,
-  `.lt(bp)`, `.min(edge)` over `base` / `sm` / `md` / `lg` / `xl`.
+  `.lt(bp)`, `.at_least(edge)` over `base` / `sm` / `md` / `lg` / `xl`.
 
 For a responsive column count, prefer `grid_cols` over hand-branching on `bp`.

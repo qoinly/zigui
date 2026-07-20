@@ -74,6 +74,36 @@ t.primary = zigui.Rgba.from_hex(0x3B82F6);
 t.radius = 10;
 ```
 
+## Fonts
+
+The theme's `font_family` - and a per-text `font_family` override on `TextOpts` -
+selects a font by family name. The system UI font is the default (`""`). To use a
+bundled or custom font, register the file once at startup, then name its family:
+
+```zig
+_ = zigui.register_font_file("assets/Inter.ttf"); // false if unreadable / unsupported
+var t = zigui.Theme.default_dark();
+t.font_family = "Inter";
+```
+
+`zigui.set_ligatures(false)` turns off ligatures and contextual alternates for all
+text shaping. A code or mono grid wants it off - a `=>` ligature would desync a
+fixed-width caret.
+
+## Swapping the theme
+
+`zigui.set_theme(new)` swaps the whole window's theme at runtime - safe from a
+click handler; it applies at the top of the next frame. It also retints the window
+chrome (title band, separators, caption buttons), so a light/dark toggle flips
+content and frame together.
+
+```zig
+fn toggle_theme(app: *App) void {
+    app.dark = !app.dark;
+    zigui.set_theme(if (app.dark) zigui.Theme.default_dark() else zigui.Theme.default_light());
+}
+```
+
 ## Spacing
 
 `gap` and `pad` take a `Spacing` token, not a raw number. The token reads intent;
@@ -112,7 +142,7 @@ viewport. Resolve against the frame: `f.size.width`.
 | `.at()` | `Breakpoint` | the widest breakpoint this width reaches |
 | `.ge(bp)` | `bool` | width is at or past `bp` |
 | `.lt(bp)` | `bool` | width is below `bp` |
-| `.min(edge)` | `bool` | width is at or past a raw px edge |
+| `.at_least(edge)` | `bool` | width is at or past a raw px edge |
 
 ```zig
 if (zigui.bp(f.size.width).ge(.md)) { ... }  // >= 768px

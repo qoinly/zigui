@@ -18,9 +18,15 @@ defer app.deinit();
 | `title` | `[]const u8` | `""` | window title |
 | `size` | `[2]f32` | required | initial logical size; asserts both `> 0` |
 | `min_size` | `?[2]f32` | `null` | resize floor; null falls back to `320 x 240` |
+| `theme` | `?Theme` | `null` | starting theme; null uses `default_dark` |
+| `feel` | `Feel` | `.liquid_glass` | window chrome feel (see below) |
+| `titlebar_height` | `?f32` | `null` | custom title-band height; null uses the platform default |
 
 zigui draws the window chrome (the title band, traffic-light gutter, the rest);
-you style the content in your tree.
+you style the content in your tree. `feel` is `.liquid_glass` (a translucent,
+blurred bar - the default), `.flat` (an opaque bar), or `.transparent` (no chrome
+fill; content runs to the edges). Pass `theme` for the starting palette and
+`titlebar_height` to size the band; swap the theme later with `zigui.set_theme`.
 
 ## run
 
@@ -81,6 +87,7 @@ next frame.
 | `theme` | `*const Theme` | active theme; read colours from `f.theme` |
 | `arena` | `Allocator` | per-frame arena (the facade builders use it for you) |
 | `time` | `f64` | monotonic seconds, for time-based animation with `zigui.animate` |
+| `hovered_id` | `[]const u8` | the topmost `hover_id` box under the pointer, for reveal-on-hover (see [Layout](layout.md)) |
 
 ### No state
 
@@ -150,6 +157,21 @@ zigui.row(.{ .pad = .{ .px = 24 } }, kids)
 | `.xxl` | 32 |
 | `.px = N` | exact |
 
+## Window controls
+
+Act on the window drawing the current frame:
+
+| Fn | What it does |
+|---|---|
+| `minimize()` | iconify the window, as its caption button does |
+| `hide()` | hide the app (macOS); elsewhere minimizes |
+| `window_occluded()` | whether the window is fully hidden (covered, minimized, or on another Space) |
+| `set_theme(t)` | swap the window's theme - content and chrome - at runtime; see [Theming](theming.md) |
+
+Fullscreen and display enumeration live in [System](system.md).
+`window_occluded()` pairs with `zigui.request_redraw_after`: a periodic view parks
+itself while hidden and re-arms on the reveal.
+
 ## Multiple windows
 
 Desktop only - Android and iOS are single-surface, so `open_window` and the
@@ -176,6 +198,9 @@ pub fn open_window(opts: WindowOptions, state, comptime views) !void
 | `id` | `u32` | `0` | window identity; 0 lets the engine assign a fresh one |
 | `size` | `?[2]f32` | `null` | null inherits the main window's size |
 | `min_size` | `?[2]f32` | `null` | null inherits the main window's floor |
+| `theme` | `?Theme` | `null` | starting theme; null uses `default_dark` |
+| `feel` | `Feel` | `.liquid_glass` | window chrome feel (`.flat` / `.liquid_glass` / `.transparent`) |
+| `titlebar_height` | `?f32` | `null` | custom title-band height |
 
 Each window runs its own render loop and routes its own input, so callbacks reach
 the right state. The shared text editor follows the key window, so typing never
