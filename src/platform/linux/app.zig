@@ -9,6 +9,7 @@ const loop = @import("loop.zig");
 const backend = @import("backend.zig");
 const shell = @import("custom_shell.zig");
 const x11_shell = @import("x11_shell.zig");
+const paint = @import("../../window/paint.zig");
 
 const pollfd = extern struct { fd: i32, events: i16, revents: i16 };
 extern "c" fn poll(fds: [*]pollfd, count: c_ulong, timeout_ms: c_int) c_int;
@@ -17,6 +18,36 @@ const POLLIN: i16 = 1;
 // frame; an idle tick costs two reads and a dirty check, and the FIFO
 // swapchain paces real presents to the refresh rate.
 const TICK_MS: c_int = 8;
+
+// Adaptive idle poll (X11). When enabled (default) the loop sleeps up to
+// `g_idle_cap_ms` between wakeups while nothing animates, instead of the fixed
+// TICK_MS — cutting idle wakeups from ~125/s to a few/s. An active animation still
+// polls at TICK_MS for vsync-rate frames, and a scheduled redraw (caret blink,
+// resource meter) is honoured within the cap. X11 autorepeat is server-side, so a
+// held key still wakes the poll via its fd. Runtime-settable via set_idle_poll; the
+// interval is floored so it can never be tuned into a busy-spin.
+const IDLE_CAP_FLOOR_MS: c_int = 32;
+const IDLE_CAP_CEIL_MS: c_int = 10_000;
+var g_adaptive_poll: bool = true;
+var g_idle_cap_ms: c_int = 250;
+
+// Toggle adaptive idle polling and set the idle wakeup interval (ms). The interval
+// is clamped to [32, 10000] so a caller can never request a busy-spin.
+pub fn set_idle_poll(enabled: bool, interval_ms: u32) void {
+    g_adaptive_poll = enabled;
+    const req: c_int = @intCast(@min(interval_ms, @as(u32, @intCast(IDLE_CAP_CEIL_MS))));
+    g_idle_cap_ms = std.math.clamp(req, IDLE_CAP_FLOOR_MS, IDLE_CAP_CEIL_MS);
+}
+
+// The next poll timeout from the render layer's reported state (set during the
+// prior tick_all): TICK_MS while animating, the nearest scheduled redraw clamped
+// into [TICK_MS, cap] otherwise, or the full cap when fully idle.
+fn adaptive_timeout() c_int {
+    if (!g_adaptive_poll) return TICK_MS;
+    if (paint.wants_fast_poll) return TICK_MS;
+    if (paint.soonest_deadline_ms < 0) return g_idle_cap_ms;
+    return std.math.clamp(@as(c_int, paint.soonest_deadline_ms), TICK_MS, g_idle_cap_ms);
+}
 
 pub const ActivationPolicy = enum { regular, accessory, prohibited };
 
@@ -90,13 +121,19 @@ pub const App = struct {
     fn run_x11() void {
         std.debug.assert(xcb.conn != null);
         std.debug.assert(!x11_shell.quit_requested);
+        var timeout: c_int = 0; // render the first frame immediately
         while (!x11_shell.quit_requested) {
             xcb.flush();
             var fds = [_]pollfd{.{ .fd = xcb.connection_fd(), .events = POLLIN, .revents = 0 }};
-            _ = poll(&fds, 1, TICK_MS);
+            _ = poll(&fds, 1, timeout);
             x11_shell.process_events();
             shell.tick_key_repeat();
+            // The render layer reports its wakeup needs during tick_all; reset the
+            // signals first, then size the next sleep from what it asked for.
+            paint.wants_fast_poll = false;
+            paint.soonest_deadline_ms = -1;
             loop.tick_all();
+            timeout = adaptive_timeout();
         }
     }
 

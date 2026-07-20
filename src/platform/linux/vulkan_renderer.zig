@@ -266,6 +266,79 @@ const Offscreen = struct {
     framebuffer: vk.Framebuffer = vk.NULL_HANDLE,
 };
 
+// --- Vulkan ICD filter (Linux desktop) -----------------------------------
+// The loader dlopen()s *every* installed ICD at vkCreateInstance to enumerate
+// devices. On Mesa systems that drags in the software lavapipe/RADV drivers and
+// their ~40 MB libLLVM even though rendering runs on the hardware ICD. When
+// exactly one HW vendor is present across the DRM render nodes we pin
+// VK_LOADER_DRIVERS_SELECT to its ICD; init() falls back to the unfiltered
+// loader if the pin yields no usable device, so a hybrid or GPU-less box never
+// loses rendering. A user-set VK_LOADER_DRIVERS_SELECT always wins untouched.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn open(path: [*:0]const u8, flags: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+// `close` is already declared file-scope (dmabuf path); reused here.
+const ICD_ENV = "VK_LOADER_DRIVERS_SELECT";
+
+const HwVendor = enum {
+    intel,
+    amd,
+    nvidia,
+    fn glob(self: HwVendor) [*:0]const u8 {
+        return switch (self) {
+            .intel => "*intel*",
+            .amd => "*radeon*",
+            .nvidia => "*nvidia*,*nouveau*",
+        };
+    }
+};
+
+fn drm_vendor(path: [*:0]const u8) ?HwVendor {
+    const fd = open(path, 0); // O_RDONLY
+    if (fd < 0) return null;
+    defer _ = close(fd);
+    var buf: [16]u8 = undefined;
+    const got = read(fd, &buf, buf.len);
+    if (got <= 0) return null;
+    const s = std.mem.trim(u8, buf[0..@intCast(got)], " \n\r\t");
+    if (std.mem.eql(u8, s, "0x8086")) return .intel;
+    if (std.mem.eql(u8, s, "0x1002")) return .amd;
+    if (std.mem.eql(u8, s, "0x10de")) return .nvidia;
+    return null;
+}
+
+// The ICD glob for the single HW vendor across all DRM render nodes, or null on
+// a mixed / unknown / GPU-less box (stay unfiltered rather than pin the wrong one).
+fn hw_icd_glob() ?[*:0]const u8 {
+    var found: ?HwVendor = null;
+    var node: u32 = 128;
+    while (node < 136) : (node += 1) {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/renderD{d}/device/vendor", .{node}) catch continue;
+        const v = drm_vendor(path.ptr) orelse continue;
+        if (found) |f| {
+            if (f != v) return null; // more than one vendor present
+        } else found = v;
+    }
+    return if (found) |f| f.glob() else null;
+}
+
+// Returns true when a filter was applied (so a later no-device failure is worth
+// one unfiltered retry). No-op on Android (no loader env) and when the user set
+// the variable themselves.
+fn apply_icd_filter() bool {
+    if (builtin.abi.isAndroid()) return false;
+    if (getenv(ICD_ENV) != null) return false;
+    const glob = hw_icd_glob() orelse return false;
+    return setenv(ICD_ENV, glob, 1) == 0;
+}
+
+fn clear_icd_filter() void {
+    _ = unsetenv(ICD_ENV);
+}
+
 pub const Renderer = struct {
     win: *anyopaque,
     instance: ?*vk.Instance = null,
@@ -391,6 +464,9 @@ pub const Renderer = struct {
         // target is the backend window behind CustomShellHandle.metal_layer;
         // backend.zig knows which arm opened it.
         std.debug.assert(backend.window_in_use(target));
+        // Pin the loader to the HW ICD before it scans drivers (avoids lavapipe +
+        // its libLLVM). Set before vk.load()/create_instance so the loader reads it.
+        const icd_filtered = apply_icd_filter();
         vk.load() catch return error.LoaderMissing;
 
         var self = Renderer{ .win = target };
@@ -398,7 +474,17 @@ pub const Renderer = struct {
 
         try self.create_instance();
         try self.create_surface();
-        try self.pick_device();
+        self.pick_device() catch |err| {
+            // The pinned ICD produced no usable device (mis-probe / unusual setup);
+            // drop the filter and retry with the full loader set so rendering is
+            // never lost. If we never filtered, the failure is real — propagate it.
+            if (!icd_filtered) return err;
+            clear_icd_filter();
+            self.destroy_pre_device();
+            try self.create_instance();
+            try self.create_surface();
+            try self.pick_device();
+        };
         try self.create_device();
         // Settle the surface format before any consumer reads self.format - the
         // render pass, swapchain views, and offscreen pass must all agree.
@@ -844,6 +930,24 @@ pub const Renderer = struct {
         if (formats[0].format == vk.FORMAT_UNDEFINED) return;
         self.format = formats[0].format;
         self.color_space = formats[0].color_space;
+
+        // The UI shaders output already-sRGB colors, so an _SRGB swapchain would
+        // gamma-encode them a second time and everything renders too bright. Pick
+        // the _UNORM twin of the surface's preferred channel order instead.
+        const format_b8g8r8a8_srgb: u32 = 50;
+        const format_r8g8b8a8_srgb: u32 = 43;
+        const want: u32 = switch (self.format) {
+            format_b8g8r8a8_srgb, vk.FORMAT_B8G8R8A8_UNORM => vk.FORMAT_B8G8R8A8_UNORM,
+            format_r8g8b8a8_srgb, vk.FORMAT_R8G8B8A8_UNORM => vk.FORMAT_R8G8B8A8_UNORM,
+            else => return,
+        };
+        if (want == self.format) return;
+        for (formats[0..count]) |f| {
+            if (f.format == want) {
+                self.format = want;
+                return;
+            }
+        }
     }
 
     fn create_swapchain(self: *Renderer) Error!void {
@@ -2944,6 +3048,47 @@ pub const Renderer = struct {
             .width = surface.width,
             .height = surface.height,
         };
+    }
+
+    // --- static RGBA image textures (the ImageSource path) -----------------
+    // Reuses the bgra frame plane + staging upload, but as a one-shot texture with no
+    // video ring / refcount: create once, sample forever, destroy on drop.
+
+    // Upload BGRA pixels into a new GPU texture and return an opaque handle. Pixels are
+    // only read during this call, so the caller may free them afterward.
+    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
+        if (width == 0 or height == 0 or width > MAX_FRAME_DIM or height > MAX_FRAME_DIM) return null;
+        if (bgra.len < @as(usize, width) * height * 4) return null;
+        const surface = std.heap.page_allocator.create(FrameSurface) catch return null;
+        surface.* = FrameSurface.init_bgra(width, height, width * 4, bgra.ptr);
+        if (!self.ensure_frame_planes(surface)) {
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        const mapped = surface.state.staging_mapped orelse {
+            surface.deinit();
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        };
+        copy_frame_rows(mapped, surface.pixels, surface.stride, surface.width * 4, surface.height);
+        if (!self.submit_frame_upload(surface)) {
+            surface.deinit();
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        return @ptrCast(surface);
+    }
+
+    // The sampleable texture handle for primitives.Frame.tex.
+    pub fn image_texture_view(handle: *anyopaque) *anyopaque {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        return @ptrCast(&surface.state.luma.view);
+    }
+
+    pub fn destroy_image_texture(handle: *anyopaque) void {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        surface.deinit();
+        std.heap.page_allocator.destroy(surface);
     }
 
     fn import_nv12_surface(self: *Renderer, surface: *FrameSurface) ?Nv12Textures {

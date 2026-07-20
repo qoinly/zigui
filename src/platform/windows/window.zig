@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const win32 = @import("win32.zig");
+const custom_shell = @import("custom_shell.zig");
 const types = @import("../../window/types.zig");
 
 pub const Error = error{
@@ -242,14 +243,90 @@ pub fn native_image_named(name: []const u8) ?*anyopaque {
     return null;
 }
 
+// Native modal file pickers (comdlg32), the NSOpenPanel/zenity counterpart:
+// blocking, parented to the shell window, path copied to out_buf, "" on cancel.
 pub fn open_file(opts: types.FilePickerOptions, out_buf: []u8) []const u8 {
-    _ = opts;
-    _ = out_buf;
-    return "";
+    return run_file_dialog(opts, out_buf, false);
 }
 
 pub fn save_file(opts: types.FilePickerOptions, out_buf: []u8) []const u8 {
-    _ = opts;
-    _ = out_buf;
-    return "";
+    return run_file_dialog(opts, out_buf, true);
 }
+
+fn run_file_dialog(opts: types.FilePickerOptions, out_buf: []u8, save: bool) []const u8 {
+    // Result buffer, WTF-16; the save panel also seeds it with the suggested name.
+    var file_w = [_]u16{0} ** 1024;
+    if (save and opts.default_filename.len > 0) {
+        const n = std.unicode.utf8ToUtf16Le(file_w[0 .. file_w.len - 1], opts.default_filename) catch 0;
+        file_w[n] = 0;
+    }
+
+    var title_w: [256]u16 = undefined;
+    var title_ptr: ?[*:0]const u16 = null;
+    if (opts.title.len > 0) {
+        const n = std.unicode.utf8ToUtf16Le(title_w[0 .. title_w.len - 1], opts.title) catch 0;
+        if (n > 0) {
+            title_w[n] = 0;
+            title_ptr = @ptrCast(&title_w);
+        }
+    }
+
+    var filter_w: [512]u16 = undefined;
+    var ofn = std.mem.zeroes(win32.OPENFILENAMEW);
+    ofn.lStructSize = @sizeOf(win32.OPENFILENAMEW);
+    ofn.hwndOwner = custom_shell.dialog_owner_hwnd();
+    ofn.lpstrFilter = build_filter(&filter_w, opts.allowed_extensions);
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFile = &file_w;
+    ofn.nMaxFile = file_w.len;
+    ofn.lpstrTitle = title_ptr;
+    ofn.Flags = if (save)
+        win32.OFN_OVERWRITEPROMPT | win32.OFN_NOCHANGEDIR
+    else
+        win32.OFN_FILEMUSTEXIST | win32.OFN_PATHMUSTEXIST | win32.OFN_NOCHANGEDIR;
+
+    const ok = if (save) win32.GetSaveFileNameW(&ofn) else win32.GetOpenFileNameW(&ofn);
+    // FALSE covers both a cancel and a dialog error (CommDlgExtendedError() != 0);
+    // either way there is no path, which is exactly the "" contract.
+    if (ok == 0) return "";
+    const len = std.mem.indexOfScalar(u16, &file_w, 0) orelse return "";
+    if (len == 0) return "";
+    const n = std.unicode.utf16LeToUtf8(out_buf, file_w[0..len]) catch return "";
+    return out_buf[0..n];
+}
+
+// comdlg32 filter: "label\0pattern\0" pairs, double-NUL-terminated. Extensions
+// collapse into one entry ("Collections" + "*.json;*.yaml;..."), matching the
+// zenity filter; no extensions shows everything.
+fn build_filter(buf: []u16, exts: []const []const u8) [*:0]const u16 {
+    var n: usize = 0;
+    const put = struct {
+        // ASCII only (labels + extensions); keeps room for the double NUL.
+        fn f(b: []u16, i: *usize, s: []const u8) void {
+            for (s) |ch| {
+                if (i.* >= b.len - 2) return;
+                b[i.*] = ch;
+                i.* += 1;
+            }
+        }
+    }.f;
+    if (exts.len == 0) {
+        put(buf, &n, "All files");
+        buf[n] = 0;
+        n += 1;
+        put(buf, &n, "*.*");
+    } else {
+        put(buf, &n, "Collections");
+        buf[n] = 0;
+        n += 1;
+        for (exts, 0..) |e, i| {
+            if (i > 0) put(buf, &n, ";");
+            put(buf, &n, "*.");
+            put(buf, &n, e);
+        }
+    }
+    buf[n] = 0;
+    buf[n + 1] = 0;
+    return @ptrCast(buf.ptr);
+}
+

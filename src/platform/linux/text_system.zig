@@ -14,6 +14,21 @@ const hb = @import("harfbuzz.zig");
 const Allocator = std.mem.Allocator;
 
 const FALLBACK_FAMILY = "sans-serif";
+
+// Toggle ligatures/contextual-alternates for all shaping (off = grid-safe for a
+// mono editor). Set once at startup before any text is shaped.
+pub fn set_ligatures(on: bool) void {
+    hb.disable_liga = !on;
+}
+
+// Register a bundled font FILE (process-global) so it matches by its family name.
+pub fn register_app_font(path: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return false;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return fc.add_app_font(@ptrCast(&buf));
+}
 const MAX_GLYPHS = 4096; // shaped-run cap; a longer line is truncated, not crashed
 const MAX_GLYPH_PIXELS = 1024 * 1024; // one rasterized glyph's pixel budget
 

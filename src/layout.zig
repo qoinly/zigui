@@ -206,7 +206,14 @@ pub const LayoutEngine = struct {
         const content_height = @max(final_height - padding_v, 0);
 
         var children_size = Size(f32){ .width = 0, .height = 0 };
-        if (style.display == .flex and node.children.items.len > 0) {
+        if (style.layers and node.children.items.len > 0) {
+            // Z-stack: every child gets the full content box, overlapping.
+            const box = Bounds(f32){ .origin = available.origin, .size = .{ .width = content_width, .height = content_height } };
+            for (node.children.items) |child_id| {
+                self.layout_node(child_id, box, depth + 1, box.size);
+            }
+            children_size = box.size;
+        } else if (style.display == .flex and node.children.items.len > 0) {
             children_size = self.layout_flex_children(
                 node,
                 available.origin,
@@ -216,9 +223,16 @@ pub const LayoutEngine = struct {
             );
         }
 
-        // Auto axes (root/subtree path) collapse to the laid-out content extent.
-        if (w_auto and children_size.width > 0) final_width = children_size.width;
-        if (h_auto and children_size.height > 0) final_height = children_size.height;
+        // Auto axes (root/subtree path) collapse to the laid-out content extent —
+        // shrink-wrap. EXCEPT a grow>0 node's main axis: grow means "fill the
+        // available space", so it keeps `available` even at the root (a full-window
+        // overlay scrim fills the window; a grow=0 menu still shrink-wraps to content).
+        const fill_main = style.flex_grow > 0;
+        const main_is_row = style.flex_direction.is_row();
+        const keep_w = fill_main and main_is_row; // row -> main axis is width
+        const keep_h = fill_main and !main_is_row; // column -> main axis is height
+        if (w_auto and children_size.width > 0 and !keep_w) final_width = children_size.width;
+        if (h_auto and children_size.height > 0 and !keep_h) final_height = children_size.height;
 
         final_width = self.clamp_axis(
             final_width,
@@ -276,7 +290,6 @@ pub const LayoutEngine = struct {
         var base: [MAX_FLEX_CHILDREN]ChildBase = undefined;
         var total_fixed: f32 = 0;
         var total_flex_grow: f32 = 0;
-        var total_shrink_weight: f32 = 0;
         for (node.children.items[0..n], 0..) |child_id, bi| {
             std.debug.assert(child_id.index < self.nodes.items.len);
             base[bi] = self.child_base(child_id, is_row, main_size, cross_size, depth);
@@ -285,17 +298,14 @@ pub const LayoutEngine = struct {
             const eff = @max(base[bi].main, base[bi].min_main);
             total_fixed += eff;
             total_flex_grow += base[bi].grow;
-            total_shrink_weight += base[bi].shrink * eff;
         }
 
         const free = main_size - total_fixed - total_gap;
         const remaining = @max(free, 0);
-        const flex_unit = if (total_flex_grow > 0) remaining / total_flex_grow else 0;
-        const overflow = @max(-free, 0);
-        const shrink_unit = if (overflow > 0 and total_shrink_weight > 0)
-            overflow / total_shrink_weight
-        else
-            0;
+        // Final main size per child, resolved iteratively so a min- or max-clamped
+        // child's unusable share is redistributed to the still-flexible ones.
+        var resolved: [MAX_FLEX_CHILDREN]f32 = undefined;
+        resolve_flex_mains(base[0..n], main_size - total_gap, resolved[0..n]);
 
         var main_offset: f32 = self.resolve_px(
             if (is_row) style.padding.left else style.padding.top,
@@ -342,14 +352,9 @@ pub const LayoutEngine = struct {
             else
                 self.resolve_length(child.style.width, cross_size);
 
-            // Grow adds, shrink subtracts (shrink*base weighted), floored at the
-            // child's min-main and never below 0. base[idx].main already folds in
-            // flex_basis / measured / intrinsic / explicit size.
-            const eff = @max(base[idx].main, base[idx].min_main);
-            const grow_add = flex_unit * base[idx].grow;
-            const shrink_take = shrink_unit * base[idx].shrink * eff;
-            const grown = eff + grow_add - shrink_take;
-            actual_main = @max(@min(grown, base[idx].max_main), base[idx].min_main);
+            // The resolver already folded in grow/shrink distribution and the
+            // min/max clamps (with redistribution when a clamp binds).
+            actual_main = resolved[idx];
             actual_cross = style_cross orelse base[idx].cross;
             if (!base[idx].has_content and style_cross == null) actual_cross = cross_size;
             var child_cross_offset = cross_offset;
@@ -446,6 +451,82 @@ pub const LayoutEngine = struct {
         has_content: bool,
     };
     const MAX_FLEX_CHILDREN = 128;
+
+    // Resolve every child's final main size (the CSS flexible-lengths loop):
+    // distribute free space by grow, or overflow by shrink weighted by base size.
+    // A child whose min (shrinking) or max (growing) clamps its target is frozen at
+    // the clamp and the pass reruns so the unusable share is redistributed among the
+    // still-flexible children. A single pass would let every clamped child overflow
+    // the container by its clamped amount (e.g. fixed chrome rows above a
+    // shrinkable pane pushing the pane's content past a fixed-height ancestor).
+    fn resolve_flex_mains(base: []const ChildBase, available: f32, resolved: []f32) void {
+        std.debug.assert(base.len == resolved.len);
+        std.debug.assert(base.len <= MAX_FLEX_CHILDREN);
+        var frozen: [MAX_FLEX_CHILDREN]bool = undefined;
+        var sum_eff: f32 = 0;
+        for (base, 0..) |cb, i| {
+            frozen[i] = false;
+            sum_eff += @max(cb.main, cb.min_main);
+        }
+        const growing = sum_eff <= available;
+        // An inflexible child (no grow when growing / no shrink when shrinking)
+        // stays at its clamped base.
+        for (base, 0..) |cb, i| {
+            const flex = if (growing) cb.grow else cb.shrink;
+            if (flex == 0) {
+                const eff = @max(cb.main, cb.min_main);
+                resolved[i] = @max(@min(eff, cb.max_main), cb.min_main);
+                frozen[i] = true;
+            }
+        }
+        var pass: usize = 0;
+        while (pass <= base.len) : (pass += 1) {
+            var free = available;
+            var total_weight: f32 = 0;
+            for (base, 0..) |cb, i| {
+                if (frozen[i]) {
+                    free -= resolved[i];
+                } else {
+                    const eff = @max(cb.main, cb.min_main);
+                    free -= eff;
+                    total_weight += if (growing) cb.grow else cb.shrink * eff;
+                }
+            }
+            if (total_weight <= 0) break;
+            const unit = if (growing) @max(free, 0) / total_weight else @max(-free, 0) / total_weight;
+            var violated = false;
+            for (base, 0..) |cb, i| {
+                if (frozen[i]) continue;
+                const eff = @max(cb.main, cb.min_main);
+                const target = if (growing) eff + unit * cb.grow else eff - unit * cb.shrink * eff;
+                if (growing and target > cb.max_main) {
+                    resolved[i] = @max(cb.max_main, cb.min_main);
+                    frozen[i] = true;
+                    violated = true;
+                } else if (!growing and target < cb.min_main) {
+                    resolved[i] = cb.min_main;
+                    frozen[i] = true;
+                    violated = true;
+                }
+            }
+            if (!violated) {
+                for (base, 0..) |cb, i| {
+                    if (frozen[i]) continue;
+                    const eff = @max(cb.main, cb.min_main);
+                    const target = if (growing) eff + unit * cb.grow else eff - unit * cb.shrink * eff;
+                    resolved[i] = @max(@min(target, cb.max_main), cb.min_main);
+                }
+                return;
+            }
+        }
+        // Everything frozen (or nothing flexible): any child not yet resolved keeps
+        // its clamped base.
+        for (base, 0..) |cb, i| {
+            if (frozen[i]) continue;
+            const eff = @max(cb.main, cb.min_main);
+            resolved[i] = @max(@min(eff, cb.max_main), cb.min_main);
+        }
+    }
 
     // flex_basis seeds the main-axis base before grow/shrink; .auto falls through
     // to width/height/content. Resolved against the container main extent.
@@ -1085,6 +1166,13 @@ pub const LayoutEngine = struct {
         if (depth > MAX_LAYOUT_DEPTH) return 0;
         std.debug.assert(child_id.index < self.nodes.items.len);
         const child = &self.nodes.items[child_id.index];
+
+        // An explicit min on the main axis overrides the automatic min-content probe
+        // (CSS: an explicit min-size replaces the content minimum). This is what lets
+        // a scroll viewport (min-height:0) report a 0 min so a fixed-height ancestor
+        // can bound it, instead of inheriting its tall, clipped child's height.
+        const explicit_min = if (is_row) child.style.min_width else child.style.min_height;
+        if (explicit_min != .auto) return self.resolve_length(explicit_min, 0) orelse 0;
 
         if (child.measure_fn) |measure_fn| {
             if (is_row) {

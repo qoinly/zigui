@@ -14,6 +14,10 @@ pub const CFDictionaryRef = ?*anyopaque;
 pub const CFArrayRef = ?*anyopaque;
 pub const CFAttributedStringRef = ?*anyopaque;
 pub const CFNumberRef = ?*anyopaque;
+pub const CFURLRef = ?*anyopaque;
+pub const CFErrorRef = ?*anyopaque;
+pub const CTFontManagerScope = u32;
+pub const kCTFontManagerScopeProcess: CTFontManagerScope = 1;
 pub const CTFontRef = ?*anyopaque;
 pub const CTRunRef = ?*anyopaque;
 pub const CTLineRef = ?*anyopaque;
@@ -23,6 +27,7 @@ pub const CGContextRef = ?*anyopaque;
 
 pub const CFStringEncoding = u32;
 pub const CFNumberType = c_long;
+pub const kCFNumberIntType: CFNumberType = 9;
 pub const CTFontUIFontType = u32;
 pub const CTFontOrientation = u32;
 
@@ -59,6 +64,7 @@ pub extern "CoreFoundation" const kCFTypeDictionaryKeyCallBacks: anyopaque;
 pub extern "CoreFoundation" const kCFTypeDictionaryValueCallBacks: anyopaque;
 
 pub extern "CoreText" const kCTFontAttributeName: CFStringRef;
+pub extern "CoreText" const kCTLigatureAttributeName: CFStringRef;
 pub extern "CoreText" const kCTFontTraitsAttribute: CFStringRef;
 pub extern "CoreText" const kCTFontWeightTrait: CFStringRef;
 
@@ -111,6 +117,18 @@ pub extern "CoreFoundation" fn CFNumberCreate(
     type_: CFNumberType,
     value_ptr: *const anyopaque,
 ) CFNumberRef;
+
+pub extern "CoreFoundation" fn CFURLCreateFromFileSystemRepresentation(
+    alloc: CFAllocatorRef,
+    buffer: [*]const u8,
+    buf_len: CFIndex,
+    is_directory: Boolean,
+) CFURLRef;
+pub extern "CoreText" fn CTFontManagerRegisterFontsForURL(
+    font_url: CFURLRef,
+    scope: CTFontManagerScope,
+    err: ?*CFErrorRef,
+) Boolean;
 
 pub extern "CoreText" fn CTFontCreateWithName(
     name: CFStringRef,

@@ -160,6 +160,9 @@ pub const CustomShellHandle = struct {
         return false;
     }
 
+    pub fn minimize(_: CustomShellHandle) void {}
+    pub fn hide(_: CustomShellHandle) void {}
+
     pub fn is_key(self: CustomShellHandle) bool {
         _ = self;
         return true;

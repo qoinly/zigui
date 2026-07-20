@@ -4,6 +4,7 @@
 // grayscale coverage mask. Vtable prefixes are typed only through the methods
 // the text system calls; earlier slots are pointer-sized placeholders.
 
+const std = @import("std");
 const win32 = @import("win32.zig");
 const com = @import("com.zig");
 
@@ -91,7 +92,12 @@ pub const IDWriteFactory = extern struct {
         CreateCustomFontCollection: *const anyopaque,
         RegisterFontCollectionLoader: *const anyopaque,
         UnregisterFontCollectionLoader: *const anyopaque,
-        CreateFontFileReference: *const anyopaque,
+        CreateFontFileReference: *const fn (
+            *IDWriteFactory,
+            [*:0]const u16,
+            ?*const anyopaque,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
         CreateCustomFontFileReference: *const anyopaque,
         CreateFontFace: *const anyopaque,
         CreateRenderingParams: *const anyopaque,
@@ -127,6 +133,13 @@ pub const IDWriteFactory = extern struct {
     ) HRESULT {
         return self.vtable.GetSystemFontCollection(self, out, check_updates);
     }
+    pub fn create_font_file_reference(
+        self: *IDWriteFactory,
+        path: [*:0]const u16,
+        out: *?*anyopaque,
+    ) HRESULT {
+        return self.vtable.CreateFontFileReference(self, path, null, out);
+    }
     pub fn create_glyph_run_analysis(
         self: *IDWriteFactory,
         run: *const DWRITE_GLYPH_RUN,
@@ -150,6 +163,145 @@ pub const IDWriteFactory = extern struct {
         );
     }
     pub fn release(self: *IDWriteFactory) void {
+        _ = self.vtable.Release(self);
+    }
+};
+
+pub const IID_IDWriteFactory5 = com.guid(
+    0x958db99a,
+    0xbe2a,
+    0x4f09,
+    0xaf,
+    0x7d,
+    0x65,
+    0x18,
+    0x98,
+    0x03,
+    0xd1,
+    0xd3,
+);
+
+// IDWriteFactory5 (Win10 1703+), typed only at the two slots the app-font path
+// calls. Factory5 carries the whole factory..factory4 chain, so the factory3
+// CreateFontCollectionFromFontSet slot lives in this same vtable. The
+// CreateFontFaceReference and ComputeGlyphOrigins overload pairs each occupy
+// two fixed slots, so the indices below are stable.
+pub const IDWriteFactory5 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0..2).
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDWriteFactory5) callconv(.winapi) u32,
+        // IDWriteFactory (slots 3..23).
+        GetSystemFontCollection: *const anyopaque,
+        CreateCustomFontCollection: *const anyopaque,
+        RegisterFontCollectionLoader: *const anyopaque,
+        UnregisterFontCollectionLoader: *const anyopaque,
+        CreateFontFileReference: *const anyopaque,
+        CreateCustomFontFileReference: *const anyopaque,
+        CreateFontFace: *const anyopaque,
+        CreateRenderingParams: *const anyopaque,
+        CreateMonitorRenderingParams: *const anyopaque,
+        CreateCustomRenderingParams: *const anyopaque,
+        RegisterFontFileLoader: *const anyopaque,
+        UnregisterFontFileLoader: *const anyopaque,
+        CreateTextFormat: *const anyopaque,
+        CreateTypography: *const anyopaque,
+        GetGdiInterop: *const anyopaque,
+        CreateTextLayout: *const anyopaque,
+        CreateGdiCompatibleTextLayout: *const anyopaque,
+        CreateEllipsisTrimmingSign: *const anyopaque,
+        CreateTextAnalyzer: *const anyopaque,
+        CreateNumberSubstitution: *const anyopaque,
+        CreateGlyphRunAnalysis: *const anyopaque,
+        // IDWriteFactory1 (slots 24..25).
+        GetEudcFontCollection: *const anyopaque,
+        CreateCustomRenderingParams1: *const anyopaque,
+        // IDWriteFactory2 (slots 26..30).
+        GetSystemFontFallback: *const anyopaque,
+        CreateFontFallbackBuilder: *const anyopaque,
+        TranslateColorGlyphRun: *const anyopaque,
+        CreateCustomRenderingParams2: *const anyopaque,
+        CreateGlyphRunAnalysis2: *const anyopaque,
+        // IDWriteFactory3 (slots 31..39).
+        CreateGlyphRunAnalysis3: *const anyopaque,
+        CreateCustomRenderingParams3: *const anyopaque,
+        CreateFontFaceReferenceFromFile: *const anyopaque,
+        CreateFontFaceReference: *const anyopaque,
+        GetSystemFontSet: *const anyopaque,
+        CreateFontSetBuilder: *const anyopaque,
+        CreateFontCollectionFromFontSet: *const fn (
+            *IDWriteFactory5,
+            *anyopaque,
+            *?*IDWriteFontCollection,
+        ) callconv(.winapi) HRESULT,
+        GetSystemFontCollection3: *const anyopaque,
+        GetFontDownloadQueue: *const anyopaque,
+        // IDWriteFactory4 (slots 40..42).
+        TranslateColorGlyphRun4: *const anyopaque,
+        ComputeGlyphOriginsGdi: *const anyopaque,
+        ComputeGlyphOrigins: *const anyopaque,
+        // IDWriteFactory5 (slot 43).
+        CreateFontSetBuilder1: *const fn (
+            *IDWriteFactory5,
+            *?*IDWriteFontSetBuilder1,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(VTable, "CreateFontCollectionFromFontSet") ==
+            37 * @sizeOf(*const anyopaque));
+        std.debug.assert(@offsetOf(VTable, "CreateFontSetBuilder1") ==
+            43 * @sizeOf(*const anyopaque));
+    }
+
+    pub fn create_font_set_builder(self: *IDWriteFactory5, out: *?*IDWriteFontSetBuilder1) HRESULT {
+        return self.vtable.CreateFontSetBuilder1(self, out);
+    }
+    pub fn create_font_collection_from_font_set(
+        self: *IDWriteFactory5,
+        font_set: *anyopaque,
+        out: *?*IDWriteFontCollection,
+    ) HRESULT {
+        return self.vtable.CreateFontCollectionFromFontSet(self, font_set, out);
+    }
+};
+
+// The AddFontFaceReference overload pair occupies slots 3..4; AddFontFile (the
+// IDWriteFontSetBuilder1 extension) sits past AddFontSet and CreateFontSet.
+pub const IDWriteFontSetBuilder1 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*IDWriteFontSetBuilder1) callconv(.winapi) u32,
+        AddFontFaceReferenceWithProperties: *const anyopaque,
+        AddFontFaceReference: *const anyopaque,
+        AddFontSet: *const anyopaque,
+        CreateFontSet: *const fn (
+            *IDWriteFontSetBuilder1,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
+        AddFontFile: *const fn (
+            *IDWriteFontSetBuilder1,
+            *anyopaque,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(VTable, "AddFontFile") == 7 * @sizeOf(*const anyopaque));
+    }
+
+    pub fn add_font_file(self: *IDWriteFontSetBuilder1, file: *anyopaque) HRESULT {
+        return self.vtable.AddFontFile(self, file);
+    }
+    pub fn create_font_set(self: *IDWriteFontSetBuilder1, out: *?*anyopaque) HRESULT {
+        return self.vtable.CreateFontSet(self, out);
+    }
+    pub fn release(self: *IDWriteFontSetBuilder1) void {
         _ = self.vtable.Release(self);
     }
 };

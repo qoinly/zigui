@@ -3,6 +3,13 @@ const icon_set = @import("../icon.zig");
 
 pub const Rgba = color.Rgba;
 
+// A colored byte-range over a text field's value, for native-painted single-line
+// editors that colorize their text themselves (see custom_shell.color_text_field).
+// Offsets are UTF-8 byte offsets into the value (converted per platform). A flat
+// struct here (not kit.textarea.TextSpan) keeps the platform layer free of a kit
+// import, which would cycle through custom_shell.
+pub const FieldSpan = struct { start: u32, end: u32, color: Rgba };
+
 pub const ChromeKind = enum { native, custom };
 
 pub const Feel = enum { flat, liquid_glass, transparent };
@@ -231,7 +238,11 @@ pub const HitBox = struct {
     // draggable item can finalize a drop / distinguish click.
     on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
     on_context: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
-    on_hover_change: ?*const fn (ctx: ?*anyopaque, hovered: bool) void = null,
+    // Middle-button press (e.g. middle-click a tab to close it).
+    on_middle: ?*const fn (ctx: ?*anyopaque) void = null,
+    // A stable id recorded as hovered while the pointer is over this box (a view
+    // reads the topmost via the frame to reveal-on-hover, no callback / stale ctx).
+    hover_id: []const u8 = "",
     ctx: ?*anyopaque = null,
 };
 

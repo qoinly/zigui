@@ -9,6 +9,8 @@ const win32 = @import("win32.zig");
 const com = @import("com.zig");
 const dxgi = @import("dxgi.zig");
 const d3d11 = @import("d3d11.zig");
+const dcomp = @import("dcomp.zig");
+const loop = @import("loop.zig");
 const primitives = @import("../../primitives.zig");
 
 const Quad = primitives.Quad;
@@ -32,8 +34,17 @@ const MAX_FRAME_DIM: u32 = 16384;
 pub const max_frames_in_flight: u32 = 3;
 
 // Modal-backdrop blur radius in points; scaled to pixels at draw time so the
-// frost tracks DPI. Mirrors the macOS MPSImageGaussianBlur sigma (12px at 2x).
+// frost tracks DPI. Mirrors the macOS quarter-res blur look (12px at 2x).
 const BLUR_SIGMA_PT: f32 = 6.0;
+
+// The blur chain runs at quarter res (sigma, memory, and fill rate shrink with
+// it); the composite blit upsamples back. Mirrors the macOS Metal chain.
+const BLUR_DOWNSAMPLE: u32 = 4;
+
+// Drawn frames without a modal pass before the offscreen trio is released
+// (a full-window scene target + the quarter-res blur pair); the next modal
+// recreates it. Mirrors macOS.
+const OFFSCREEN_IDLE_FRAMES: u32 = 8;
 
 pub const ClearColor = extern struct {
     rgba: [4]f32,
@@ -272,6 +283,11 @@ pub const Renderer = struct {
     context: *d3d11.ID3D11DeviceContext,
     swapchain: *dxgi.IDXGISwapChain,
     hwnd: win32.HWND,
+    // DirectComposition wiring: the visual DWM composes atomically with the
+    // window frame. All null on the HWND-swapchain fallback (no dcomp.dll).
+    dcomp_device: ?*anyopaque = null,
+    dcomp_target: ?*anyopaque = null,
+    dcomp_visual: ?*anyopaque = null,
     rtv: ?*anyopaque = null,
     // ID3D11Device1 (Windows 8+), QI'd once at init; gates
     // imported_nv12_handle_supported and opens NT-handle shared frames. Null when
@@ -307,9 +323,12 @@ pub const Renderer = struct {
     sampler_state: ?*anyopaque = null,
 
     scene_target: Offscreen = .{},
-    blur_target: Offscreen = .{},
+    // Quarter-res ping-pong pair for the separable blur; blur_a ends up blurred.
+    blur_a: Offscreen = .{},
+    blur_b: Offscreen = .{},
     offscreen_w: u32 = 0,
     offscreen_h: u32 = 0,
+    offscreen_idle_frames: u32 = 0,
 
     last_w: u32 = 0,
     last_h: u32 = 0,
@@ -333,11 +352,73 @@ pub const Renderer = struct {
         const w: u32 = @intCast(@max(rect.right - rect.left, 1));
         const h: u32 = @intCast(@max(rect.bottom - rect.top, 1));
 
+        // DirectComposition first: DWM composes the swapchain visual atomically
+        // with the window frame, so a live resize never shows the previous frame
+        // stretched to the new size (the Zed / macOS feel). The plain HWND
+        // swapchain stays as the fallback when dcomp.dll is unavailable.
+        const parts = create_composition_parts(hwnd, w, h) orelse
+            try create_hwnd_parts(hwnd, w, h);
+
+        var self = Renderer{
+            .device = parts.device,
+            .context = parts.context,
+            .swapchain = parts.swapchain,
+            .dcomp_device = parts.dcomp_device,
+            .dcomp_target = parts.dcomp_target,
+            .dcomp_visual = parts.dcomp_visual,
+            .hwnd = hwnd,
+            .last_w = w,
+            .last_h = h,
+        };
+        errdefer self.deinit();
+
+        try self.ensure_rtv();
+        try self.build_pipelines();
+        try self.build_instance_buffers();
+        try self.build_states();
+
+        // imported_nv12 needs ID3D11Device1::OpenSharedResource1; its absence just
+        // disables that path, leaving the CPU staging path as the fallback.
+        var dev1: ?*anyopaque = null;
+        if (com.succeeded(com.query_interface(self.device, &d3d11.IID_ID3D11Device1, &dev1))) {
+            self.device1 = @ptrCast(@alignCast(dev1.?));
+        }
+
+        // DXGI queues up to 3 presents by default; a UI submits one small frame
+        // per input, so cap the queue at 1 to keep input-to-photon tight. No
+        // throughput cost at this workload; failure just keeps the default.
+        var dxgi_dev: ?*anyopaque = null;
+        if (com.succeeded(com.query_interface(self.device, &dxgi.IID_IDXGIDevice1, &dxgi_dev))) {
+            const dd: *dxgi.IDXGIDevice1 = @ptrCast(@alignCast(dxgi_dev.?));
+            _ = dd.set_maximum_frame_latency(1);
+            com.release(&dxgi_dev);
+        }
+
+        return self;
+    }
+
+    const Parts = struct {
+        device: *d3d11.ID3D11Device,
+        context: *d3d11.ID3D11DeviceContext,
+        swapchain: *dxgi.IDXGISwapChain,
+        dcomp_device: ?*anyopaque = null,
+        dcomp_target: ?*anyopaque = null,
+        dcomp_visual: ?*anyopaque = null,
+    };
+
+    // The pre-composition path: a swapchain bound to the HWND directly. DWM
+    // stretches its last frame across live-resize gaps, so this is only the
+    // fallback when DirectComposition is unavailable.
+    fn create_hwnd_parts(hwnd: win32.HWND, w: u32, h: u32) Error!Parts {
         var desc = dxgi.DXGI_SWAP_CHAIN_DESC{
             .BufferDesc = .{ .Width = w, .Height = h, .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM },
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = 2,
+            // 3, not 2: with flip-model, Present(0) blocks when every buffer is
+            // still held by DWM - which happens exactly during a live resize,
+            // when the compositor sits on frames longer. A third buffer keeps
+            // the resize paints from stalling on the compositor.
+            .BufferCount = 3,
             .OutputWindow = hwnd,
             .Windowed = win32.TRUE,
             .SwapEffect = dxgi.DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -365,30 +446,121 @@ pub const Renderer = struct {
         if (com.failed(hr) or device == null or swapchain == null or context == null) {
             return error.DeviceCreateFailed;
         }
+        return .{ .device = device.?, .context = context.?, .swapchain = swapchain.? };
+    }
 
-        var self = Renderer{
-            .device = device.?,
-            .context = context.?,
-            .swapchain = swapchain.?,
-            .hwnd = hwnd,
-            .last_w = w,
-            .last_h = h,
+    // Device + composition swapchain + DComp visual tree, or null to fall back
+    // (dcomp.dll absent, or any step failing). Failure releases every partial.
+    fn create_composition_parts(hwnd: win32.HWND, w: u32, h: u32) ?Parts {
+        const dcomp_create = dcomp.create_device_proc() orelse return null;
+
+        const levels = [_]u32{d3d11.D3D_FEATURE_LEVEL_11_0};
+        var device: ?*d3d11.ID3D11Device = null;
+        var context: ?*d3d11.ID3D11DeviceContext = null;
+        const hr = d3d11.D3D11CreateDevice(
+            null,
+            d3d11.D3D_DRIVER_TYPE_HARDWARE,
+            null,
+            0,
+            &levels,
+            levels.len,
+            d3d11.D3D11_SDK_VERSION,
+            &device,
+            null,
+            &context,
+        );
+        if (com.failed(hr) or device == null or context == null) return null;
+
+        if (compose(hwnd, w, h, device.?, dcomp_create)) |c| {
+            return .{
+                .device = device.?,
+                .context = context.?,
+                .swapchain = c.swapchain,
+                .dcomp_device = c.device,
+                .dcomp_target = c.target,
+                .dcomp_visual = c.visual,
+            };
+        }
+        _ = context.?.vtable.Release(context.?);
+        _ = device.?.vtable.Release(device.?);
+        return null;
+    }
+
+    const Composition = struct {
+        swapchain: *dxgi.IDXGISwapChain,
+        device: ?*anyopaque,
+        target: ?*anyopaque,
+        visual: ?*anyopaque,
+    };
+
+    // Wire hwnd -> DComp target -> visual -> composition swapchain and commit
+    // the tree once; afterwards plain Present() publishes frames through it.
+    fn compose(
+        hwnd: win32.HWND,
+        w: u32,
+        h: u32,
+        device: *d3d11.ID3D11Device,
+        dcomp_create: dcomp.CreateDeviceFn,
+    ) ?Composition {
+        var dxgi_dev: ?*anyopaque = null;
+        if (com.failed(com.query_interface(device, &dxgi.IID_IDXGIDevice1, &dxgi_dev)) or dxgi_dev == null)
+            return null;
+        defer com.release(&dxgi_dev);
+
+        var factory_raw: ?*anyopaque = null;
+        if (com.failed(dxgi.CreateDXGIFactory1(&dxgi.IID_IDXGIFactory2, &factory_raw)) or factory_raw == null)
+            return null;
+        defer com.release(&factory_raw);
+        const factory: *dxgi.IDXGIFactory2 = @ptrCast(@alignCast(factory_raw.?));
+
+        const desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
+            .Width = w,
+            .Height = h,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            // Same triple-buffer rationale as the HWND path.
+            .BufferCount = 3,
+            .Scaling = dxgi.DXGI_SCALING_STRETCH,
+            .SwapEffect = dxgi.DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            .AlphaMode = dxgi.DXGI_ALPHA_MODE_IGNORE,
+            .Flags = 0,
         };
-        errdefer self.deinit();
-
-        try self.ensure_rtv();
-        try self.build_pipelines();
-        try self.build_instance_buffers();
-        try self.build_states();
-
-        // imported_nv12 needs ID3D11Device1::OpenSharedResource1; its absence just
-        // disables that path, leaving the CPU staging path as the fallback.
-        var dev1: ?*anyopaque = null;
-        if (com.succeeded(com.query_interface(self.device, &d3d11.IID_ID3D11Device1, &dev1))) {
-            self.device1 = @ptrCast(@alignCast(dev1.?));
+        var swapchain: ?*dxgi.IDXGISwapChain = null;
+        if (com.failed(factory.create_swap_chain_for_composition(@ptrCast(device), &desc, &swapchain)) or
+            swapchain == null)
+        {
+            return null;
         }
 
-        return self;
+        var dev_raw: ?*anyopaque = null;
+        var target_raw: ?*anyopaque = null;
+        var visual_raw: ?*anyopaque = null;
+        const ok = blk: {
+            if (com.failed(dcomp_create(dxgi_dev.?, &dcomp.IID_IDCompositionDevice, &dev_raw)) or
+                dev_raw == null) break :blk false;
+            const dd: *dcomp.IDCompositionDevice = @ptrCast(@alignCast(dev_raw.?));
+            var comp_target: ?*dcomp.IDCompositionTarget = null;
+            if (com.failed(dd.create_target_for_hwnd(hwnd, win32.TRUE, &comp_target)) or
+                comp_target == null) break :blk false;
+            target_raw = @ptrCast(comp_target.?);
+            var visual: ?*dcomp.IDCompositionVisual = null;
+            if (com.failed(dd.create_visual(&visual)) or visual == null) break :blk false;
+            visual_raw = @ptrCast(visual.?);
+            if (com.failed(visual.?.set_content(@ptrCast(swapchain.?)))) break :blk false;
+            if (com.failed(comp_target.?.set_root(visual.?))) break :blk false;
+            if (com.failed(dd.commit())) break :blk false;
+            break :blk true;
+        };
+        if (!ok) {
+            com.release(&visual_raw);
+            com.release(&target_raw);
+            com.release(&dev_raw);
+            swapchain.?.release();
+            std.log.warn("d3d11: DirectComposition setup failed; using HWND swapchain", .{});
+            return null;
+        }
+        return .{ .swapchain = swapchain.?, .device = dev_raw, .target = target_raw, .visual = visual_raw };
     }
 
     pub fn deinit(self: *Renderer) void {
@@ -402,7 +574,8 @@ pub const Renderer = struct {
         com.release(&self.raster_state_scissor);
         com.release(&self.sampler_state);
         self.scene_target.release();
-        self.blur_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
         for ([_]*InstanceBuffer{
             &self.quad_buffer,     &self.sprite_buffer, &self.color_sprite_buffer,
             &self.polyline_buffer, &self.line_buffer,   &self.ring_buffer,
@@ -419,6 +592,9 @@ pub const Renderer = struct {
             com.release(&p.vs);
             com.release(&p.ps);
         }
+        com.release(&self.dcomp_visual);
+        com.release(&self.dcomp_target);
+        com.release(&self.dcomp_device);
         _ = self.swapchain.vtable.Release(self.swapchain);
         _ = self.context.vtable.Release(self.context);
         _ = self.device.vtable.Release(self.device);
@@ -495,6 +671,61 @@ pub const Renderer = struct {
         width: u32,
         height: u32,
     };
+
+    // Static image textures (ImageSource): one immutable BGRA texture + SRV per image,
+    // uploaded at creation. Pixels are only read during this call, so the caller may
+    // free them afterward.
+    pub fn create_image_texture(self: *Renderer, bgra: []const u8, width: u32, height: u32) ?*anyopaque {
+        if (width == 0 or height == 0 or width > MAX_FRAME_DIM or height > MAX_FRAME_DIM) return null;
+        if (bgra.len < @as(usize, width) * height * 4) return null;
+        const surface = std.heap.page_allocator.create(FrameSurface) catch return null;
+        surface.* = FrameSurface.init_bgra(width, height, width * 4, @constCast(bgra.ptr));
+        const desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = width,
+            .Height = height,
+            .MipLevels = 1,
+            .ArraySize = 1,
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Usage = d3d11.D3D11_USAGE_IMMUTABLE,
+            .BindFlags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags = 0,
+            .MiscFlags = 0,
+        };
+        const initial = d3d11.D3D11_SUBRESOURCE_DATA{
+            .pSysMem = bgra.ptr,
+            .SysMemPitch = width * 4,
+            .SysMemSlicePitch = 0,
+        };
+        if (com.failed(self.device.create_texture2d(&desc, &initial, &surface.state.tex))) {
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        const srv_desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+            .Format = dxgi.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .ViewDimension = d3d11.D3D11_SRV_DIMENSION_TEXTURE2D,
+            .u0 = 0,
+            .u1 = 1,
+        };
+        if (com.failed(self.device.create_srv(surface.state.tex.?, &srv_desc, &surface.state.srv))) {
+            com.release(&surface.state.tex);
+            std.heap.page_allocator.destroy(surface);
+            return null;
+        }
+        return @ptrCast(surface);
+    }
+
+    // The sampleable SRV for primitives.Frame.tex.
+    pub fn image_texture_view(handle: *anyopaque) *anyopaque {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        return surface.state.srv.?;
+    }
+
+    pub fn destroy_image_texture(handle: *anyopaque) void {
+        const surface: *FrameSurface = @ptrCast(@alignCast(handle));
+        surface.deinit();
+        std.heap.page_allocator.destroy(surface);
+    }
 
     pub fn import_nv12(self: *Renderer, pixel_buffer: *anyopaque) ?Nv12Textures {
         const surface: *FrameSurface = @ptrCast(@alignCast(pixel_buffer));
@@ -1051,6 +1282,9 @@ pub const Renderer = struct {
 
     pub fn request_redraw(self: *Renderer) void {
         self.dirty = true;
+        // Snap an idle vsync wait so this frame lands within one compositor
+        // frame instead of the idle-poll interval.
+        loop.wake_all();
     }
 
     fn ensure_rtv(self: *Renderer) Error!void {
@@ -1171,16 +1405,7 @@ pub const Renderer = struct {
         const h_pt = @as(f32, @floatFromInt(h)) / scale;
         self.update_viewport(w_pt, h_pt);
 
-        const viewport = d3d11.D3D11_VIEWPORT{
-            .TopLeftX = 0,
-            .TopLeftY = 0,
-            .Width = @floatFromInt(w),
-            .Height = @floatFromInt(h),
-            .MinDepth = 0,
-            .MaxDepth = 1,
-        };
-        var viewports = [_]d3d11.D3D11_VIEWPORT{viewport};
-        self.context.rs_set_viewports(1, &viewports);
+        self.set_viewport(w, h);
 
         self.context.om_set_blend_state(self.blend_state, null, 0xFFFFFFFF);
         self.context.ia_set_primitive_topology(d3d11.D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1211,8 +1436,27 @@ pub const Renderer = struct {
             self.encode_scene(prims, sprites, mono_atlas, color_sprites, color_atlas);
         }
 
+        if (drew_modal) {
+            self.offscreen_idle_frames = 0;
+        } else if (self.scene_target.tex != null) {
+            self.offscreen_idle_frames += 1;
+            std.debug.assert(self.offscreen_idle_frames <= OFFSCREEN_IDLE_FRAMES);
+            if (self.offscreen_idle_frames == OFFSCREEN_IDLE_FRAMES) self.release_offscreen();
+        }
+
         _ = self.swapchain.present(0, 0);
         self.dirty = false;
+    }
+
+    fn release_offscreen(self: *Renderer) void {
+        std.debug.assert(self.scene_target.tex != null);
+        std.debug.assert(self.offscreen_w > 0 and self.offscreen_h > 0);
+        self.scene_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
+        self.offscreen_w = 0;
+        self.offscreen_h = 0;
+        self.offscreen_idle_frames = 0;
     }
 
     // Render backdrop -> offscreen, separable-blur it, composite onto the
@@ -1239,8 +1483,10 @@ pub const Renderer = struct {
         self.ensure_offscreen(w, h);
         const scene_rtv = self.scene_target.rtv orelse return false;
         const scene_srv = self.scene_target.srv orelse return false;
-        const aux_rtv = self.blur_target.rtv orelse return false;
-        const aux_srv = self.blur_target.srv orelse return false;
+        const a_rtv = self.blur_a.rtv orelse return false;
+        const a_srv = self.blur_a.srv orelse return false;
+        const b_rtv = self.blur_b.rtv orelse return false;
+        const b_srv = self.blur_b.srv orelse return false;
 
         var null_srv = [_]?*anyopaque{null};
         // D3D11 errors if a subresource is bound as SRV and RTV at once; unbind first.
@@ -1259,20 +1505,40 @@ pub const Renderer = struct {
             color_atlas,
         );
 
-        self.update_blur(w, h, BLUR_SIGMA_PT * scale);
+        // The chain drops to quarter res: viewport tracks each target's size,
+        // and sigma shrinks with the downsample so the look stays a 12px-at-2x
+        // frost. Three small passes replace two full-res ones.
+        const qw = @max(w / BLUR_DOWNSAMPLE, 1);
+        const qh = @max(h / BLUR_DOWNSAMPLE, 1);
+        self.set_viewport(qw, qh);
+
+        // Down: plain blit scene -> a.
+        var d_rtvs = [_]?*anyopaque{a_rtv};
+        self.context.om_set_render_targets(1, &d_rtvs, null);
+        self.fullscreen_pass(self.blit_pipeline, scene_srv);
+
+        const down_f: f32 = @floatFromInt(BLUR_DOWNSAMPLE);
+        self.update_blur(qw, qh, BLUR_SIGMA_PT * scale / down_f);
         var blur_cbs = [_]?*anyopaque{self.blur_cb};
         self.context.ps_set_constant_buffers(1, 1, &blur_cbs);
 
-        // Pass H: horizontal blur scene -> aux.
-        var h_rtvs = [_]?*anyopaque{aux_rtv};
+        // Pass H: horizontal blur a -> b.
+        var h_rtvs = [_]?*anyopaque{b_rtv};
         self.context.om_set_render_targets(1, &h_rtvs, null);
-        self.fullscreen_pass(self.blur_h_pipeline, scene_srv);
+        self.fullscreen_pass(self.blur_h_pipeline, a_srv);
 
-        // Backbuffer: clear, then vertical blur aux -> backbuffer (full).
+        // Pass V: vertical blur b -> a. Unbind a's SRV before it becomes the RTV.
+        self.context.ps_set_shader_resources(0, 1, &null_srv);
+        var v_rtvs = [_]?*anyopaque{a_rtv};
+        self.context.om_set_render_targets(1, &v_rtvs, null);
+        self.fullscreen_pass(self.blur_v_pipeline, b_srv);
+
+        // Backbuffer: clear, then the composite blit upsamples a back to full.
+        self.set_viewport(w, h);
         var b_rtvs = [_]?*anyopaque{rtv};
         self.context.om_set_render_targets(1, &b_rtvs, null);
         self.context.clear_render_target_view(rtv, &clear.rgba);
-        self.fullscreen_pass(self.blur_v_pipeline, aux_srv);
+        self.fullscreen_pass(self.blit_pipeline, a_srv);
 
         // Crisp title-bar strip: re-blit the unblurred backdrop over the top band.
         const top_px = m.crisp_top * scale;
@@ -1302,6 +1568,19 @@ pub const Renderer = struct {
         return true;
     }
 
+    fn set_viewport(self: *Renderer, w: u32, h: u32) void {
+        const viewport = d3d11.D3D11_VIEWPORT{
+            .TopLeftX = 0,
+            .TopLeftY = 0,
+            .Width = @floatFromInt(w),
+            .Height = @floatFromInt(h),
+            .MinDepth = 0,
+            .MaxDepth = 1,
+        };
+        var viewports = [_]d3d11.D3D11_VIEWPORT{viewport};
+        self.context.rs_set_viewports(1, &viewports);
+    }
+
     fn fullscreen_pass(self: *Renderer, pipeline: Pipeline, src_srv: ?*anyopaque) void {
         self.context.vs_set_shader(pipeline.vs);
         self.context.ps_set_shader(pipeline.ps);
@@ -1327,13 +1606,23 @@ pub const Renderer = struct {
         if (self.scene_target.tex != null and self.offscreen_w == w and self.offscreen_h == h)
             return;
         self.scene_target.release();
-        self.blur_target.release();
+        self.blur_a.release();
+        self.blur_b.release();
         self.offscreen_w = 0;
         self.offscreen_h = 0;
+        const qw = @max(w / BLUR_DOWNSAMPLE, 1);
+        const qh = @max(h / BLUR_DOWNSAMPLE, 1);
         self.scene_target = self.make_offscreen(w, h) orelse return;
-        self.blur_target = self.make_offscreen(w, h) orelse {
+        self.blur_a = self.make_offscreen(qw, qh) orelse {
             self.scene_target.release();
             self.scene_target = .{};
+            return;
+        };
+        self.blur_b = self.make_offscreen(qw, qh) orelse {
+            self.scene_target.release();
+            self.scene_target = .{};
+            self.blur_a.release();
+            self.blur_a = .{};
             return;
         };
         self.offscreen_w = w;
@@ -1572,7 +1861,7 @@ pub const Renderer = struct {
             return error.ShaderCompilerMissing;
         const proc = win32.GetProcAddress(module, "D3DCompile") orelse
             return error.ShaderCompilerMissing;
-        const compile: d3d11.PFN_D3DCompile = @ptrCast(proc);
+        const compile: d3d11.PFN_D3DCompile = @ptrCast(@alignCast(proc));
 
         self.quad_pipeline = try self.make_pipeline(compile, "quad_vertex", "quad_fragment");
         self.text_pipeline = try self.make_pipeline(compile, "text_vertex", "text_fragment");

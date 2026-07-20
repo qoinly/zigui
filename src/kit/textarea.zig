@@ -1,10 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../window/types.zig");
 const color = @import("../color.zig");
 const text_system = @import("../text_system.zig");
 const builder = @import("../render/builder.zig");
 const RenderError = builder.RenderError;
 const label = @import("../render/label.zig");
+const icon = @import("../render/icon.zig");
 const primitives = @import("../primitives.zig");
 const custom_paint = @import("../window/paint.zig");
 const custom_shell = @import("../custom_shell.zig");
@@ -13,12 +15,19 @@ const tr = @import("theme_resolve.zig");
 pub const RenderBuilder = builder.RenderBuilder;
 pub const Theme = types.Theme;
 pub const Rgba = color.Rgba;
+
+// The platform key model surfaces `mods.cmd` as the primary shortcut modifier (Cmd on macOS, Ctrl on
+// Linux/Windows) and `mods.alt` as Option/Alt. So caret jumps split by OS: macOS uses Cmd+arrow for
+// line/doc and Option+arrow for word; elsewhere Ctrl(=cmd)+arrow jumps by word and Ctrl+Home/End by doc.
+const is_mac = builtin.os.tag == .macos;
 pub const Quad = primitives.Quad;
 pub const SizeF = @import("../geometry.zig").SizeF;
 pub const FontWeight = text_system.FontWeight;
 
 pub const MAX_LINES: usize = 4096; // a body past this clamps (asserted cap)
 pub const MAX_VIS: usize = 8192; // visual rows (logical lines split by soft wrap); clamps past this
+const MAX_FOLDS: usize = 512; // multi-line bracket regions tracked for folding; clamps past this
+const MAX_FOLD_DEPTH: usize = 64; // bracket nesting the fold scanner tracks
 const TAB: usize = 4; // tab stop width in columns (caret/layout only)
 const CARET_W: f32 = 1.5;
 const BLINK_PERIOD_S: f64 = 1.0; // caret blink: 0.5s on / 0.5s off
@@ -108,6 +117,7 @@ pub const TextAreaState = struct {
     focused: bool = false,
     full: bool = false, // last insert hit capacity (caller may show a cap hint)
     scroll_y: f32 = 0, // local scroll; not the page's shared paint.scroll_y
+    scroll_to_caret: bool = false, // set by goto() so an external caret move scrolls into view
 
     // Selection: the fixed end (UTF-8 lead boundary). caret is the moving end, so
     // the range is [min(sel_anchor,caret), max). null or ==caret means none.
@@ -145,6 +155,20 @@ pub const TextAreaState = struct {
     vis_seq: u64 = std.math.maxInt(u64),
     vis_cols: usize = 0,
 
+    // Fold regions (multi-line bracket pairs), recomputed when the buffer changes; each is a
+    // logical [open_line, close_line] with close_line > open_line. `collapsed` is keyed by open
+    // line (kept across rebuilds; may drift on edits above a fold, which is fine — re-toggle).
+    fold_open: [MAX_FOLDS]u32 = undefined,
+    fold_close: [MAX_FOLDS]u32 = undefined,
+    fold_cchar: [MAX_FOLDS]u8 = undefined, // the region's closing bracket, shown in the collapsed marker
+    fold_n: usize = 0,
+    fold_seq: u64 = std.math.maxInt(u64),
+    collapsed: std.StaticBitSet(MAX_LINES) = std.StaticBitSet(MAX_LINES).initEmpty(),
+    collapse_seq: u64 = 0, // bumped on every fold toggle so the visual index rebuilds
+    vis_collapse_seq: u64 = std.math.maxInt(u64), // collapse_seq the current vis index reflects
+    vis_eof_folded: bool = false, // a collapsed region reached the last line; gutter draws a trailing number
+    folding_on: bool = false, // stashed from opts each render so edit-path re-indexing folds too
+
     char_w: f32 = 0, // mono advance, cached per font size
     char_w_size: f32 = 0,
 
@@ -153,6 +177,8 @@ pub const TextAreaState = struct {
     last_text_x: f32 = 0,
     last_text_y: f32 = 0,
     last_line_h: f32 = 0,
+    last_fold_x: f32 = 0, // fold-chevron column, so the click thunk can hit-test it
+    last_fold_w: f32 = 0,
     // Focus callback stashed from options each frame so the click handler can
     // tell the caller to unfocus its other text areas (only one drains keys).
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -160,6 +186,20 @@ pub const TextAreaState = struct {
 
     // Insert text at the caret (snippet / programmatic), replacing any selection.
     // Funnels through the same recorded chokepoint, so a caller can cmd-Z it.
+    // Move the caret to a byte offset (clearing any selection) and request a scroll so the
+    // target row comes into view next render. Used by find navigation to jump to a match.
+    pub fn goto(self: *TextAreaState, off: usize) void {
+        self.sel_anchor = null;
+        self.caret = @min(off, self.buf.len);
+        self.scroll_to_caret = true;
+    }
+
+    // Replace bytes [a, b) with `text` (line index + undo maintained). Used by find & replace.
+    pub fn replace_range(self: *TextAreaState, a: usize, b: usize, text: []const u8) void {
+        if (a > b or b > self.buf.len) return;
+        _ = edit_replace(self, a, b, text, false);
+    }
+
     pub fn insert_at_caret(self: *TextAreaState, text: []const u8) void {
         const sel = sel_range(self);
         _ = edit_replace(
@@ -172,6 +212,33 @@ pub const TextAreaState = struct {
     }
 };
 
+// Drives an inline completion popup the caller renders (e.g. an editor autocomplete). Zero-cost
+// when the option is null. While `open`, the editor routes the navigation keys (Up/Down move the
+// selection with wrap, Enter/Tab commit, Esc dismisses) into this struct instead of the caret, so
+// those keys never edit text; every other key (typing, backspace) still edits, which lets the
+// caller refilter as the user types. The caller owns the struct: set `open`/`count` each frame
+// (clamp `selected` to the current count), read `selected` to highlight a row, and consume
+// `commit`/`dismiss` (clearing them) to accept or close.
+pub const Completion = struct {
+    open: bool = false,
+    count: u32 = 0,
+    selected: u32 = 0,
+    commit: bool = false,
+    dismiss: bool = false,
+};
+
+// Drives snippet tabstops the caller manages (e.g. after accepting a function completion, its
+// argument placeholders). While `active`, Tab / Shift+Tab / Esc route into this struct instead of
+// indenting the editor, so the caller can move the selection to the next/previous placeholder or
+// exit. Typing still edits (the user replaces a placeholder). The caller owns the struct: set
+// `active`, place the selection, and consume `next`/`prev`/`cancel` (clearing them).
+pub const Snippet = struct {
+    active: bool = false,
+    next: bool = false,
+    prev: bool = false,
+    cancel: bool = false,
+};
+
 pub const TextAreaOptions = struct {
     state: *TextAreaState,
     spans: []const TextSpan = &.{}, // sorted by start, non-overlapping; empty = plain
@@ -182,10 +249,31 @@ pub const TextAreaOptions = struct {
     pad: f32 = 10,
     read_only: bool = false,
     wrap: bool = true, // soft-wrap long lines to the view width (no h-scroll exists)
+    line_numbers: bool = false, // a left gutter numbering logical (newline) lines
+    // Find highlighting: byte ranges to band behind the text (search matches); the one at
+    // `active_match` reads brighter. Caller navigates by setting caret/sel_anchor to a match.
+    match_ranges: []const [2]u32 = &.{},
+    active_match: i32 = -1,
+    bordered: bool = true, // false = fill only, no border/ring (a code pane in a panel)
+    // Code-editor smarts: bracket-pair match highlight, auto-close/skip brackets +
+    // quotes, pair backspace, Enter auto-indent, Tab/Shift+Tab indent-dedent. Off =
+    // a plain text field (Tab inserts a tab, Enter a bare newline).
+    code_edits: bool = false,
+    // Code folding: a fold chevron in the gutter for every multi-line {…} / […] region; a click
+    // collapses it to its header line. Requires line_numbers. Off = no fold column, no skipping.
+    folding: bool = false,
     font_family: []const u8 = "SF Mono",
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
     ctx: ?*anyopaque = null,
+    // Window-absolute caret rect [x, y, w, h], written every focused frame (zeroed when unfocused)
+    // for anchoring an overlay (a completion popup) at the caret. Like a node's rect_out: the value
+    // lands during render, so the overlay reads it the next frame.
+    caret_out: ?*[4]f32 = null,
+    // An inline completion popup's navigation state (see Completion). Null = no popup.
+    completion: ?*Completion = null,
+    // Snippet tabstop navigation (see Snippet). Null = not in a snippet.
+    snippet: ?*Snippet = null,
 };
 
 fn is_cont(b: u8) bool {
@@ -362,13 +450,93 @@ fn wrap_point(st: *const TextAreaState, start: usize, le: usize, cols_max: usize
 // O(buffer): re-wraps every line, unlike the incremental logical index next to
 // it. Accepted, not free - a text area is a bounded GUI control and edits are
 // human-paced; an incremental re-wrap would only pay off for huge bodies.
-fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
+// Fold regions: one stack pass over the buffer pairs brackets; a pair spanning >1 logical line
+// becomes a foldable [open_line, close_line]. Gated on edit_seq, so it runs only when text changes.
+// Brackets inside strings/comments aren't excluded (a pragmatic approximation for a v1 folder).
+fn rebuild_folds(st: *TextAreaState) void {
+    if (st.fold_seq == st.buf.edit_seq) return;
+    st.fold_seq = st.buf.edit_seq;
+    st.fold_n = 0;
+    const buf = st.buf.slice();
+    var stack: [MAX_FOLD_DEPTH]u32 = undefined; // opener offsets
+    var closer: [MAX_FOLD_DEPTH]u8 = undefined; // the closer each opener expects
+    var sp: usize = 0;
+    for (buf, 0..) |c, i| {
+        switch (c) {
+            '{', '[', '(' => if (sp < stack.len) {
+                stack[sp] = @intCast(i);
+                closer[sp] = if (c == '{') '}' else if (c == '[') ']' else ')';
+                sp += 1;
+            },
+            '}', ']', ')' => if (sp > 0 and closer[sp - 1] == c) {
+                sp -= 1;
+                const ol: u32 = @intCast(row_of_offset(st, stack[sp]));
+                const cl: u32 = @intCast(row_of_offset(st, i));
+                if (cl > ol and st.fold_n < MAX_FOLDS) {
+                    st.fold_open[st.fold_n] = ol;
+                    st.fold_close[st.fold_n] = cl;
+                    st.fold_cchar[st.fold_n] = c;
+                    st.fold_n += 1;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+// If a fold opens on `line`, the close line of its widest region (so nested pairs on one header
+// line collapse as a whole); else null. O(fold_n), fold_n small.
+fn fold_end_at(st: *const TextAreaState, line: usize) ?u32 {
+    var best: ?u32 = null;
+    for (0..st.fold_n) |k| {
+        if (st.fold_open[k] == line and (best == null or st.fold_close[k] > best.?)) best = st.fold_close[k];
+    }
+    return best;
+}
+
+fn line_is_collapsed(st: *const TextAreaState, line: usize) bool {
+    return line < MAX_LINES and st.collapsed.isSet(line) and fold_end_at(st, line) != null;
+}
+
+// The closing bracket of the widest region opening on `line` (matches fold_end_at's choice), for the
+// collapsed "…}" marker.
+fn fold_cchar_at(st: *const TextAreaState, line: usize) u8 {
+    var best: ?u32 = null;
+    var ch: u8 = '}';
+    for (0..st.fold_n) |k| {
+        if (st.fold_open[k] == line and (best == null or st.fold_close[k] > best.?)) {
+            best = st.fold_close[k];
+            ch = st.fold_cchar[k];
+        }
+    }
+    return ch;
+}
+
+fn rebuild_vis_index(st: *TextAreaState, cols_max: usize, folding: bool) void {
+    if (folding) rebuild_folds(st); // cheap no-op unless the buffer changed
+    st.vis_eof_folded = false;
     if (cols_max == 0) {
-        const n = @min(st.line_count, MAX_VIS);
-        @memcpy(st.vis_starts[0..n], st.line_starts[0..n]);
-        st.vis_count = n;
+        if (!folding) {
+            const n = @min(st.line_count, MAX_VIS);
+            @memcpy(st.vis_starts[0..n], st.line_starts[0..n]);
+            st.vis_count = n;
+        } else {
+            var v: usize = 0;
+            var r: usize = 0;
+            while (r < st.line_count and v < MAX_VIS) {
+                st.vis_starts[v] = st.line_starts[r];
+                v += 1;
+                if (line_is_collapsed(st, r)) {
+                    const close = fold_end_at(st, r).?;
+                    if (close == st.line_count - 1) st.vis_eof_folded = true;
+                    r = close + 1;
+                } else r += 1;
+            }
+            st.vis_count = @max(1, v);
+        }
         st.vis_seq = st.buf.edit_seq;
         st.vis_cols = 0;
+        st.vis_collapse_seq = st.collapse_seq;
         return;
     }
     var v: usize = 0;
@@ -385,6 +553,12 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
             if (nxt >= le) break;
             seg = nxt;
         }
+        // A collapsed header shows its own (wrapped) rows; jump past the hidden body to the closer.
+        if (folding and line_is_collapsed(st, r)) {
+            const close = fold_end_at(st, r).?;
+            if (close == st.line_count - 1) st.vis_eof_folded = true;
+            r = close;
+        }
     }
     if (v == 0) {
         st.vis_starts[0] = 0;
@@ -393,6 +567,7 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize) void {
     st.vis_count = v;
     st.vis_seq = st.buf.edit_seq;
     st.vis_cols = cols_max;
+    st.vis_collapse_seq = st.collapse_seq;
 }
 
 // Largest visual row r with vis_starts[r] <= off.
@@ -410,11 +585,17 @@ fn vis_row_of_offset(st: *const TextAreaState, off: usize) usize {
 // boundary keeps every byte (the break sits between glyphs); a hard newline at
 // the next row's start is excluded.
 fn vis_line_end(st: *const TextAreaState, r: usize) usize {
-    if (r + 1 < st.vis_count) {
+    const normal = if (r + 1 < st.vis_count) blk: {
         const ns = st.vis_starts[r + 1];
-        return if (ns > 0 and st.buf.bytes[ns - 1] == '\n') ns - 1 else ns;
+        break :blk if (ns > 0 and st.buf.bytes[ns - 1] == '\n') ns - 1 else ns;
+    } else st.buf.len;
+    // A collapsed header row must not swallow the hidden body: cap it at its own logical line end
+    // (the next visual row starts at the region's closer, far past this line).
+    if (st.folding_on) {
+        const logical = row_of_offset(st, st.vis_starts[r]);
+        if (line_is_collapsed(st, logical)) return @min(normal, line_end(st, logical));
     }
-    return st.buf.len;
+    return normal;
 }
 
 fn vis_col_of(st: *const TextAreaState, row: usize, off: usize) usize {
@@ -448,8 +629,37 @@ fn refresh_goal(st: *TextAreaState) void {
 // One on_point hitbox drives both a click and a drag-select: the press sets the
 // anchor, then PaintContext re-feeds this thunk on every mouseDragged (so
 // st.dragging tells press from drag). drag_end_thunk clears the capture.
+// Collapse/expand a fold whose header is `line`. Collapsing pulls the caret out of the body it is
+// about to hide, so caret/selection stay on a visible row.
+fn toggle_fold(st: *TextAreaState, line: usize) void {
+    if (line >= MAX_LINES) return;
+    const close = fold_end_at(st, line) orelse return;
+    if (st.collapsed.isSet(line)) {
+        st.collapsed.unset(line);
+    } else {
+        st.collapsed.set(line);
+        const cl = row_of_offset(st, st.caret);
+        if (cl > line and cl <= close) {
+            st.caret = line_end(st, line);
+            st.sel_anchor = null;
+        }
+    }
+    st.collapse_seq += 1;
+}
+
 fn click_thunk(ctx: ?*anyopaque, px: f32, py: f32) void {
     const st: *TextAreaState = @ptrCast(@alignCast(ctx orelse return));
+    // A click in the fold-chevron column toggles that row's region instead of moving the caret.
+    if (st.folding_on and st.last_fold_w > 0 and px >= st.last_fold_x and px < st.last_fold_x + st.last_fold_w) {
+        const fy = py - st.last_text_y + st.scroll_y;
+        var vr: usize = if (fy <= 0 or st.last_line_h <= 0) 0 else @intFromFloat(fy / st.last_line_h);
+        if (vr >= st.vis_count) vr = st.vis_count - 1;
+        const logical = row_of_offset(st, st.vis_starts[vr]);
+        if (fold_end_at(st, logical) != null) {
+            toggle_fold(st, logical);
+            return;
+        }
+    }
     const rel_y = py - st.last_text_y + st.scroll_y;
     var row: usize =
         if (rel_y <= 0 or st.last_line_h <= 0) 0 else @intFromFloat(rel_y / st.last_line_h);
@@ -488,6 +698,13 @@ fn drag_end_thunk(ctx: ?*anyopaque) void {
     const st: *TextAreaState = @ptrCast(@alignCast(ctx orelse return));
     st.dragging = false;
     st.drag_autoscroll_dy = 0;
+}
+
+// Drop focus: the paint context calls this when a press lands outside the editor
+// (registered via text_focus_blur while focused).
+fn blur_thunk(ctx: *anyopaque) void {
+    const st: *TextAreaState = @ptrCast(@alignCast(ctx));
+    st.focused = false;
 }
 
 // Seed/clear the anchor before a caret move: Shift extends (anchor stays put),
@@ -577,6 +794,15 @@ fn caret_visible(st: *const TextAreaState, now_s: f64) bool {
     const dt = now_s - st.blink_phase_t0;
     const phase = dt - @floor(dt / BLINK_PERIOD_S) * BLINK_PERIOD_S;
     return phase < BLINK_PERIOD_S * 0.5;
+}
+
+// Seconds until the caret's next on<->off flip — a pure fn of the blink epoch, so
+// a focused editor can schedule one wakeup per flip instead of animating every frame.
+fn next_blink_edge_s(st: *const TextAreaState, now_s: f64) f64 {
+    const dt = now_s - st.blink_phase_t0;
+    const phase = dt - @floor(dt / BLINK_PERIOD_S) * BLINK_PERIOD_S;
+    const half = BLINK_PERIOD_S * 0.5;
+    return if (phase < half) half - phase else BLINK_PERIOD_S - phase;
 }
 
 // Top of the arena bytes used by the undo region; redo bytes (if any) sit above.
@@ -695,7 +921,7 @@ fn edit_replace(st: *TextAreaState, a: usize, b: usize, text: []const u8, coales
     st.caret = a + text.len;
     st.sel_anchor = null;
     update_line_index(st, a, rem_len, text); // incremental: O(lines after pos), not O(buffer)
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     st.undo_coalesce = coalesce;
     return true;
@@ -713,7 +939,7 @@ fn undo(st: *TextAreaState) bool {
     st.sel_anchor = null;
     st.undo_coalesce = false;
     rebuild_line_index(st);
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     return true;
 }
@@ -728,7 +954,7 @@ fn redo(st: *TextAreaState) bool {
     st.sel_anchor = null;
     st.undo_coalesce = false;
     rebuild_line_index(st);
-    rebuild_vis_index(st, st.vis_cols); // the wrap layout shifted with the edit
+    rebuild_vis_index(st, st.vis_cols, st.folding_on); // the wrap layout shifted with the edit
     refresh_goal(st);
     return true;
 }
@@ -782,7 +1008,219 @@ fn move_line(st: *TextAreaState, ev: custom_shell.KeyEvent, to_end: bool) void {
     }
 }
 
-fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) bool {
+// Caret to the document start (to_end=false) or end. Cmd+Up/Down on macOS, Ctrl+Home/End elsewhere.
+fn move_doc(st: *TextAreaState, ev: custom_shell.KeyEvent, to_end: bool) void {
+    extend_begin(st, ev);
+    st.caret = if (to_end) st.buf.len else 0;
+    refresh_goal(st);
+}
+
+// Caret by one word: forward stops after the next word, backward at the start of the previous one.
+// Option+arrow on macOS, Ctrl+arrow elsewhere.
+fn move_word(st: *TextAreaState, ev: custom_shell.KeyEvent, forward: bool) void {
+    const bytes = st.buf.slice();
+    extend_begin(st, ev);
+    st.caret = if (forward) next_word(bytes, st.caret) else prev_word(bytes, st.caret);
+    refresh_goal(st);
+}
+
+fn next_word(bytes: []const u8, start: usize) usize {
+    var i = start;
+    while (i < bytes.len and !is_word(bytes[i])) i += 1; // skip separators
+    while (i < bytes.len and is_word(bytes[i])) i += 1; // then the word
+    return i;
+}
+fn prev_word(bytes: []const u8, start: usize) usize {
+    var i = start;
+    while (i > 0 and !is_word(bytes[i - 1])) i -= 1;
+    while (i > 0 and is_word(bytes[i - 1])) i -= 1;
+    return i;
+}
+
+const INDENT = "  "; // code-editor indent unit (two spaces)
+
+fn is_word(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+fn is_quote(c: u8) bool {
+    return c == '"' or c == '\'' or c == '`';
+}
+fn closer_for(c: u8) ?u8 {
+    return switch (c) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        else => null,
+    };
+}
+// The two bytes are an empty auto-closed pair the caret sits inside (backspace drops both).
+fn is_empty_pair(l: u8, r: u8) bool {
+    if (is_quote(l) and l == r) return true;
+    if (closer_for(l)) |cc| return cc == r;
+    return false;
+}
+
+// Wrap the current selection [a,b) in `open`..`close`, leaving the inner text
+// selected. Two splices (a Ctrl+Z each) - offsets from the tail so they stay valid.
+fn surround(st: *TextAreaState, a: usize, b: usize, open: u8, close: u8) bool {
+    _ = edit_replace(st, b, b, &[_]u8{close}, false);
+    _ = edit_replace(st, a, a, &[_]u8{open}, false);
+    st.sel_anchor = a + 1;
+    st.caret = b + 1;
+    refresh_goal(st);
+    return true;
+}
+
+// Insert `open``close` at the caret and sit between them.
+fn insert_pair(st: *TextAreaState, open: u8, close: u8) bool {
+    if (!edit_replace(st, st.caret, st.caret, &[_]u8{ open, close }, false)) return false;
+    st.caret -= 1;
+    refresh_goal(st);
+    return true;
+}
+
+// Auto-close / skip / surround for a typed ASCII char. Returns null to fall through
+// to the plain insert; a bool means it handled the key (value = buffer changed).
+fn code_type_char(st: *TextAreaState, ch: u8) ?bool {
+    const buf = st.buf.slice();
+    const next: ?u8 = if (st.caret < buf.len) buf[st.caret] else null;
+    const prev: ?u8 = if (st.caret > 0) buf[st.caret - 1] else null;
+
+    if (sel_range(st)) |r| {
+        // Typing a bracket/quote over a selection wraps it (never destroys it).
+        if (closer_for(ch)) |cc| return surround(st, r.a, r.b, ch, cc);
+        if (is_quote(ch)) return surround(st, r.a, r.b, ch, ch);
+        return null;
+    }
+
+    // Skip over the just-typed closing char when it already sits under the caret.
+    if ((ch == ')' or ch == ']' or ch == '}' or is_quote(ch)) and next == ch) {
+        st.caret += 1;
+        refresh_goal(st);
+        return false;
+    }
+    if (closer_for(ch)) |cc| return insert_pair(st, ch, cc);
+    if (is_quote(ch)) {
+        // Don't pair inside a word (apostrophes) or right before one.
+        const in_word = (prev != null and is_word(prev.?)) or (next != null and is_word(next.?));
+        if (!in_word) return insert_pair(st, ch, ch);
+    }
+    return null;
+}
+
+// Enter with indent: carry the current line's leading whitespace; an opener just
+// before the caret adds a level, and an opener/closer straddling the caret opens a
+// blank indented line between them.
+fn code_newline(st: *TextAreaState) bool {
+    if (sel_range(st) != null) return edit_at_selection(st, "\n", false);
+    const buf = st.buf.slice();
+    const a = st.caret;
+    const ls = line_start_of(buf, a);
+    var ind_len: usize = 0;
+    while (ls + ind_len < a and (buf[ls + ind_len] == ' ' or buf[ls + ind_len] == '\t')) ind_len += 1;
+    const prev: ?u8 = if (a > 0) buf[a - 1] else null;
+    const next: ?u8 = if (a < buf.len) buf[a] else null;
+    const open_before = prev != null and closer_for(prev.?) != null;
+    const closer_after = open_before and next != null and closer_for(prev.?).? == next.?;
+
+    var scratch: [512]u8 = undefined;
+    var w: usize = 0;
+    const put = struct {
+        fn s(dst: []u8, at: *usize, bytes2: []const u8) bool {
+            if (at.* + bytes2.len > dst.len) return false;
+            @memcpy(dst[at.*..][0..bytes2.len], bytes2);
+            at.* += bytes2.len;
+            return true;
+        }
+    }.s;
+    const indent = buf[ls..][0..ind_len];
+    if (!put(&scratch, &w, "\n")) return edit_at_selection(st, "\n", false);
+    if (!put(&scratch, &w, indent)) return edit_at_selection(st, "\n", false);
+    if (open_before and !put(&scratch, &w, INDENT)) return edit_at_selection(st, "\n", false);
+    const caret_to = a + w; // caret lands at the end of the (indented) new line
+    if (closer_after) {
+        if (!put(&scratch, &w, "\n") or !put(&scratch, &w, indent)) return edit_at_selection(st, "\n", false);
+    }
+    if (!edit_replace(st, a, a, scratch[0..w], false)) return false;
+    st.caret = caret_to;
+    refresh_goal(st);
+    return true;
+}
+
+fn line_start_of(buf: []const u8, off: usize) usize {
+    var i = off;
+    while (i > 0 and buf[i - 1] != '\n') i -= 1;
+    return i;
+}
+
+// Tab / Shift+Tab in code mode: Shift dedents the touched lines; a plain Tab over a
+// multi-line selection indents them; otherwise it just inserts one indent.
+fn code_tab(st: *TextAreaState, shift: bool) bool {
+    const sel = sel_range(st);
+    if (shift) {
+        const a = if (sel) |r| r.a else st.caret;
+        const b = if (sel) |r| r.b else st.caret;
+        return block_indent(st, a, b, true, sel != null);
+    }
+    if (sel) |r| {
+        if (std.mem.indexOfScalar(u8, st.buf.slice()[r.a..r.b], '\n') != null)
+            return block_indent(st, r.a, r.b, false, true);
+    }
+    return edit_at_selection(st, INDENT, false);
+}
+
+// Indent (or dedent) every line touched by [a,b]. Splices tail-first so the line
+// starts gathered from the pre-edit buffer stay valid. Restores a block selection
+// when the caller had one, so a repeated Tab keeps working.
+fn block_indent(st: *TextAreaState, a: usize, b: usize, dedent: bool, had_sel: bool) bool {
+    const BLOCK_MAX = 1024;
+    var starts: [BLOCK_MAX]u32 = undefined;
+    var n: usize = 0;
+    {
+        const buf = st.buf.slice();
+        const stop = if (b > a) b - 1 else b;
+        var i = line_start_of(buf, a);
+        while (i <= stop and n < BLOCK_MAX) {
+            starts[n] = @intCast(i);
+            n += 1;
+            const nl = std.mem.indexOfScalarPos(u8, buf, i, '\n') orelse break;
+            i = nl + 1;
+        }
+    }
+    if (n == 0) return false;
+    var changed = false;
+    var k = n;
+    while (k > 0) {
+        k -= 1;
+        const pos: usize = starts[k];
+        if (dedent) {
+            const cur = st.buf.slice();
+            if (pos >= cur.len) continue;
+            var rm: usize = 0;
+            if (cur[pos] == '\t') rm = 1 else while (rm < INDENT.len and pos + rm < cur.len and cur[pos + rm] == ' ') : (rm += 1) {}
+            if (rm > 0 and edit_replace(st, pos, pos + rm, "", false)) changed = true;
+        } else {
+            if (edit_replace(st, pos, pos, INDENT, false)) changed = true;
+        }
+    }
+    if (had_sel) {
+        const cur = st.buf.slice();
+        var p: usize = starts[0]; // unmoved: no edit landed before it
+        var left = n;
+        while (left > 1) : (left -= 1) {
+            const nl = std.mem.indexOfScalarPos(u8, cur, p, '\n') orelse break;
+            p = nl + 1;
+        }
+        var e = p;
+        while (e < cur.len and cur[e] != '\n') e += 1;
+        st.sel_anchor = starts[0];
+        st.caret = e;
+        refresh_goal(st);
+    }
+    return changed;
+}
+
+fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, code: bool) bool {
     const bytes = st.buf.slice();
     if (ev.code != .char) st.undo_coalesce = false; // any non-typing key ends the typing run
     switch (ev.code) {
@@ -792,16 +1230,19 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             }
             if (ev.mods.cmd or ev.mods.ctrl) return false; // other shortcuts: not text
             if (read_only or ev.ch == 0) return false;
+            if (code and ev.ch < 128) if (code_type_char(st, @intCast(ev.ch))) |changed| return changed;
             var scratch: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(ev.ch, &scratch) catch return false;
             return edit_at_selection(st, scratch[0..n], true);
         },
         .enter => {
             if (read_only) return false;
+            if (code) return code_newline(st);
             return edit_at_selection(st, "\n", false);
         },
         .tab => {
             if (read_only) return false;
+            if (code) return code_tab(st, ev.mods.shift);
             return edit_at_selection(st, "\t", false);
         },
         .backspace => {
@@ -809,6 +1250,8 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             // delete the range, not one char
             if (sel_range(st)) |r| return edit_replace(st, r.a, r.b, "", false);
             if (st.caret == 0) return false;
+            if (code and st.caret < st.buf.len and is_empty_pair(bytes[st.caret - 1], bytes[st.caret]))
+                return edit_replace(st, st.caret - 1, st.caret + 1, "", false); // drop both of an empty pair
             return edit_replace(st, prev_boundary(bytes, st.caret), st.caret, "", false);
         },
         .delete_fwd => {
@@ -818,31 +1261,46 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool) boo
             return edit_replace(st, st.caret, next_boundary(bytes, st.caret), "", false);
         },
         .left => {
-            move_horiz(st, ev, false);
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (is_mac and ev.mods.cmd) {
+                move_line(st, ev, false); // macOS Cmd+←: line start
+            } else if (word) {
+                move_word(st, ev, false); // Option (macOS) / Ctrl (Linux/Win): previous word
+            } else {
+                move_horiz(st, ev, false);
+            }
             return false;
         },
         .right => {
-            move_horiz(st, ev, true);
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (is_mac and ev.mods.cmd) {
+                move_line(st, ev, true);
+            } else if (word) {
+                move_word(st, ev, true);
+            } else {
+                move_horiz(st, ev, true);
+            }
             return false;
         },
         .home => {
-            move_line(st, ev, false);
+            if (ev.mods.cmd) move_doc(st, ev, false) else move_line(st, ev, false); // Ctrl/Cmd+Home: doc start
             return false;
         },
         .end => {
-            move_line(st, ev, true);
+            if (ev.mods.cmd) move_doc(st, ev, true) else move_line(st, ev, true);
             return false;
         },
         .up => {
-            move_vert(st, ev, false);
+            if (is_mac and ev.mods.cmd) move_doc(st, ev, false) else move_vert(st, ev, false); // macOS Cmd+↑: doc start
             return false;
         },
         .down => {
-            move_vert(st, ev, true);
+            if (is_mac and ev.mods.cmd) move_doc(st, ev, true) else move_vert(st, ev, true);
             return false;
         },
         .escape => {
-            if (has_sel(st)) st.sel_anchor = null; // clear selection, keep caret
+            if (has_sel(st)) st.sel_anchor = null // first Esc: clear selection, keep caret + focus
+            else st.focused = false; // then Esc: drop focus
             return false;
         },
         .page_up, .page_down => return false,
@@ -863,7 +1321,18 @@ const Geom = struct {
     text_y: f32,
     line_h: f32,
     view_h: f32,
+    gutter_w: f32 = 0, // left line-number column (0 = none); text_x already past it
+    num_right_x: f32 = 0, // x that line numbers right-align to
+    fold_x: f32 = 0, // left edge of the fold-chevron column (0-width when folding is off)
+    fold_w: f32 = 0,
 };
+
+fn digit_count(n: usize) usize {
+    var d: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) d += 1;
+    return d;
+}
 
 // A caller-prefilled buffer could leave the caret or anchor past the end or
 // mid-codepoint; snap both so no path splits a UTF-8 sequence.
@@ -893,11 +1362,53 @@ fn drain_keys(st: *TextAreaState, opts: TextAreaOptions) bool {
     const p = opts.paint;
     var changed = false;
     for (p.keys()) |ev| {
-        if (apply_key(st, ev, opts.read_only)) changed = true;
+        if (opts.completion) |c| if (c.open and completion_key(c, ev)) continue; // popup ate the nav key
+        if (opts.snippet) |s| if (s.active and snippet_key(s, ev)) continue; // Tab/Esc drive the tabstops
+        if (apply_key(st, ev, opts.read_only, opts.code_edits)) changed = true;
         if (st.buf.edit_seq != st.index_seq) rebuild_line_index(st);
     }
     if (p.keys().len > 0) st.blink_phase_t0 = st.now_cached; // any key -> solid caret
     return changed;
+}
+
+// While a completion popup is open, the navigation keys drive it, not the caret. Returns true when
+// the key was consumed (so it must not also edit text); typing + backspace fall through to refilter.
+fn completion_key(c: *Completion, ev: custom_shell.KeyEvent) bool {
+    switch (ev.code) {
+        .up => {
+            if (c.count > 0) c.selected = (c.selected + c.count - 1) % c.count;
+            return true;
+        },
+        .down => {
+            if (c.count > 0) c.selected = (c.selected + 1) % c.count;
+            return true;
+        },
+        .enter, .tab => {
+            c.commit = true;
+            return true;
+        },
+        .escape => {
+            c.dismiss = true;
+            return true;
+        },
+        else => return false,
+    }
+}
+
+// While a snippet is active, Tab / Shift+Tab / Esc move between tabstops instead of indenting. The
+// caller moves the selection and clears the flag; typing falls through to edit the placeholder.
+fn snippet_key(s: *Snippet, ev: custom_shell.KeyEvent) bool {
+    switch (ev.code) {
+        .tab => {
+            if (ev.mods.shift) s.prev = true else s.next = true;
+            return true;
+        },
+        .escape => {
+            s.cancel = true;
+            return true;
+        },
+        else => return false,
+    }
 }
 
 // Wheel capture + edge-drag autoscroll + caret-follow (only when the caret
@@ -911,10 +1422,11 @@ fn apply_scroll(st: *TextAreaState, opts: TextAreaOptions, g: Geom, caret_moved:
         p.wheel_dy = 0;
     }
     if (st.dragging and st.drag_autoscroll_dy != 0) st.scroll_y += st.drag_autoscroll_dy;
-    if (caret_moved) {
+    if (caret_moved or st.scroll_to_caret) {
         const top = @as(f32, @floatFromInt(vis_row_of_offset(st, st.caret))) * g.line_h;
         if (top < st.scroll_y) st.scroll_y = top;
         if (top + g.line_h > st.scroll_y + g.view_h) st.scroll_y = top + g.line_h - g.view_h;
+        st.scroll_to_caret = false;
     }
     st.scroll_y = std.math.clamp(st.scroll_y, 0, max_scroll);
 }
@@ -1022,6 +1534,22 @@ fn draw_rows(
         };
 
         try draw_row_glyphs(b, st, opts, g, ls, le, yy, base_style, &span_i, band);
+
+        // A collapsed region shows a muted "…}" right after its header (the ellipsis stands in for the
+        // hidden body, the closer makes the bracket read whole).
+        if (st.folding_on) {
+            const logical = row_of_offset(st, ls);
+            if (line_is_collapsed(st, logical) and le == line_end(st, logical)) {
+                const mcol = vis_col_of(st, r, le);
+                const mx = g.text_x + @as(f32, @floatFromInt(mcol)) * st.char_w;
+                const msty = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
+                var mbuf: [5]u8 = undefined;
+                const marker = std.fmt.bufPrint(&mbuf, "\u{2026}{c}", .{fold_cchar_at(st, logical)}) catch "\u{2026}";
+                const m0 = b.sprites.items.len;
+                _ = try label.render(b, mx, yy, marker, msty);
+                for (b.sprites.items[m0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+            }
+        }
     }
 }
 
@@ -1047,6 +1575,186 @@ fn draw_caret(
     }
 }
 
+// Left gutter: a muted column with each logical line's number, right-aligned at its first
+// visual row (wrapped continuation rows stay blank); the caret's line reads brighter.
+fn draw_gutter(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize) RenderError!void {
+    const theme = opts.theme;
+    // The gutter band stops a pad short of the text, leaving a gap so code doesn't hug the edge.
+    const edge = g.text_x - opts.pad;
+    var col = Quad.init(g.x, g.y, edge - g.x, g.h);
+    _ = col.set_background(tr.mix(theme.background, theme.muted, 0.35))
+        .set_clip_bounds(.{ g.x, g.y + 1, edge - g.x, g.h - 2 });
+    try b.append_quad(col);
+
+    const caret_line = row_of_offset(st, st.caret);
+    const num_style = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
+    const cur_style = mono_style(opts.font_family, opts.font_size, theme.foreground, .normal);
+    const band: [4]f32 = .{ g.x, g.y + 1, edge - g.x, g.h - 2 };
+
+    var r = first_row;
+    while (r < last_row) : (r += 1) {
+        const off = st.vis_starts[r];
+        const logical = row_of_offset(st, off);
+        if (st.line_starts[logical] != off) continue; // a soft-wrap continuation row has no number
+        const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+        var nbuf: [12]u8 = undefined;
+        const s = std.fmt.bufPrint(&nbuf, "{d}", .{logical + 1}) catch continue;
+        const sty = if (logical == caret_line and st.focused) cur_style else num_style;
+        const nw = @as(f32, @floatFromInt(s.len)) * st.char_w;
+        const t0 = b.sprites.items.len;
+        _ = try label.render(b, g.num_right_x - nw, yy, s, sty);
+        for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+        // Fold chevron: right for a collapsed region, down for an expanded one.
+        if (g.fold_w > 0 and fold_end_at(st, logical) != null) {
+            const chev: icon.Icon = if (line_is_collapsed(st, logical)) .chevron_right else .chevron_down;
+            const c0 = b.sprites.items.len;
+            _ = try icon.render_icon_centered_xy(b, g.fold_x, yy, g.fold_w, g.line_h, chev, .{
+                .point_size = opts.font_size - 2,
+                .color = theme.muted_foreground,
+            });
+            for (b.sprites.items[c0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+        }
+    }
+    // A region collapsed to the last line has no real row after it; draw the trailing line number
+    // below the header so the fold still reads as "one line, then the rest" (matches an editor that
+    // keeps the closing line's slot).
+    if (st.folding_on and st.vis_eof_folded) {
+        const yy = g.text_y + @as(f32, @floatFromInt(st.vis_count)) * g.line_h - st.scroll_y;
+        if (yy + g.line_h > g.text_y and yy < g.text_y + g.view_h) {
+            var nbuf: [12]u8 = undefined;
+            if (std.fmt.bufPrint(&nbuf, "{d}", .{st.line_count + 1})) |s| {
+                const nw = @as(f32, @floatFromInt(s.len)) * st.char_w;
+                const t0 = b.sprites.items.len;
+                _ = try label.render(b, g.num_right_x - nw, yy, s, num_style);
+                for (b.sprites.items[t0..]) |*sp| sp.clip_bounds = tr.clip_intersect(sp.clip_bounds, band);
+            } else |_| {}
+        }
+    }
+}
+
+// Search-match highlight: a coloured band behind each match range (across its visual rows);
+// the active match reads warmer. Behind the text, like the selection band.
+fn draw_match_bands(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize, band: [4]f32) RenderError!void {
+    if (opts.match_ranges.len == 0) return;
+    const c_match = Rgba.from_u8(250, 204, 21, 90);
+    const c_active = Rgba.from_u8(251, 146, 60, 150);
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    for (opts.match_ranges, 0..) |m, i| {
+        const start: usize = m[0];
+        const end: usize = m[1];
+        if (end <= start or start > st.buf.len) continue;
+        const fill = if (@as(i32, @intCast(i)) == opts.active_match) c_active else c_match;
+        var r = vis_row_of_offset(st, start);
+        const end_row = vis_row_of_offset(st, end - 1);
+        while (r <= end_row) : (r += 1) {
+            if (r < first_row or r >= last_row) continue;
+            const rs = st.vis_starts[r];
+            const re = vis_line_end(st, r);
+            const sa = @max(start, rs);
+            const sb = @min(end, re);
+            if (sb <= sa) continue;
+            const col_a = vis_col_of(st, r, sa);
+            const col_b = vis_col_of(st, r, sb);
+            const bx = g.text_x + @as(f32, @floatFromInt(col_a)) * st.char_w;
+            const bw = @as(f32, @floatFromInt(col_b - col_a)) * st.char_w;
+            const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+            var q = Quad.init(bx, yy, bw, g.line_h);
+            _ = q.set_background(fill).set_clip_bounds(clip);
+            try b.append_quad(q);
+        }
+    }
+}
+
+// A faint band across the caret's visual row (behind the glyphs), only while focused.
+fn draw_current_line(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    if (!st.focused) return;
+    const row = vis_row_of_offset(st, st.caret);
+    const yy = g.text_y + @as(f32, @floatFromInt(row)) * g.line_h - st.scroll_y;
+    if (yy + g.line_h <= g.text_y or yy >= g.text_y + g.view_h) return;
+    const bw = g.w - (g.text_x - g.x) - opts.pad;
+    var q = Quad.init(g.text_x, yy, @max(@as(f32, 0), bw), g.line_h);
+    _ = q.set_background(tr.mix(opts.theme.background, opts.theme.muted, 0.4))
+        .set_clip_bounds(tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band));
+    try b.append_quad(q);
+}
+
+const BRACKETS = [_][2]u8{ .{ '(', ')' }, .{ '[', ']' }, .{ '{', '}' } };
+
+// Forward from an opener at `from` to its matching closer (nesting-aware); null if unbalanced.
+fn scan_close(buf: []const u8, from: usize, open_c: u8, close_c: u8) ?usize {
+    var depth: i32 = 1;
+    var i = from + 1;
+    while (i < buf.len) : (i += 1) {
+        if (buf[i] == open_c) depth += 1 else if (buf[i] == close_c) {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+// Backward from a closer at `from` to its matching opener (nesting-aware); null if unbalanced.
+fn scan_open(buf: []const u8, from: usize, open_c: u8, close_c: u8) ?usize {
+    var depth: i32 = 1;
+    var i = from;
+    while (i > 0) {
+        i -= 1;
+        if (buf[i] == close_c) depth += 1 else if (buf[i] == open_c) {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+// The bracket pair to highlight: the bracket just left of the caret (or under it)
+// and its partner. String-content brackets are not excluded (naive nesting) - a fine
+// trade for a read aid. Returns the two byte offsets, lower first.
+fn match_bracket(st: *TextAreaState) ?[2]usize {
+    const buf = st.buf.slice();
+    var pos: [2]usize = undefined;
+    var np: usize = 0;
+    if (st.caret > 0) {
+        pos[np] = st.caret - 1;
+        np += 1;
+    }
+    if (st.caret < buf.len) {
+        pos[np] = st.caret;
+        np += 1;
+    }
+    for (pos[0..np]) |p| {
+        const c = buf[p];
+        for (BRACKETS) |pr| {
+            if (c == pr[0]) {
+                if (scan_close(buf, p, pr[0], pr[1])) |m| return .{ p, m };
+            } else if (c == pr[1]) {
+                if (scan_open(buf, p, pr[0], pr[1])) |m| return .{ m, p };
+            }
+        }
+    }
+    return null;
+}
+
+// A thin outline box around each bracket of the caret's matched pair (focused only).
+fn draw_bracket_match(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    if (!st.focused) return;
+    const pair = match_bracket(st) orelse return;
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    for (pair) |off| {
+        const row = vis_row_of_offset(st, off);
+        const col = vis_col_of(st, row, off);
+        const bx = g.text_x + @as(f32, @floatFromInt(col)) * st.char_w;
+        const yy = g.text_y + @as(f32, @floatFromInt(row)) * g.line_h - st.scroll_y;
+        if (yy + g.line_h <= g.text_y or yy >= g.text_y + g.view_h) continue;
+        var q = Quad.init(bx, yy, st.char_w, g.line_h);
+        _ = q.set_background(tr.mix(opts.theme.background, opts.theme.muted, 0.7))
+            .set_border_color(opts.theme.ring)
+            .set_border_width(1)
+            .set_clip_bounds(clip);
+        try b.append_quad(q);
+    }
+}
+
 // Geometry prologue: bring the line + visual indexes current, ensure char_w
 // (caret nav is column-sized, so it must exist first), and return the Geom.
 fn prepare(
@@ -1063,22 +1771,34 @@ fn prepare(
     const line_h = opts.font_size * opts.line_spacing;
     std.debug.assert(line_h > 0); // row math divides by it (cull, click->row)
     const pad = opts.pad;
-    const text_w = @max(@as(f32, 0), w - pad * 2);
+    // Line-number gutter: pad + widest number + a pad-sized gap to the gutter edge + another pad
+    // of breathing room before the text (so the code never hugs the gutter band).
+    const digits: usize = if (opts.line_numbers) @max(2, digit_count(st.line_count)) else 0;
+    const num_w = @as(f32, @floatFromInt(digits)) * st.char_w;
+    // A fold-chevron column sits between the numbers and the text when folding is on.
+    const fold_w: f32 = if (opts.folding and opts.line_numbers) 12 else 0;
+    const gutter_w: f32 = if (opts.line_numbers) num_w + pad * 2 + (if (fold_w > 0) fold_w + pad else 0) else 0;
+    const text_w = @max(@as(f32, 0), w - pad * 2 - gutter_w);
     // Visual index = logical lines wrapped to the columns that fit; 0 disables wrap.
     const cols_max: usize = if (opts.wrap and st.char_w > 0)
         @max(1, @as(usize, @intFromFloat(text_w / st.char_w)))
     else
         0;
-    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols) rebuild_vis_index(st, cols_max);
+    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols or
+        (opts.folding and st.collapse_seq != st.vis_collapse_seq)) rebuild_vis_index(st, cols_max, opts.folding);
     return .{
         .x = x,
         .y = y,
         .w = w,
         .h = h,
-        .text_x = x + pad,
+        .text_x = x + pad + gutter_w,
         .text_y = y + pad,
         .line_h = line_h,
         .view_h = @max(@as(f32, 0), h - pad * 2), // tiny h must not cast negative
+        .gutter_w = gutter_w,
+        .num_right_x = x + pad + num_w,
+        .fold_x = x + pad + num_w + pad, // chevron column starts a pad past the numbers
+        .fold_w = fold_w,
     };
 }
 
@@ -1117,41 +1837,81 @@ pub fn render(
     st.now_cached = p.now_s; // mouse thunks run between frames; they read this
     st.on_focus = opts.on_focus; // stash so the click handler (ctx = state) reaches the caller
     st.focus_ctx = opts.ctx;
+    st.folding_on = opts.folding;
 
     snap_caret(st);
     const g = prepare(b, st, opts, x, y, w, h);
 
+    // Register as the focus owner so a press outside the editor drops focus (and Esc
+    // can blur it). Re-armed every focused frame; the paint context resets it per frame.
+    if (st.focused) {
+        p.text_focus_ctx = st;
+        p.text_focus_blur = blur_thunk;
+    }
+
     const caret_before = st.caret;
-    const changed = if (st.focused) drain_keys(st, opts) else false;
+    // Stay focused (caret/selection persist) but stop draining keys while a modal
+    // owns the keyboard, else its arrows would also walk this editor's caret.
+    const changed = if (st.focused and !p.block_keys) drain_keys(st, opts) else false;
     if (changed) if (opts.on_change) |cb| cb(opts.ctx);
     apply_scroll(st, opts, g, changed or st.caret != caret_before);
 
-    // Box: bg + border (ring when focused).
+    // Box: bg, plus a border (ring when focused) unless the caller wants a bare
+    // fill — a code pane embedded in a panel draws no box of its own.
     var box = Quad.init(x, y, w, h);
-    const border = if (st.focused) theme.ring else theme.border;
-    _ = box.set_background(theme.background)
-        .set_corner_radius(theme.radius - 2)
-        .set_border_color(border)
-        .set_border_width(if (st.focused) 2 else 1);
+    _ = box.set_background(theme.background);
+    if (opts.bordered) {
+        const border = if (st.focused) theme.ring else theme.border;
+        _ = box.set_corner_radius(theme.radius - 2)
+            .set_border_color(border)
+            .set_border_width(if (st.focused) 2 else 1);
+    }
     try b.append_quad(box);
 
-    const band: [4]f32 = .{ g.text_x, y + 1, w - opts.pad * 2, h - 2 };
+    const band: [4]f32 = .{ g.text_x, y + 1, w - opts.pad * 2 - g.gutter_w, h - 2 };
     // Viewport cull: only shape the rows on screen.
     const first_row: usize = @intFromFloat(st.scroll_y / g.line_h);
     const rows_in_view: usize = @as(usize, @intFromFloat(@ceil(g.view_h / g.line_h))) + 1;
     const last_row = @min(st.vis_count, first_row + rows_in_view);
 
+    try draw_current_line(b, st, opts, g, band); // behind the text (quads honour order)
+    if (opts.code_edits) try draw_bracket_match(b, st, opts, g, band);
+    try draw_match_bands(b, st, opts, g, first_row, last_row, band);
+    if (opts.line_numbers) try draw_gutter(b, st, opts, g, first_row, last_row);
     try draw_rows(b, st, opts, g, first_row, last_row, band);
     try draw_caret(b, st, opts, g, band);
     try add_body_hitbox(st, opts, g);
 
-    // A blinking caret or a held edge-drag needs the vsync loop redrawing.
-    if (st.focused or st.dragging) p.animating = true;
+    // A held edge-drag autoscrolls, so it needs every vsync. A focused caret only
+    // changes at its blink edges: schedule a single wakeup at the next one instead of
+    // animating every frame (so a focused-but-idle editor renders ~2×/s, not 125×/s).
+    if (st.dragging) {
+        p.animating = true;
+    } else if (st.focused) {
+        p.request_redraw_after(next_blink_edge_s(st, p.now_s));
+    }
+
+    // Caret rect for an overlay anchor (same geometry as draw_caret, but every focused frame, not
+    // gated on the blink). Zeroed when unfocused so a stale popup can hide.
+    if (opts.caret_out) |co| {
+        if (st.focused) {
+            const crow = vis_row_of_offset(st, st.caret);
+            const ccol = vis_col_of(st, crow, st.caret);
+            co.* = .{
+                g.text_x + @as(f32, @floatFromInt(ccol)) * st.char_w,
+                g.text_y + @as(f32, @floatFromInt(crow)) * g.line_h - st.scroll_y,
+                CARET_W,
+                g.line_h,
+            };
+        } else co.* = .{ 0, 0, 0, 0 };
+    }
 
     st.last_text_x = g.text_x;
     st.last_text_y = g.text_y;
     st.last_line_h = g.line_h;
     st.last_view_h = g.view_h;
+    st.last_fold_x = g.fold_x;
+    st.last_fold_w = g.fold_w;
     return SizeF.init(w, h);
 }
 

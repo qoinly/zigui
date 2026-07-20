@@ -14,6 +14,8 @@ pub const Quad = extern struct {
     // rotation_angle (radians), scale_x, scale_y, _pad.
     transform: [4]f32 = .{ 0, 1, 1, 0 },
     clip_bounds: [4]f32 = no_clip,
+    // dash px, gap px, _pad, _pad. Both 0 = a solid border (the default).
+    border_dash: [4]f32 = .{ 0, 0, 0, 0 },
 
     const Self = @This();
 
@@ -54,6 +56,12 @@ pub const Quad = extern struct {
 
     pub fn set_border_width(self: *Self, width: f32) *Self {
         self.border_widths = .{ width, width, width, width };
+        return self;
+    }
+
+    // Dash the border: `dash` px painted, `gap` px skipped, repeating. (0,0) = solid.
+    pub fn set_border_dash(self: *Self, dash: f32, gap: f32) *Self {
+        self.border_dash = .{ dash, gap, 0, 0 };
         return self;
     }
 

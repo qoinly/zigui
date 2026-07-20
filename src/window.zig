@@ -69,6 +69,7 @@ pub const KeyMods = custom_impl.KeyMods;
 const custom_paint = @import("window/paint.zig");
 pub const PaintContext = custom_paint.PaintContext;
 pub const Frame = custom_paint.Frame;
+pub const FileDrop = custom_paint.FileDrop;
 pub const PaintCallback = custom_paint.PaintCallback;
 pub const start_paint_loop = custom_paint.start_paint_loop;
 pub const set_sidebar_items = impl.set_sidebar_items;

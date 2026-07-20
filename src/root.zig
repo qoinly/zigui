@@ -22,6 +22,7 @@ const kit_nodes = @import("kit_nodes.zig");
 const window = @import("window.zig");
 const frame_ctx = @import("frame_ctx.zig");
 const frame_mod = @import("frame.zig");
+const image_source = @import("image_source.zig");
 const input_mod = @import("input.zig");
 const custom_shell = @import("custom_shell.zig");
 const renderer = @import("renderer.zig");
@@ -47,6 +48,11 @@ pub fn row(cfg: node.Cfg, kids: []const *node.Node) *node.Node {
     const fc = frame_ctx.get();
     return node.row(fc.arena, with_state_ctx(fc, cfg), kids);
 }
+// Z-stack: children overlap at the full box, drawn in order (last on top). For a
+// dropdown/menu rendered above an open modal in the overlay slot.
+pub fn layers(kids: []const *node.Node) *node.Node {
+    return node.layers(frame_ctx.get().arena, kids);
+}
 pub fn grid(cfg: node.Cfg, kids: []const *node.Node) *node.Node {
     const fc = frame_ctx.get();
     return node.grid(fc.arena, with_state_ctx(fc, cfg), kids);
@@ -56,7 +62,12 @@ pub fn grid_cols(spec: theme.GridCols, cfg: node.Cfg, kids: []const *node.Node) 
     return node.grid_cols(fc.arena, spec, with_state_ctx(fc, cfg), kids);
 }
 pub fn text(s: []const u8, o: node.Txt) *node.Node {
-    return node.text(frame_ctx.get().arena, s, o);
+    const fc = frame_ctx.get();
+    var oo = o;
+    // Inherit the theme's UI font unless this text overrides it (e.g. a mono
+    // family). Empty theme font_family keeps the platform default.
+    if (oo.font_family.len == 0) oo.font_family = fc.theme.font_family;
+    return node.text(fc.arena, s, oo);
 }
 pub fn spacer() *node.Node {
     return node.spacer(frame_ctx.get().arena);
@@ -73,6 +84,12 @@ pub const ScrollBar = node.ScrollBar;
 // frame with no input and the animation freezes.
 pub fn animate() void {
     frame_ctx.get().paint.animating = true;
+}
+// Schedule a single redraw ~seconds from now instead of animating every vsync.
+// Re-arm each frame for a slow periodic refresh (a clock, a resource meter) at a
+// fraction of the CPU a continuous animate() costs.
+pub fn request_redraw_after(seconds: f64) void {
+    frame_ctx.get().paint.request_redraw_after(seconds);
 }
 pub const render_tree = node.render;
 pub const render_tree_at = node.render_at;
@@ -150,6 +167,15 @@ pub fn frame(source: *FrameSource, opts: FrameOpts) *node.Node {
     return kit_nodes.frame(fc.arena, source, opts);
 }
 
+// A static decoded image (PNG / baseline JPEG). Decode once into an App-owned ImageSource,
+// then draw it with image(); the texture is uploaded lazily and the still image needs no
+// per-frame repaint. opts.fit controls aspect within the cell (default .contain).
+pub const ImageSource = image_source.ImageSource;
+pub fn image(source: *ImageSource, opts: FrameOpts) *node.Node {
+    const fc = frame_ctx.get();
+    return kit_nodes.image(fc.arena, source, opts);
+}
+
 // The backend handle a FrameSource needs to allocate its textures. Reachable only
 // during a render pass (the render context owns the renderer).
 pub const Renderer = renderer.Renderer;
@@ -186,6 +212,31 @@ pub fn key_presses() []const KeyEvent {
     return frame_ctx.get().paint.keys();
 }
 
+// The special key (Enter / Shift+Enter / Escape) the focused native text field saw this frame
+// but did not act on, so app-level UI (e.g. the in-editor find bar) can. Null when none.
+pub const FieldKey = custom_shell.FieldKey;
+pub fn text_field_special() ?FieldKey {
+    return frame_ctx.get().paint.text_field_special();
+}
+
+// Whether the pointer is over the given rect (typically a node's rect_out from last frame) this
+// frame. A build-time hover query for gating hover popovers/HUDs; respects overlay hover-blocking.
+pub fn rect_hovered(r: [4]f32) bool {
+    return frame_ctx.get().paint.is_hovered(r[0], r[1], r[2], r[3]);
+}
+
+// Write a string to the system clipboard (e.g. a "Copy" button).
+pub fn set_clipboard(s: []const u8) void {
+    custom_shell.pasteboard_write_string(s);
+}
+
+// The OS file drop (drag-and-drop from a file manager) that landed this frame, or
+// null. paths are decoded absolute paths (valid this frame); x/y is the drop point.
+pub const FileDrop = window.FileDrop;
+pub fn dropped_files() ?FileDrop {
+    return frame_ctx.get().paint.dropped_files();
+}
+
 // Fullscreen + displays. set_fullscreen toggles native fullscreen on the app
 // window; display_bounds(i) gives monitor i's frame in points so the app can size a
 // stream or place a window per screen.
@@ -194,6 +245,24 @@ pub fn set_fullscreen(enable: bool) void {
 }
 pub fn fullscreen() bool {
     return frame_ctx.get().paint.handle.is_fullscreen();
+}
+// Minimize (iconify) the window rendering this frame, as its caption button does.
+pub fn minimize() void {
+    frame_ctx.get().paint.handle.minimize();
+}
+// Hide the app (macOS) or, where no app-hide concept exists, minimize instead.
+pub fn hide() void {
+    frame_ctx.get().paint.handle.hide();
+}
+
+// Whether this window is fully hidden (covered, minimized, or on another Space).
+// A periodic view (a meter re-arming request_redraw_after) can park itself on
+// true; the shell renders one frame on each occlusion flip so it re-arms on
+// reveal. False where the platform doesn't report occlusion.
+pub fn window_occluded() bool {
+    const h = frame_ctx.get().paint.handle;
+    if (@hasDecl(@TypeOf(h), "is_occluded")) return h.is_occluded();
+    return false;
 }
 // Whether the window rendering this frame holds keyboard focus. A multi-window
 // app gates its focused input on this so only the key window drives the editor.
@@ -245,6 +314,7 @@ pub fn kbd(keys: []const []const u8) *node.Node {
 pub const key_command = @import("kit/kbd.zig").command;
 pub const key_shift = @import("kit/kbd.zig").shift;
 pub const key_option = @import("kit/kbd.zig").option;
+pub const key_return = @import("kit/kbd.zig").enter;
 pub fn toggle_button(label: []const u8, o: kit_nodes.ToggleBtn) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
@@ -296,7 +366,10 @@ pub fn text_input(field: *kit_nodes.TextField, o: kit_nodes.TextInputOpts) *node
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    // Default the focus ctx to the app state (what nearly every field wants), but
+    // let a caller pass its own — a grid of fields (KV cells) needs a per-cell ctx
+    // so one shared on_focus can tell which cell was clicked.
+    oo.ctx = o.ctx orelse fc.state;
     return kit_nodes.text_input(fc.arena, fc.theme, field, oo);
 }
 pub const EditableOpts = kit_nodes.EditableOpts;
@@ -446,6 +519,15 @@ pub fn dialog(o: kit_nodes.Dialog) *node.Node {
     oo.paint = fc.paint;
     oo.ctx = fc.state;
     return kit_nodes.dialog(fc.arena, fc.theme, oo);
+}
+
+// A zero-size leaf that lifts the sibling(s) drawn after it into the modal top
+// layer (crisp, over a frosted backdrop). Place it as the first child of a
+// facade-composed modal's root — right after the scrim — so an arbitrary card
+// renders above the body instead of being z-ordered behind deep body nodes.
+pub fn modal_backdrop() *node.Node {
+    const fc = frame_ctx.get();
+    return kit_nodes.modal_backdrop(fc.arena, fc.paint);
 }
 pub fn sidebar(o: kit_nodes.Sidebar) *node.Node {
     const fc = frame_ctx.get();
@@ -778,6 +860,66 @@ pub fn resizable_demo(o: kit_nodes.ResizableDemo) *node.Node {
 pub const ResizableDemoOpts = kit_nodes.ResizableDemo;
 pub const ResizableSnap = kit_nodes.ResizableSnap;
 
+pub const ResizeHandleOpts = struct {
+    orientation: kit.resizable.Orientation = .horizontal,
+    kind: kit.resizable.HandleKind = .line,
+    on_drag: ?callbacks.DragFn = null,
+    on_drag_end: ?callbacks.DragEndFn = null,
+    ctx: ?*anyopaque = null,
+};
+
+const ResizeHandleSpec = struct {
+    theme: *const window.Theme,
+    paint: *window.PaintContext,
+    orientation: kit.resizable.Orientation,
+    kind: kit.resizable.HandleKind,
+    on_drag: ?callbacks.DragFn,
+    on_drag_end: ?callbacks.DragEndFn,
+    ctx: ?*anyopaque,
+
+    fn measure(b: *render.RenderBuilder, c: *anyopaque) SizeF {
+        _ = b;
+        const self: *ResizeHandleSpec = @ptrCast(@alignCast(c));
+        // horizontal = panels side by side => a vertical 1px line that fills height;
+        // vertical = stacked panels => a horizontal 1px line that fills width. (0 fills.)
+        return if (self.orientation == .horizontal) SizeF.init(1, 0) else SizeF.init(0, 1);
+    }
+
+    fn draw(b: *render.RenderBuilder, c: *anyopaque, r: BoundsF) render.RenderError!void {
+        const self: *ResizeHandleSpec = @ptrCast(@alignCast(c));
+        const horizontal = self.orientation == .horizontal;
+        const len = if (horizontal) r.size.height else r.size.width;
+        if (len <= 0) return;
+        _ = try kit.resizable.render(b, r.origin.x, r.origin.y, len, .{
+            .orientation = self.orientation,
+            .kind = self.kind,
+            .theme = self.theme,
+            .paint = self.paint,
+            .on_drag = self.on_drag,
+            .on_drag_end = self.on_drag_end,
+            .ctx = self.ctx,
+        });
+    }
+};
+
+// A single draggable divider as a composable node: drop it between two panes in a
+// row/col and it reads its own laid-out length. Wire on_drag with zigui.on_drag;
+// the cursor (x, y) it reports is window-space.
+pub fn resize_handle(o: ResizeHandleOpts) *node.Node {
+    const fc = frame_ctx.get();
+    const spec = fc.arena.create(ResizeHandleSpec) catch @panic("node arena oom");
+    spec.* = .{
+        .theme = fc.theme,
+        .paint = fc.paint,
+        .orientation = o.orientation,
+        .kind = o.kind,
+        .on_drag = o.on_drag,
+        .on_drag_end = o.on_drag_end,
+        .ctx = o.ctx orelse fc.state,
+    };
+    return node.leaf(fc.arena, ResizeHandleSpec.measure, ResizeHandleSpec.draw, spec);
+}
+
 // The floating toast stack: put it in the non-modal hud region. Self-times off the
 // frame clock; the caller owns the slot array.
 pub fn toasts(o: kit_nodes.Toasts) *node.Node {
@@ -998,6 +1140,42 @@ pub const RenderBuilder = render.RenderBuilder;
 pub const layout = @import("layout.zig");
 pub const style = @import("style.zig");
 pub const text_system = @import("text_system.zig");
+
+// Register a bundled font FILE at startup so `Theme.font_family` / `Txt.font_family`
+// can select it by name. Keeps fonts out of the binary (they stay files). Returns
+// false if unsupported on this platform or the file can't be read.
+pub fn register_font_file(path: []const u8) bool {
+    return text_system.register_app_font(path);
+}
+
+// Enable or disable ligatures + contextual alternates for ALL text shaping. A
+// code editor / monospace grid wants them off (a "=>" ligature collapses two
+// cells into one glyph and desyncs the caret). Call once at startup.
+pub fn set_ligatures(enabled: bool) void {
+    text_system.set_ligatures(enabled);
+}
+
+// Toggle adaptive idle polling and set the idle wakeup interval (ms, clamped to a
+// sane floor). When on (the default), the desktop loop sleeps up to `interval_ms`
+// between wakeups while nothing animates instead of spinning at the fixed tick, so
+// an idle window costs far fewer wakeups. Effective on the X11 poll loop and the
+// Windows vsync thread; a no-op where rendering is display-link driven (macOS) or
+// on a compositor with its own pacing. Safe to call at runtime (e.g. from a
+// settings toggle).
+pub fn set_idle_poll(enabled: bool, interval_ms: u32) void {
+    switch (builtin.os.tag) {
+        .linux => @import("platform/linux/app.zig").set_idle_poll(enabled, interval_ms),
+        .windows => @import("platform/windows/loop.zig").set_idle_poll(enabled, interval_ms),
+        else => {},
+    }
+}
+
+// Swap the window theme at runtime (e.g. a light/dark toggle). Safe to call from
+// a click handler; the runtime applies it at the top of the next frame and the
+// window repaints (the input that triggered the handler already drives a redraw).
+pub fn set_theme(t: Theme) void {
+    app_runtime.pending_theme = t;
+}
 
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;

@@ -19,6 +19,24 @@ pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
 pub const HitBox = types.HitBox;
 const Quad = primitives.Quad;
+
+// Adaptive-poll signals for the desktop poll loop (platform/linux/app.zig reads
+// them each round; ignored where rendering is display-link driven). The loop
+// resets them before tick_all, then every PaintContext.tick() reports whether it
+// needs vsync-rate frames (an animation) and how soon its next scheduled redraw is,
+// so the loop can idle-sleep instead of spinning at a fixed tick. paint_tick_thunk
+// also sets the fast flag after a keyed frame (its follow-up frame must not wait
+// out the idle sleep).
+pub var wants_fast_poll: bool = false;
+pub var soonest_deadline_ms: i32 = -1; // -1 = nothing scheduled this round
+
+fn note_poll(animating: bool, redraw_at: ?f64, now_s: f64) void {
+    if (animating) wants_fast_poll = true;
+    if (redraw_at) |d| {
+        const ms: i32 = @intFromFloat(@max(0.0, (d - now_s) * 1000.0));
+        soonest_deadline_ms = if (soonest_deadline_ms < 0) ms else @min(soonest_deadline_ms, ms);
+    }
+}
 const BoundsF = geometry.BoundsF;
 
 // The pinned 0.16.0 std has no Timer/Instant/nanoTimestamp, so read the platform
@@ -73,6 +91,38 @@ pub const Frame = struct {
     titlebar: BoundsF,
 };
 
+// A file drop delivered this frame: the decoded absolute paths + the drop point.
+pub const FileDrop = struct {
+    paths: []const []const u8,
+    x: f32,
+    y: f32,
+};
+
+// The path portion of a `file://[host]/abs/path` URI (from "/abs" on), or null for a
+// non-file URI. The path starts at the first '/' after the "file://" host.
+fn file_uri_path_start(uri: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, uri, "file://")) return null;
+    const slash = std.mem.indexOfScalar(u8, uri["file://".len..], '/') orelse return null;
+    return "file://".len + slash;
+}
+
+fn hex_val(c: u8) u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => 0,
+    };
+}
+
+// A plain absolute path: unix `/...` or a windows drive `C:\...` / `C:/...`. Filters a
+// non-file drop line (e.g. an http URI) out of the plain-path branch.
+fn looks_absolute(p: []const u8) bool {
+    if (p.len == 0) return false;
+    if (p[0] == '/') return true;
+    return p.len >= 3 and std.ascii.isAlphabetic(p[0]) and p[1] == ':' and (p[2] == '\\' or p[2] == '/');
+}
+
 pub const PaintContext = struct {
     handle: CustomShellHandle,
     allocator: std.mem.Allocator,
@@ -86,6 +136,9 @@ pub const PaintContext = struct {
     color_sprites: std.ArrayListUnmanaged(primitives.PolychromeSprite) = .empty,
     hitboxes: std.ArrayListUnmanaged(HitBox) = .empty,
     prev_hover_ctx: ?*anyopaque = null,
+    // The topmost hovered box's stable id, refreshed each frame from the hitboxes.
+    // A view reads it (via the frame) to reveal-on-hover.
+    hovered_id: []const u8 = "",
     mouse_x: f32 = -1,
     mouse_y: f32 = -1,
     mouse_inside: bool = false,
@@ -112,6 +165,14 @@ pub const PaintContext = struct {
     // buttons/wheel). Drained by the paint callback, cleared after, same as keys.
     raw_events: [MAX_RAW_EVENTS]input.InputEvent = undefined,
     raw_len: u32 = 0,
+    // A file drop landed this frame (OS drag-and-drop): the decoded paths are packed
+    // into drop_buf, sliced by drop_paths[0..drop_count]. One-shot, cleared post-frame.
+    drop_buf: [8192]u8 = undefined,
+    drop_paths: [32][]const u8 = undefined,
+    drop_count: usize = 0,
+    drop_x: f32 = 0,
+    drop_y: f32 = 0,
+    has_drop: bool = false,
     // Cursor the consumer wants this frame (resets to .default each frame; set it
     // while hovering a resize edge etc). Applied after the paint callback.
     cursor: custom_shell.CursorKind = .default,
@@ -123,6 +184,10 @@ pub const PaintContext = struct {
     // animation (e.g. a caret blink).
     now_s: f64 = 0,
     base_s: f64 = 0, // clock value at init; now_s stays small for f64 precision
+    // A one-shot redraw deadline (in now_s seconds). Lets a view schedule a wakeup
+    // far cheaper than animating() every vsync: the loop idles until now_s hits it,
+    // fires one redraw, and clears it. Re-arm each frame for a periodic refresh.
+    redraw_at: ?f64 = null,
     // When set, the renderer blurs all prims/sprites up to the backdrop_* split
     // and draws the rest crisp on top. Set before emitting the modal layer.
     blur_modal: bool = false,
@@ -137,9 +202,19 @@ pub const PaintContext = struct {
     // Set while drawing a modal's backdrop so is_hovered reports false there: the
     // frosted layer behind a modal must be inert (no hover), not just blurred.
     block_hover: bool = false,
+    // Same, for the keyboard: a focused text area behind a modal must stop draining
+    // keys (arrows moving its caret while a palette owns the keys). Raised for the
+    // body pass while an overlay is up and cleared for the overlay's own pass, so a
+    // text field inside the modal still types.
+    block_keys: bool = false,
     // A focused text input sets this while showing the native editor; the runtime
     // hides the singleton editor on a frame where nobody claims it (blur / nav away).
     text_field_active: bool = false,
+    // The focused text editor re-arms this each frame (ctx = its state, blur = how to
+    // unfocus it). on_mouse_down blurs it when a press lands anywhere but on it, so a
+    // click outside the editor drops focus. Reset per frame like text_field_active.
+    text_focus_ctx: ?*anyopaque = null,
+    text_focus_blur: ?*const fn (*anyopaque) void = null,
     // Back navigation: the navigator publishes its stack depth each frame so the
     // Android backend knows whether a Back press should pop (consume it) or
     // background the app (depth 1). back_pressed is set by that backend on a Back
@@ -189,6 +264,7 @@ pub const PaintContext = struct {
         self.backdrop_color = 0;
         self.frost_count = 0;
         self.block_hover = false;
+        self.block_keys = false;
         self.text_field_active = false;
         // Rasterize glyphs at the real device scale: a 1x surface fed 2x
         // rasters is a permanent linear downsample (soft text). macOS pins the
@@ -204,6 +280,39 @@ pub const PaintContext = struct {
     }
 
     pub fn request_redraw(self: *PaintContext) void {
+        self.renderer.request_redraw();
+    }
+
+    // Schedule one redraw ~seconds from now. Cheaper than animating every vsync
+    // for a slow refresh (a clock, a resource meter); re-arm each frame to repeat.
+    // The earliest request wins, so independent schedulers in one frame (e.g. a 1 s
+    // meter and a 0.5 s caret blink) compose instead of the last one clobbering the rest.
+    pub fn request_redraw_after(self: *PaintContext, seconds: f64) void {
+        const at = self.now_s + seconds;
+        self.redraw_at = if (self.redraw_at) |cur| @min(cur, at) else at;
+    }
+
+    // Record the topmost hover-id box under the pointer. Call once per frame after
+    // every hitbox is registered; ids are stable (caller literals), so the value
+    // survives to the next frame's build where a view reveals its hovered row.
+    pub fn refresh_hover(self: *PaintContext) void {
+        var id: []const u8 = "";
+        if (self.mouse_inside) {
+            var i: usize = self.hitboxes.items.len;
+            while (i > 0) {
+                i -= 1;
+                const hb = self.hitboxes.items[i];
+                if (hb.hover_id.len == 0) continue;
+                if (self.mouse_x >= hb.x and self.mouse_x < hb.x + hb.w and
+                    self.mouse_y >= hb.y and self.mouse_y < hb.y + hb.h)
+                {
+                    id = hb.hover_id;
+                    break;
+                }
+            }
+        }
+        if (std.mem.eql(u8, id, self.hovered_id)) return;
+        self.hovered_id = id;
         self.renderer.request_redraw();
     }
 
@@ -293,6 +402,55 @@ pub const PaintContext = struct {
         return self.raw_events[0..self.raw_len];
     }
 
+    // The file drop that landed this frame, or null. Paths are decoded absolute paths
+    // (slices into drop_buf, valid this frame); x/y is the window-space drop point.
+    pub fn dropped_files(self: *const PaintContext) ?FileDrop {
+        if (!self.has_drop or self.drop_count == 0) return null;
+        return .{ .paths = self.drop_paths[0..self.drop_count], .x = self.drop_x, .y = self.drop_y };
+    }
+
+    // Decode a platform file drop into drop_buf/drop_paths. `data` is newline-separated
+    // (CR/LF), one entry per file, in EITHER form so every backend can pass what its OS
+    // hands it: a `file://` URI (percent-encoded - what X11 XDND delivers) OR a plain
+    // absolute path (`/Users/...` or `C:\...` - what macOS NSURL.path / Windows
+    // DragQueryFile give). `#` lines and non-absolute/non-file entries are skipped.
+    pub fn on_file_drop_data(self: *PaintContext, data: [*]const u8, len: usize, x: f32, y: f32) void {
+        self.drop_count = 0;
+        var out: usize = 0;
+        var lines = std.mem.tokenizeAny(u8, data[0..len], "\r\n");
+        while (lines.next()) |raw| {
+            if (self.drop_count >= self.drop_paths.len) break;
+            const line = std.mem.trim(u8, raw, " \t");
+            if (line.len == 0 or line[0] == '#') continue;
+            const is_uri = std.mem.startsWith(u8, line, "file://");
+            const path_at: usize = if (is_uri)
+                (file_uri_path_start(line) orelse continue)
+            else if (looks_absolute(line)) 0 else continue; // drop non-file URIs / junk
+            const start = out;
+            var i: usize = path_at;
+            while (i < line.len and out < self.drop_buf.len) {
+                if (is_uri and line[i] == '%' and i + 2 < line.len) {
+                    self.drop_buf[out] = (hex_val(line[i + 1]) << 4) | hex_val(line[i + 2]);
+                    i += 3;
+                } else {
+                    self.drop_buf[out] = line[i];
+                    i += 1;
+                }
+                out += 1;
+            }
+            if (out > start) {
+                self.drop_paths[self.drop_count] = self.drop_buf[start..out];
+                self.drop_count += 1;
+            }
+        }
+        if (self.drop_count > 0) {
+            self.drop_x = x;
+            self.drop_y = y;
+            self.has_drop = true;
+            self.renderer.request_redraw();
+        }
+    }
+
     // Enter/leave relative capture; while grabbed, input arrives via raw_inputs()
     // instead of the UI, and Escape releases it.
     pub fn set_grab(self: *PaintContext, on: bool) void {
@@ -324,6 +482,8 @@ pub const PaintContext = struct {
         initial: []const u8,
         font_size: f32,
         rgba: types.Rgba,
+        secure: bool,
+        numeric: bool,
         id: u32,
     ) bool {
         const shown = custom_shell.show_text_field(
@@ -335,8 +495,8 @@ pub const PaintContext = struct {
             initial,
             font_size,
             rgba,
-            false,
-            false,
+            secure,
+            numeric,
             id,
         );
         if (shown) self.text_field_active = true;
@@ -346,19 +506,41 @@ pub const PaintContext = struct {
         _ = self;
         return custom_shell.text_field_value(buf);
     }
+    pub fn text_field_special(self: *PaintContext) ?custom_shell.FieldKey {
+        _ = self;
+        return custom_shell.text_field_special();
+    }
     pub fn hide_text_field(self: *PaintContext) void {
         custom_shell.hide_text_field(self.handle);
+    }
+
+    // Colorize the focused native editor's text per `spans` and set `font` live
+    // while editing (native-painted backends only; a no-op on the overlay ones,
+    // which the kit colors itself). See custom_shell.color_text_field.
+    pub fn color_text_field(
+        self: *PaintContext,
+        value: []const u8,
+        spans: []const types.FieldSpan,
+        base: types.Rgba,
+        font: ?[]const u8,
+        font_size: f32,
+    ) void {
+        _ = self;
+        custom_shell.color_text_field(value, spans, base, font, font_size);
     }
 
     pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true;
+        var hit_ctx: ?*anyopaque = null;
+        var handled = false;
         var i: usize = self.hitboxes.items.len;
         while (i > 0) {
             i -= 1;
             const hb = self.hitboxes.items[i];
             if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                hit_ctx = hb.ctx;
                 if (hb.on_point) |cb| {
                     cb(hb.ctx, x, y);
                     self.drag_cb = cb;
@@ -367,10 +549,19 @@ pub const PaintContext = struct {
                 } else if (hb.on_click) |cb| {
                     cb(hb.ctx);
                 }
-                self.renderer.request_redraw();
-                return;
+                handled = true;
+                break;
             }
         }
+        // A press anywhere but on the focused editor drops its focus (click-outside).
+        // The editor's own hitbox shares its ctx, so hitting it leaves focus intact.
+        if (self.text_focus_ctx) |fc| if (hit_ctx != fc) {
+            if (self.text_focus_blur) |blur| blur(fc);
+            self.text_focus_ctx = null;
+            self.text_focus_blur = null;
+            handled = true; // redraw to show the unfocus even on empty space
+        };
+        if (handled) self.renderer.request_redraw();
     }
 
     pub fn on_right_mouse_down(self: *PaintContext, x: f32, y: f32) void {
@@ -384,6 +575,24 @@ pub const PaintContext = struct {
             if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
                 if (hb.on_context) |cb| {
                     cb(hb.ctx, x, y);
+                    self.renderer.request_redraw();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn on_middle_mouse_down(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true;
+        var i: usize = self.hitboxes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const hb = self.hitboxes.items[i];
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) {
+                if (hb.on_middle) |cb| {
+                    cb(hb.ctx);
                     self.renderer.request_redraw();
                     return;
                 }
@@ -460,6 +669,13 @@ pub const PaintContext = struct {
         // result. The edge is consumed here, on the loop's own thread.
         if (background.took_completion()) self.renderer.request_redraw();
         self.now_s = monotonic_seconds() - self.base_s;
+        if (self.redraw_at) |deadline| {
+            if (self.now_s >= deadline) {
+                self.redraw_at = null;
+                self.renderer.request_redraw();
+            }
+        }
+        note_poll(self.animating, self.redraw_at, self.now_s);
         if (!self.renderer.dirty) return null;
 
         self.prims.clearRetainingCapacity();
@@ -812,19 +1028,55 @@ pub const RunState = struct {
 // paint context. Normal Windows WM_SIZE now arrives with the per-window context.
 var g_resize_state: ?*RunState = null;
 
+// The Windows vsync thread paces on the demand each tick publishes (the X11
+// loop reads wants_fast_poll/soonest_deadline_ms around tick_all instead).
+// Resolved at comptime; never analyzed on the other platforms.
+const windows_loop = if (builtin.os.tag == .windows)
+    @import("../platform/windows/loop.zig")
+else
+    struct {};
+
 fn paint_tick_thunk(p: ?*anyopaque) callconv(.c) void {
     // The RunState arrives as the display-link callback's type-erased context.
     const s: *RunState = @ptrCast(@alignCast(p orelse return));
+    // Windows has no round wrapper like the linux tick_all, so the reset that
+    // precedes a round happens here; ticks are serialized on the GUI thread, so
+    // each publish below reports exactly this window's round.
+    if (builtin.os.tag == .windows) {
+        wants_fast_poll = false;
+        soonest_deadline_ms = -1;
+    }
+    // Publish on every exit: the dirty-gated early return IS the idle path. A
+    // still-dirty renderer (keyed follow-up) or an animation keeps vsync pacing;
+    // otherwise the nearest scheduled redraw (or full idle) sizes the wait.
+    defer if (builtin.os.tag == .windows) {
+        const demand: i32 = if (wants_fast_poll or s.paint_ctx.renderer.dirty)
+            0
+        else
+            soonest_deadline_ms;
+        windows_loop.publish_demand(@ptrCast(s), demand);
+    };
     custom_shell.release_grab_if_blurred();
     const frame = s.paint_ctx.tick() orelse return;
     s.paint_ctx.cursor = .default; // consumer re-requests it while hovering an edge
     s.user_cb(s.user_ctx, s.paint_ctx, frame) catch return;
+    // Keys (and a file drop) are consumed mid-build, so a handler in a late-built
+    // view (the body) can mutate state an earlier-built view (the overlay) already
+    // rendered - e.g. a drop opens the import dialog. One follow-up frame converges.
+    // The request lands after draw_frame (which clears the dirty flag); wants_fast_poll
+    // re-arms the linux idle sleep, whose note_poll report predates this round.
+    const converge = s.paint_ctx.key_len > 0 or s.paint_ctx.has_drop;
     s.paint_ctx.key_len = 0;
     s.paint_ctx.raw_len = 0;
+    s.paint_ctx.has_drop = false; // one-shot: the drop was drained in the callback above
     s.paint_ctx.wheel_dy = 0; // per-frame delta; consumer reads it in the callback above
     s.paint_ctx.wheel_dx = 0;
     custom_shell.apply_cursor(s.paint_ctx.cursor);
     s.paint_ctx.draw_frame(frame);
+    if (converge) {
+        s.paint_ctx.request_redraw();
+        wants_fast_poll = true;
+    }
 }
 
 fn mouse_move_thunk(ctx: *anyopaque, x: f32, y: f32) void {
@@ -870,6 +1122,16 @@ fn back_thunk(ctx: *anyopaque) bool {
 fn right_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
     const paint: *PaintContext = @ptrCast(@alignCast(ctx));
     paint.on_right_mouse_down(x, y);
+}
+
+fn middle_mouse_down_thunk(ctx: *anyopaque, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_middle_mouse_down(x, y);
+}
+
+fn file_drop_thunk(ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void {
+    const paint: *PaintContext = @ptrCast(@alignCast(ctx));
+    paint.on_file_drop_data(data, len, x, y);
 }
 
 fn mouse_up_thunk(ctx: *anyopaque) void {
@@ -925,6 +1187,8 @@ pub fn start_paint_loop(
         .on_exit = mouse_exit_thunk,
         .on_down = mouse_down_thunk,
         .on_right_down = right_mouse_down_thunk,
+        .on_middle_down = middle_mouse_down_thunk,
+        .on_file_drop = file_drop_thunk,
         .on_drag = mouse_drag_thunk,
         .on_up = mouse_up_thunk,
         .on_scroll = scroll_thunk,

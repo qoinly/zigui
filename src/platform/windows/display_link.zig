@@ -42,7 +42,11 @@ pub const DisplayLink = struct {
     }
 
     pub fn stop(self: *DisplayLink) void {
-        if (loop.get_vsync_slot(self.token)) |slot| slot.running.store(false, .seq_cst);
+        if (loop.get_vsync_slot(self.token)) |slot| {
+            slot.running.store(false, .seq_cst);
+            // Snap an in-progress idle wait so the join never sits out the cap.
+            if (slot.wake_event) |ev| _ = win32.SetEvent(ev);
+        }
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -65,15 +69,39 @@ fn vsync_loop(token: usize) void {
         const slot = loop.get_vsync_slot(token) orelse return;
         if (!slot.running.load(.seq_cst)) return;
         std.debug.assert(loop.gui_thread_id != 0); // post target, set before this thread spawns
-        // During the modal resize/move loop, WM_SIZE drives paint synchronously,
-        // so this thread goes fully idle for its duration. A posted WM_VSYNC
-        // outranks input in GetMessage and would starve the mouse-move messages
-        // the resize + cursor depend on (cursor lags seconds behind the hand);
-        // and DwmFlush here contends with the GUI thread's Present. Resume the
-        // normal cadence once the drag ends.
+        // During the modal resize/move loop, WM_SIZE drives paint synchronously
+        // on the GUI thread; a posted WM_VSYNC outranks input in GetMessage and
+        // would starve the mouse-moves the resize depends on. So instead of
+        // posting, keep pacing on DwmFlush and PUBLISH each vblank's timestamp:
+        // the WM_SIZE handler gates its paints on it (at most one per vblank),
+        // which locks the resize cadence to the compositor clock at any refresh
+        // rate. Resume normal posting once the drag ends.
         if (loop.resizing.load(.seq_cst)) {
-            win32.Sleep(8);
+            if (win32.DwmFlush() != 0) {
+                win32.Sleep(8);
+                continue;
+            }
+            var now: i64 = 0;
+            _ = win32.QueryPerformanceCounter(&now);
+            loop.vblank_qpc.store(now, .seq_cst);
             continue;
+        }
+        // Adaptive idle: when the last tick reported nothing animating, park on
+        // the wake event (input, a redraw request, or stop() sets it) instead of
+        // pacing on DwmFlush. Falling through to DwmFlush after the wait keeps a
+        // woken frame aligned to the compositor, so a continuous input stream
+        // still renders at vsync rate rather than at input rate.
+        if (loop.adaptive_poll.load(.seq_cst)) {
+            const demand = slot.demand_ms.load(.seq_cst);
+            if (demand != 0) {
+                const cap = loop.idle_cap_ms.load(.seq_cst);
+                const timeout: u32 = if (demand < 0)
+                    cap
+                else
+                    std.math.clamp(@as(u32, @intCast(demand)), 8, cap);
+                if (slot.wake_event) |ev| _ = win32.WaitForSingleObject(ev, timeout);
+                if (!slot.running.load(.seq_cst)) return;
+            }
         }
         if (win32.DwmFlush() != 0) {
             win32.Sleep(8);

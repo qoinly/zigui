@@ -95,9 +95,12 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, opts: ToastOptions) Ren
         .{ .point_size = ICON_PT, .color = tr.fade(accent, op) },
     );
 
-    _ = try label.render(b, tx, block_top, opts.title, title_sty);
+    // Clamp to the card's inner width so a long message ellipsizes instead of
+    // bleeding past the toast edge.
+    const text_max_w = x + w - PAD - tx;
+    _ = try label.render_clamped(b, tx, block_top, opts.title, text_max_w, title_sty);
     if (has_desc) {
-        _ = try label.render(b, tx, block_top + title_h + DESC_GAP, opts.description, desc_sty);
+        _ = try label.render_clamped(b, tx, block_top + title_h + DESC_GAP, opts.description, text_max_w, desc_sty);
     }
     return SizeF.init(w, h);
 }

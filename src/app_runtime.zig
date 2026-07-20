@@ -21,6 +21,7 @@ pub const Frame = struct {
     theme: *const types.Theme,
     arena: std.mem.Allocator,
     time: f64, // monotonic seconds, for time-based animation (with zigui.animate)
+    hovered_id: []const u8 = "", // topmost hover-id box under the pointer (reveal-on-hover)
 };
 
 // The window's region views. titlebar/overlay/hud are optional. The lib always
@@ -112,6 +113,11 @@ const WindowSet = struct {
     }
 };
 
+// A theme swap requested at runtime (e.g. a light/dark toggle from a click
+// handler, which runs between frames). Applied to the window at the top of the
+// next frame so f.theme reflects it immediately; a null means no change pending.
+pub var pending_theme: ?types.Theme = null;
+
 // The per-frame render bridge for one window, specialized on the view set. The
 // display link hands back the *Window as its context, so every callback drives
 // exactly the window it belongs to (no shared current-window global). Public so
@@ -125,12 +131,24 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             raw: paint.Frame,
         ) paint.PaintError!void {
             const w: *Window = @ptrCast(@alignCast(ctx));
+            // Apply a runtime theme swap before the frame reads it. Update BOTH the
+            // window theme (view content, via f.theme) and the shell handle theme
+            // (the chrome: titlebar band, separator, caption buttons) — the renderer
+            // paints the band from pc.handle.theme, a separate copy.
+            if (pending_theme) |th| {
+                w.theme = th;
+                w.handle.theme = th;
+                pc.handle.theme = th;
+                pending_theme = null;
+            }
             // High-water pool: reset both before building this frame's tree.
             w.eng.clear();
             _ = w.arena.reset(.retain_capacity);
             pc.blur_modal = false; // an overlay re-arms it each frame while open
             pc.frost_count = 0; // the bars append their frost rects each frame
             pc.text_field_active = false; // a focused input re-arms it below
+            pc.text_focus_ctx = null; // the focused editor re-arms it during its render
+            pc.text_focus_blur = null;
             // Clear the redraw-again flag too: whatever still needs continuous
             // frames (animate(), a focused editor) re-arms it during the build, so
             // an idle window stops driving its loop instead of spinning forever.
@@ -150,6 +168,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 .theme = &w.theme,
                 .arena = w.arena.allocator(),
                 .time = pc.now_s,
+                .hovered_id = pc.hovered_id,
             };
             // non-null whenever State != void (the loop is started from a real pointer)
             const st: State = if (State == void) {} else @ptrCast(@alignCast(w.user_state.?));
@@ -163,6 +182,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             else
                 null;
             pc.block_hover = ov_root != null;
+            pc.block_keys = ov_root != null; // a modal owns the keyboard; body text areas go inert
             if (views.titlebar) |titlebar_view| {
                 const tb_root = titlebar_view(&f, st);
                 try node.render_at(&w.eng, &builder, &w.theme, tb_root, raw.titlebar, pc);
@@ -178,6 +198,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             try node.render_at(&w.eng, &builder, &w.theme, body_root, body_bounds, pc);
             if (ov_root) |root| {
                 pc.block_hover = false; // the modal layer itself is live
+                pc.block_keys = false; // a text field inside the modal still types
                 const full = geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size };
                 try node.render_at(&w.eng, &builder, &w.theme, root, full, pc);
             }
@@ -189,6 +210,8 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             };
             // No focused input claimed the singleton editor this frame -> hide it.
             if (!pc.text_field_active) pc.hide_text_field();
+            // Every hitbox is registered now; record the hovered id for next frame.
+            pc.refresh_hover();
         }
     };
 }
@@ -211,6 +234,9 @@ pub const App = struct {
         title: []const u8 = "",
         size: [2]f32,
         min_size: ?[2]f32 = null,
+        theme: ?types.Theme = null,
+        feel: types.Feel = .liquid_glass,
+        titlebar_height: ?f32 = null,
     };
 
     // What open_window takes: just the window's identity. Its state + views come
@@ -222,6 +248,9 @@ pub const App = struct {
         id: u32 = 0,
         size: ?[2]f32 = null,
         min_size: ?[2]f32 = null,
+        theme: ?types.Theme = null,
+        titlebar_height: ?f32 = null,
+        feel: types.Feel = .liquid_glass,
     };
 
     pub fn init(opts: Options) !*App {
@@ -237,7 +266,7 @@ pub const App = struct {
         rt.quit_on_last_window_closed();
         rt.install_edit_menu();
 
-        const theme = types.Theme.default_dark();
+        const theme = opts.theme orelse types.Theme.default_dark();
         const handle = try window.open_custom_shell(.{
             .title = opts.title,
             .width = @floatCast(opts.size[0]),
@@ -245,8 +274,9 @@ pub const App = struct {
             .min_width = if (opts.min_size) |m| @floatCast(m[0]) else MIN_W,
             .min_height = if (opts.min_size) |m| @floatCast(m[1]) else MIN_H,
             .chrome = .custom,
-            .feel = .liquid_glass,
+            .feel = opts.feel,
             .theme = theme,
+            .titlebar = if (opts.titlebar_height) |h| .{ .height = h } else .{},
         });
         errdefer handle.deinit();
 
@@ -350,7 +380,7 @@ pub const App = struct {
         std.debug.assert(size[0] > 0);
         std.debug.assert(size[1] > 0);
 
-        const theme = types.Theme.default_dark();
+        const theme = opts.theme orelse types.Theme.default_dark();
         const handle = try window.open_custom_shell(.{
             .title = title,
             .width = @floatCast(size[0]),
@@ -358,8 +388,9 @@ pub const App = struct {
             .min_width = @floatCast(min[0]),
             .min_height = @floatCast(min[1]),
             .chrome = .custom,
-            .feel = .liquid_glass,
+            .feel = opts.feel,
             .theme = theme,
+            .titlebar = if (opts.titlebar_height) |h| .{ .height = h } else .{},
         });
         errdefer handle.deinit();
 

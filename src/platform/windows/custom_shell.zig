@@ -11,6 +11,7 @@
 const std = @import("std");
 const win32 = @import("win32.zig");
 const loop = @import("loop.zig");
+const dcomp = @import("dcomp.zig");
 const types = @import("../../window/types.zig");
 const input = @import("../../input.zig");
 const geometry = @import("../../geometry.zig");
@@ -50,6 +51,8 @@ pub const MouseDispatch = struct {
     on_exit: *const fn (ctx: *anyopaque) void,
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_file_drop: *const fn (ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,
@@ -140,6 +143,14 @@ pub const CustomShellHandle = struct {
 
     pub fn is_minimized(self: CustomShellHandle) bool {
         return win32.IsIconic(self.window) != 0;
+    }
+
+    pub fn minimize(self: CustomShellHandle) void {
+        _ = win32.ShowWindow(self.window, win32.SW_MINIMIZE);
+    }
+    // No app-hide concept; minimize instead of SW_HIDE (which drops the taskbar entry).
+    pub fn hide(self: CustomShellHandle) void {
+        _ = win32.ShowWindow(self.window, win32.SW_MINIMIZE);
     }
 
     pub fn is_key(self: CustomShellHandle) bool {
@@ -304,6 +315,12 @@ fn grab_target_hwnd() ?win32.HWND {
     return g_main_hwnd orelse g_root_hwnd;
 }
 
+// Owner for native modal dialogs (the file pickers): parented to the shell
+// window they center over it and block its input, like NSOpenPanel runModal.
+pub fn dialog_owner_hwnd() ?win32.HWND {
+    return g_main_hwnd orelse g_root_hwnd;
+}
+
 // Windows-only: lets WM_NCHITTEST ask the paint layer whether a band point hits
 // an interactive component (-> HTCLIENT) and lets caption hover request a redraw.
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
@@ -416,6 +433,11 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     }
     g_main_hwnd = hwnd;
     try register_raw_devices(hwnd);
+    // Native Explorer drops: WM_DROPFILES lands in wnd_proc and feeds the shared
+    // file-drop dispatch (the XDND / Finder counterpart). Note for an elevated
+    // process: UIPI filters drops from a non-elevated Explorer; allowing them
+    // needs ChangeWindowMessageFilterEx(WM_DROPFILES + WM_COPYDATA + 0x0049).
+    win32.DragAcceptFiles(hwnd, win32.TRUE);
 
     style_shell_window(hwnd);
     resize_shell_window(hwnd, opts.width, opts.height);
@@ -459,8 +481,15 @@ fn create_shell_window(
     height: f64,
 ) Error!win32.HWND {
     // WS_OVERLAPPEDWINDOW keeps native snap; WM_NCCALCSIZE removes the frame.
+    // WS_EX_NOREDIRECTIONBITMAP drops the GDI redirection surface: the renderer
+    // presents through a DirectComposition visual instead (d3d11_renderer),
+    // which DWM moves atomically with the frame during a live resize. Only set
+    // when dcomp is available, since without it that surface is the window's
+    // only image source (the renderer keys its fallback off the same probe).
+    const ex_style: win32.DWORD = win32.WS_EX_APPWINDOW |
+        (if (dcomp.available()) win32.WS_EX_NOREDIRECTIONBITMAP else 0);
     return win32.CreateWindowExW(
-        win32.WS_EX_APPWINDOW,
+        ex_style,
         CLASS_NAME,
         title,
         win32.WS_OVERLAPPEDWINDOW | win32.WS_CLIPCHILDREN,
@@ -700,6 +729,7 @@ fn wnd_proc(
         win32.WM_SIZE,
         win32.WM_EXITSIZEMOVE,
         => handle_size_message(hwnd, msg),
+        win32.WM_TIMER => if (handle_resize_timer(hwnd, w)) |r| return r,
         win32.WM_DISPLAYCHANGE,
         win32.WM_DPICHANGED,
         win32.WM_SETTINGCHANGE,
@@ -725,6 +755,7 @@ fn wnd_proc(
         win32.WM_SYSKEYUP,
         win32.WM_CHAR,
         => if (handle_key_message(hwnd, msg, w)) |r| return r,
+        win32.WM_DROPFILES => return handle_drop_files(hwnd, w),
         else => {},
     }
     return win32.DefWindowProcW(hwnd, msg, w, l);
@@ -806,20 +837,69 @@ fn handle_size_message(hwnd: win32.HWND, msg: win32.UINT) void {
         win32.WM_ENTERSIZEMOVE => {
             // The modal resize loop drives WM_SIZE synchronously and starves vsync.
             loop.resizing.store(true, .seq_cst);
+            g_resize_paint_due = false;
+            g_resize_last_qpc = 0; // the drag's first WM_SIZE paints immediately
+            // USER_TIMER_MINIMUM. WM_TIMER is delivered inside the modal loop once
+            // the input burst pauses, so a throttled trailing size still paints.
+            _ = win32.SetTimer(hwnd, RESIZE_TIMER_ID, 10, null);
         },
         win32.WM_SIZE => {
             if (loop.resizing.load(.seq_cst)) {
-                paint_now(hwnd);
+                resize_paint_step(hwnd);
             } else {
                 request_redraw_for(hwnd);
             }
         },
         win32.WM_EXITSIZEMOVE => {
+            _ = win32.KillTimer(hwnd, RESIZE_TIMER_ID);
             loop.resizing.store(false, .seq_cst);
-            paint_now(hwnd);
+            g_resize_paint_due = false;
+            paint_now(hwnd); // the final size always renders, unthrottled
         },
         else => std.debug.assert(false),
     }
+}
+
+// Modal-resize paint pacing. WM_SIZE arrives at mouse input rate, and each
+// synchronous paint blocks the modal loop: DefWindowProc cannot process the next
+// mouse move (so the window border cannot follow the hand) until the paint
+// returns. Painting every WM_SIZE therefore makes the drag track paint latency
+// instead of the cursor, and re-runs ResizeBuffers (a full GPU drain) per mouse
+// move. Capping paints at one per ~8ms keeps content near-refresh-rate while the
+// loop drains input between frames, which is what makes the border feel glued to
+// the cursor (macOS gets the same pacing for free from the window server).
+const RESIZE_TIMER_ID: usize = 0x7A67; // arbitrary nonzero id, private to this class
+const RESIZE_PAINT_MIN_MS: i64 = 8;
+var g_resize_paint_due: bool = false; // a WM_SIZE was throttled; the timer owes a paint
+var g_resize_last_qpc: i64 = 0;
+var g_qpc_freq: i64 = 0;
+
+fn resize_paint_step(hwnd: win32.HWND) void {
+    if (g_qpc_freq == 0) _ = win32.QueryPerformanceFrequency(&g_qpc_freq);
+    var now: i64 = 0;
+    _ = win32.QueryPerformanceCounter(&now);
+    // One paint per compositor frame, gated on the vblank the vsync thread
+    // publishes during the drag: a free-running paint grid (any fixed interval)
+    // beats against the refresh rate, which the eye reads as micro-stutter.
+    // Falls back to a fixed throttle until the first vblank lands.
+    const vblank = loop.vblank_qpc.load(.seq_cst);
+    const gate_open = if (vblank != 0)
+        vblank > g_resize_last_qpc
+    else
+        now - g_resize_last_qpc >= @divTrunc(g_qpc_freq * RESIZE_PAINT_MIN_MS, 1000);
+    if (!gate_open) {
+        g_resize_paint_due = true; // coalesce: the next WM_SIZE or WM_TIMER paints
+        return;
+    }
+    g_resize_last_qpc = now;
+    g_resize_paint_due = false;
+    paint_now(hwnd); // paints the CURRENT client rect, so coalescing stays correct
+}
+
+fn handle_resize_timer(hwnd: win32.HWND, w: win32.WPARAM) ?win32.LRESULT {
+    if (w != RESIZE_TIMER_ID) return null;
+    if (loop.resizing.load(.seq_cst) and g_resize_paint_due) resize_paint_step(hwnd);
+    return 0;
 }
 
 fn handle_edit_color(w: win32.WPARAM) ?win32.LRESULT {
@@ -898,9 +978,9 @@ fn handle_mouse_message(
         win32.WM_LBUTTONDOWN => handle_mouse_down(hwnd, l),
         win32.WM_LBUTTONUP => if (g_dispatch) |d| d.on_up(dispatch_ctx(hwnd, d.ctx)),
         win32.WM_RBUTTONDOWN => handle_mouse_right_down(hwnd, l),
+        win32.WM_MBUTTONDOWN => handle_mouse_middle_down(hwnd, l),
         win32.WM_MOUSEWHEEL => handle_mouse_wheel(hwnd, w),
         win32.WM_RBUTTONUP,
-        win32.WM_MBUTTONDOWN,
         win32.WM_MBUTTONUP,
         win32.WM_MOUSEHWHEEL,
         => {},
@@ -935,6 +1015,53 @@ fn handle_mouse_right_down(hwnd: win32.HWND, l: win32.LPARAM) void {
         const p = dispatch_point(hwnd, l);
         d.on_right_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
     }
+}
+
+fn handle_mouse_middle_down(hwnd: win32.HWND, l: win32.LPARAM) void {
+    if (g_dispatch) |d| {
+        const p = dispatch_point(hwnd, l);
+        d.on_middle_down(dispatch_ctx(hwnd, d.ctx), p[0], p[1]);
+    }
+}
+
+// Newline-joined plain absolute paths, the form the shared decoder accepts
+// directly. Sized to the decoder's own capacity; GUI-thread only, and consumed
+// (copied) inside the dispatch below, so one static scratch is enough.
+var g_drop_scratch: [8192]u8 = undefined;
+
+fn handle_drop_files(hwnd: win32.HWND, w: win32.WPARAM) win32.LRESULT {
+    if (w == 0) return 0;
+    const hdrop: win32.HDROP = @ptrFromInt(w);
+    defer win32.DragFinish(hdrop);
+    const d = g_dispatch orelse return 0;
+
+    // The drop point arrives in client px; points = px / scale (dispatch_point's math).
+    var pt = win32.POINT{ .x = 0, .y = 0 };
+    _ = win32.DragQueryPoint(hdrop, &pt);
+    const scale = scale_for(hwnd);
+    std.debug.assert(scale > 0); // divisor below
+    const x = @as(f32, @floatFromInt(pt.x)) / scale;
+    const y = @as(f32, @floatFromInt(pt.y)) / scale;
+
+    const count = win32.DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
+    var out: usize = 0;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        var wbuf: [1024]u16 = undefined;
+        const n = win32.DragQueryFileW(hdrop, i, &wbuf, wbuf.len);
+        if (n == 0) continue;
+        // Worst case 3 UTF-8 bytes per UTF-16 unit, +1 for the separator; a
+        // drop past the scratch keeps what already fit (decoder caps at 32 anyway).
+        if (out + 1 + @as(usize, n) * 3 > g_drop_scratch.len) break;
+        if (out > 0) {
+            g_drop_scratch[out] = '\n';
+            out += 1;
+        }
+        const written = std.unicode.utf16LeToUtf8(g_drop_scratch[out..], wbuf[0..n]) catch continue;
+        out += written;
+    }
+    if (out > 0) d.on_file_drop(dispatch_ctx(hwnd, d.ctx), &g_drop_scratch, out, x, y);
+    return 0;
 }
 
 fn handle_mouse_wheel(hwnd: win32.HWND, w: win32.WPARAM) void {
@@ -1107,7 +1234,10 @@ fn key_state_toggled(vk: win32.WPARAM) bool {
     return (state & 1) != 0;
 }
 
-// Focused text fields use one native EDIT child so IME/caret behavior stays native.
+// Focused text fields use one native EDIT child so IME/caret behavior stays
+// native. The control is never shown (seed_text_field only focuses it); the kit
+// draws the text, selection, and caret itself, so the child needs no surface -
+// which is what keeps this working under WS_EX_NOREDIRECTIONBITMAP too.
 fn ensure_edit(parent: win32.HWND) ?win32.HWND {
     if (g_edit) |e| return e;
     const instance = win32.GetModuleHandleW(null);

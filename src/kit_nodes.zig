@@ -52,6 +52,8 @@ const custom_shell = @import("custom_shell.zig");
 const theme_resolve = @import("kit/theme_resolve.zig");
 const primitives = @import("primitives.zig");
 const frame_mod = @import("frame.zig");
+const image_mod = @import("image_source.zig");
+const frame_ctx = @import("frame_ctx.zig");
 
 const Node = node.Node;
 const Theme = types.Theme;
@@ -513,6 +515,42 @@ pub fn frame(a: A, source: *frame_mod.FrameSource, opts: frame_mod.FrameOpts) *N
     return n;
 }
 
+const ImageSpec = struct {
+    source: *image_mod.ImageSource,
+    opts: frame_mod.FrameOpts,
+
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, 0); // fills its cell; draw() letterboxes per fit
+    }
+
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *ImageSpec = @ptrCast(@alignCast(ctx));
+        const rend = &frame_ctx.get().paint.renderer;
+        const tex = self.source.acquire(rend) orelse return; // not ready / unsupported backend
+        const d = self.source.dims();
+        const box = fit_rect(r, d[0], d[1], self.opts.fit);
+        try b.append_frame(.{
+            .bounds = box,
+            .clip_bounds = .{ r.origin.x, r.origin.y, r.size.width, r.size.height },
+            .tex = tex,
+            .opacity = self.opts.opacity, // tex_cbcr null + csc zero: the frame_rgba path
+        });
+    }
+};
+
+// A static decoded image (PNG/JPEG), uploaded once. Fills its cell (grow 1); opts.fit controls
+// aspect. The texture is owned by `source`; this node only references it. Unlike frame(), it
+// does not keep the loop animating - a still image needs no per-frame repaint.
+pub fn image(a: A, source: *image_mod.ImageSource, opts: frame_mod.FrameOpts) *Node {
+    const spec = a.create(ImageSpec) catch @panic("node arena oom");
+    spec.* = .{ .source = source, .opts = opts };
+    const n = node.leaf(a, ImageSpec.measure, ImageSpec.draw, spec);
+    n.style.flex_grow = 1;
+    return n;
+}
+
 const SkeletonSpec = struct {
     theme: *const Theme,
     w: f32,
@@ -745,11 +783,26 @@ pub const Ta = struct {
     // The facade fills this; a direct kit_nodes caller must set it.
     paint: ?*custom_paint.PaintContext = null,
     spans: []const textarea_kit.TextSpan = &.{},
+    // Fixed pixel height, OR set grow > 0 to fill the flex parent's remaining main
+    // axis instead (height is then ignored). Growing avoids the one-frame lag of
+    // feeding back a measured rect: the editor reads its laid-out height directly.
     height: f32 = 132,
+    grow: f32 = 0,
     read_only: bool = false,
     wrap: bool = true,
+    bordered: bool = true,
+    line_numbers: bool = false,
+    match_ranges: []const [2]u32 = &.{},
+    active_match: i32 = -1,
+    code_edits: bool = false,
+    folding: bool = false,
+    font_family: []const u8 = "SF Mono",
+    font_size: f32 = 13,
     on_focus: ?callbacks.FocusFn = null,
     ctx: ?*anyopaque = null,
+    caret_out: ?*[4]f32 = null, // window-abs caret rect, for anchoring a completion popup
+    completion: ?*textarea_kit.Completion = null, // an open completion popup's nav state
+    snippet: ?*textarea_kit.Snippet = null, // active snippet tabstops (Tab/Esc navigation)
 };
 
 const TextareaSpec = struct {
@@ -764,14 +817,27 @@ const TextareaSpec = struct {
             .paint = self.o.paint.?, // the facade always sets it before draw
             .read_only = self.o.read_only,
             .wrap = self.o.wrap,
+            .bordered = self.o.bordered,
+            .line_numbers = self.o.line_numbers,
+            .match_ranges = self.o.match_ranges,
+            .active_match = self.o.active_match,
+            .code_edits = self.o.code_edits,
+            .folding = self.o.folding,
+            .font_family = self.o.font_family,
+            .font_size = self.o.font_size,
             .on_focus = self.o.on_focus,
             .ctx = self.o.ctx,
+            .caret_out = self.o.caret_out,
+            .completion = self.o.completion,
+            .snippet = self.o.snippet,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
         _ = b;
         const self: *TextareaSpec = @ptrCast(@alignCast(ctx));
-        return SizeF.init(0, self.o.height);
+        // grow: measure 0 on both axes so the height stays .auto and flex_grow fills
+        // it; otherwise pin the fixed height. Width is always fill (measure 0).
+        return SizeF.init(0, if (self.o.grow > 0) 0 else self.o.height);
     }
     fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
         const self: *TextareaSpec = @ptrCast(@alignCast(ctx));
@@ -779,12 +845,14 @@ const TextareaSpec = struct {
         const pc = self.o.paint orelse return; // the facade always sets it
         // Keep the loop ticking so the caret blinks between keystrokes.
         if (self.state.focused) pc.animating = true;
+        // The laid-out extent, not o.height: identical for a pinned height, but for a
+        // grown editor it is the space flex just handed us — correct on the first frame.
         _ = try textarea_kit.render(
             b,
             r.origin.x,
             r.origin.y,
             r.size.width,
-            self.o.height,
+            r.size.height,
             self.opts(),
         );
     }
@@ -793,7 +861,9 @@ const TextareaSpec = struct {
 pub fn textarea(a: A, theme: *const Theme, state: *textarea_kit.TextAreaState, o: Ta) *Node {
     const spec = a.create(TextareaSpec) catch @panic("node arena oom");
     spec.* = .{ .theme = theme, .state = state, .o = o };
-    return node.leaf(a, TextareaSpec.measure, TextareaSpec.draw, spec);
+    const n = node.leaf(a, TextareaSpec.measure, TextareaSpec.draw, spec);
+    if (o.grow > 0) n.style.flex_grow = o.grow; // fill the flex parent's remaining main axis
+    return n;
 }
 
 pub const AlertOpt = struct {
@@ -1263,6 +1333,8 @@ const SelectOverlaySpec = struct {
                 fld.slice(),
                 theme.font_size,
                 theme.foreground,
+                false,
+                false,
                 SELECT_SEARCH_ID,
             );
             if (shown) {
@@ -1279,6 +1351,8 @@ const SelectOverlaySpec = struct {
                         sr[3],
                         fld.slice(),
                         theme,
+                        &.{},
+                        null,
                     );
                 }
             }
@@ -1453,6 +1527,37 @@ const DialogSpec = struct {
     }
 };
 
+// A zero-size leaf that lifts everything drawn AFTER it into the modal top layer:
+// it records the current backdrop counts (so the renderer frosts the body+scrim
+// drawn before it and draws the following content crisp on top) — the same
+// mechanism kit.dialog uses internally, exposed so a facade-composed modal (with
+// arbitrary children) can render above the body instead of losing the z-order to
+// deeply-nested body nodes. Place it as the first child of the modal's root, after
+// the scrim; the card follows and renders on top.
+const ModalBackdropSpec = struct {
+    paint: ?*custom_paint.PaintContext = null,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, 0);
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        _ = r;
+        const self: *ModalBackdropSpec = @ptrCast(@alignCast(ctx));
+        const pc = self.paint orelse return;
+        pc.blur_modal = true;
+        pc.backdrop_prims = @intCast(b.prims.items.len);
+        pc.backdrop_sprites = @intCast(b.sprites.items.len);
+        pc.backdrop_color = @intCast(b.color_sprites.items.len);
+    }
+};
+
+pub fn modal_backdrop(a: A, pc: ?*custom_paint.PaintContext) *Node {
+    const spec = a.create(ModalBackdropSpec) catch @panic("node arena oom");
+    spec.* = .{ .paint = pc };
+    return node.leaf(a, ModalBackdropSpec.measure, ModalBackdropSpec.draw, spec);
+}
+
 pub fn dialog(a: A, theme: *const Theme, o: Dialog) *Node {
     std.debug.assert(o.actions.len <= MAX_DIALOG_ACTIONS);
     // Copy actions into the arena: a `&.{...}` struct-array literal is a stack
@@ -1542,6 +1647,10 @@ fn edit_native(
     field: *TextField,
     theme: *const Theme,
     id: u32,
+    spans: []const textarea_kit.TextSpan,
+    font: ?[]const u8,
+    secure: bool,
+    numeric: bool,
 ) RenderError!void {
     std.debug.assert(id != 0); // 0 is the native editor's inactive sentinel
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
@@ -1555,6 +1664,8 @@ fn edit_native(
         field.slice(),
         theme.font_size,
         theme.foreground,
+        secure,
+        numeric,
         id,
     );
     // A background window does not own the editor, so it neither animates a caret
@@ -1563,8 +1674,21 @@ fn edit_native(
     pc.animating = true;
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
-    if (!custom_shell.text_field_native_paint)
-        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme);
+    if (!custom_shell.text_field_native_paint) {
+        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font);
+    } else if (spans.len > 0 and !secure) {
+        // Native-painted backends (macOS) draw the text themselves, so the overlay
+        // above can't reach it; hand the token colors to the native editor instead.
+        // Flatten to the platform span type (no weight; native coloring is fg-only).
+        var fs: [64]types.FieldSpan = undefined;
+        var n: usize = 0;
+        for (spans) |s| {
+            if (n >= fs.len) break;
+            fs[n] = .{ .start = s.start, .end = s.end, .color = s.color };
+            n += 1;
+        }
+        pc.color_text_field(field.slice(), fs[0..n], theme.foreground, font, theme.font_size);
+    }
 }
 
 // On a backend whose editor is state-only (no native control to float), the
@@ -1580,16 +1704,20 @@ fn draw_field_overlay(
     h: f32,
     value: []const u8,
     theme: *const Theme,
+    spans: []const textarea_kit.TextSpan,
+    font: ?[]const u8,
 ) RenderError!void {
     std.debug.assert(!custom_shell.text_field_native_paint);
     // A secure field must never paint its plaintext; bullets carry the same
     // caret/selection offsets because the mask is per-codepoint.
     var mask_buf: [256 * 3]u8 = undefined;
-    const shown_value = if (custom_shell.text_field_secure())
+    const secure = custom_shell.text_field_secure();
+    const shown_value = if (secure)
         field_mask(value, &mask_buf)
     else
         value;
-    const sty = label_render.Style{ .font_size = theme.font_size, .color = theme.foreground };
+    var sty = label_render.Style{ .font_size = theme.font_size, .color = theme.foreground };
+    if (font) |ff| sty.font_family = ff;
     // An empty value measures zero; a reference glyph keeps the caret's
     // vertical metrics stable while the field is empty.
     const m = label_render.measure(b, if (shown_value.len == 0) "M" else shown_value, sty);
@@ -1617,7 +1745,13 @@ fn draw_field_overlay(
     }
 
     const t0 = b.sprites.items.len;
-    _ = try label_render.render(b, x - shift, top, shown_value, sty);
+    // Colored token runs (never on a secure field: its plaintext must not leak, and
+    // the mask offsets would not line up with the value's spans).
+    if (spans.len > 0 and !secure) {
+        try render_field_runs(b, x - shift, top, shown_value, sty, spans);
+    } else {
+        _ = try label_render.render(b, x - shift, top, shown_value, sty);
+    }
     for (b.sprites.items[t0..]) |*sp| {
         sp.clip_bounds = theme_resolve.clip_intersect(sp.clip_bounds, clip);
     }
@@ -1627,6 +1761,34 @@ fn draw_field_overlay(
         _ = caret_q.set_background(theme.foreground).set_clip_bounds(clip);
         try b.append_quad(caret_q);
     }
+}
+
+// Render `value` as base-colored text with `spans` recolored, left to right. Spans
+// are expected sorted and non-overlapping; offsets are clamped to the value, and a
+// span that starts before the pen (overlap/out-of-order) is skipped, so bad input
+// degrades to plain text rather than misdrawing.
+fn render_field_runs(
+    b: *RenderBuilder,
+    x: f32,
+    top: f32,
+    value: []const u8,
+    base: label_render.Style,
+    spans: []const textarea_kit.TextSpan,
+) RenderError!void {
+    var pen = x;
+    var i: usize = 0; // byte cursor into value
+    for (spans) |sp| {
+        const s = @min(@as(usize, sp.start), value.len);
+        const e = @min(@as(usize, sp.end), value.len);
+        if (e <= s or s < i) continue;
+        if (s > i) pen += try label_render.render(b, pen, top, value[i..s], base);
+        var run = base;
+        run.color = sp.color;
+        run.weight = sp.weight;
+        pen += try label_render.render(b, pen, top, value[s..e], run);
+        i = e;
+    }
+    if (i < value.len) _ = try label_render.render(b, pen, top, value[i..], base);
 }
 
 // One U+2022 (3 bytes) per codepoint; a 256-byte value caps the buffer.
@@ -1652,10 +1814,29 @@ pub const TextInputOpts = struct {
     placeholder: []const u8 = "",
     size: Size = .default,
     focused: bool = false,
+    invalid: bool = false, // draw the destructive error border
     id: u32 = 1, // distinct per field so the singleton editor re-seeds on switch
     on_focus: ?callbacks.FocusFn = null,
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
+    // Optional token/syntax coloring of the value while editing (single-line
+    // highlight, e.g. {{var}} in a URL). Offsets index the value's bytes and are
+    // clamped to it; empty = plain foreground. Honored where the kit draws the text
+    // (overlay backends, incl. Linux); native-painted fields (macOS/Windows) draw
+    // plain until their native side adopts spans.
+    spans: []const textarea_kit.TextSpan = &.{},
+    // Editor overlay font; null keeps the theme UI font. A URL/code field passes a
+    // mono family so the idle and editing text read as one.
+    font_family: ?[]const u8 = null,
+    // Field kind. `.password` masks the value (bullets idle, a secure native editor
+    // when focused - NSSecureTextField on macOS - and never reaches the clipboard);
+    // `.number` rejects non-numeric keystrokes in the native editor. The eye toggle
+    // (password) and steppers (number) render only when their handler is supplied.
+    kind: input_kit.InputKind = .text,
+    reveal: bool = false, // password: show the plaintext (caller-owned toggle state)
+    on_reveal_toggle: ?callbacks.ToggleFn = null,
+    on_increment: ?callbacks.ClickFn = null,
+    on_decrement: ?callbacks.ClickFn = null,
 };
 
 const TextInputSpec = struct {
@@ -1674,14 +1855,22 @@ const TextInputSpec = struct {
             .value = self.field.slice(),
             .placeholder = self.o.placeholder,
             .size = self.o.size,
+            .kind = self.o.kind,
+            .reveal = self.o.reveal,
             .focused = self.o.focused,
+            .invalid = self.o.invalid,
             .theme = self.theme,
             .paint = self.o.paint,
             .on_focus = self.o.on_focus,
+            .on_reveal_toggle = self.o.on_reveal_toggle,
+            .on_increment = self.o.on_increment,
+            .on_decrement = self.o.on_decrement,
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
+            // A revealed password shows plaintext, so its focused editor is not secure.
+            const secure = self.o.kind == .password and !self.o.reveal;
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family, secure, self.o.kind == .number);
         };
     }
 };
@@ -1725,7 +1914,7 @@ const TextEditableSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null, false, false);
         };
     }
 };
@@ -1761,6 +1950,13 @@ pub const Tabbar = struct {
     on_new: ?tabbar_kit.TabNewFn = null,
     on_move: ?tabbar_kit.TabMoveFn = null,
     on_pin: ?tabbar_kit.TabPinFn = null,
+    on_context: ?tabbar_kit.TabContextFn = null,
+    label_size: f32 = 0, // 0 = theme font size
+    // Tab width bounds. Tabs shrink to fill the strip down to min_tab_w, then it
+    // scrolls; they never grow past max_tab_w. Set min == max for a fixed tab
+    // width (opening a tab never resizes the others; the strip just scrolls).
+    min_tab_w: f32 = 120,
+    max_tab_w: f32 = 220,
     paint: ?*custom_paint.PaintContext = null,
     ctx: ?*anyopaque = null,
 };
@@ -1779,9 +1975,13 @@ const TabbarSpec = struct {
             .on_new = self.o.on_new,
             .on_move = self.o.on_move,
             .on_pin = self.o.on_pin,
+            .on_context = self.o.on_context,
             .ctx = self.o.ctx,
             .height = self.o.height,
             .scroll_x = self.o.scroll_x.*,
+            .label_size = self.o.label_size,
+            .min_tab_w = self.o.min_tab_w,
+            .max_tab_w = self.o.max_tab_w,
         };
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
@@ -1830,6 +2030,8 @@ pub const MenuOverlay = struct {
     trigger: *const [4]f32, // read at draw, after the trigger wrote it this frame
     view_y: f32 = 0, // body inset (content top) for edge-flip + clip
     view_h: f32 = 0, // content height; 0 disables vertical flip/clip
+    min_width: f32 = 200, // panel floor; lower it for a menu that should hug short content
+    hug: bool = false, // unmarked plain items left-align + don't pad the panel (short pickers)
     on_select: ?callbacks.SelectIdFn = null,
     on_dismiss: ?callbacks.ClickFn = null,
     paint: ?*custom_paint.PaintContext = null,
@@ -1867,6 +2069,8 @@ const MenuOverlaySpec = struct {
             .paint = pc,
             .on_select = o.on_select,
             .ctx = o.ctx,
+            .min_width = o.min_width,
+            .hug = o.hug,
             .view_x = 0,
             .view_y = o.view_y,
             .view_w = r.size.width,
@@ -2025,6 +2229,10 @@ fn toast_icon(v: toast_kit.ToastVariant) icon_render.Icon {
 pub const Toasts = struct {
     slots: []ToastSlot, // caller-owned, cross-frame
     paint: ?*custom_paint.PaintContext = null,
+    // Extra space reserved at the bottom of the hud region, so the stack floats
+    // above a footer/status bar the hud draws over (the hud fills the whole window).
+    // The bottom margin is then measured from the top of that reserved band.
+    bottom_inset: f32 = 0,
 };
 
 const ToastsSpec = struct {
@@ -2074,7 +2282,7 @@ const ToastsSpec = struct {
             }
             any = true;
             const tx = r.size.width - TOAST_W - TOAST_MARGIN;
-            const ty = r.size.height - TOAST_MARGIN - th - stack * (th + TOAST_GAP) + off;
+            const ty = r.size.height - self.o.bottom_inset - TOAST_MARGIN - th - stack * (th + TOAST_GAP) + off;
             const sz = try toast_kit.render(b, tx, ty, TOAST_W, .{
                 .title = t.text,
                 .variant = t.variant,

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const backend = @import("backend.zig");
+const field = @import("field.zig");
 const wayland_shell = @import("wayland_shell.zig");
 const x11_shell = @import("x11_shell.zig");
 const shell_types = @import("shell_types.zig");
@@ -96,6 +97,16 @@ pub const CustomShellHandle = struct {
             .wayland => self.wl().is_minimized(),
             .x11 => self.x11().is_minimized(),
         };
+    }
+
+    pub fn minimize(self: CustomShellHandle) void {
+        switch (backend.active) {
+            .wayland => self.wl().minimize(),
+            .x11 => self.x11().minimize(),
+        }
+    }
+    pub fn hide(self: CustomShellHandle) void {
+        self.minimize(); // no app-hide on Linux; iconify instead
     }
 
     pub fn is_key(self: CustomShellHandle) bool {
@@ -291,6 +302,12 @@ pub fn text_field_value(buf: []u8) []const u8 {
         .wayland => wayland_shell.text_field_value(buf),
         .x11 => x11_shell.text_field_value(buf),
     };
+}
+
+// The field module is shared by both backends (each feeds it keys), so the pending special
+// key is read straight from it, no per-backend split.
+pub fn text_field_special() ?shell_types.FieldKey {
+    return field.take_special();
 }
 
 pub fn text_field_caret() usize {

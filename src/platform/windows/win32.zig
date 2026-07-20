@@ -271,6 +271,7 @@ pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
 pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_DPICHANGED: UINT = 0x02E0;
+pub const WM_TIMER: UINT = 0x0113;
 // First message id free for application use; the vsync tick rides on it.
 pub const WM_APP: UINT = 0x8000;
 
@@ -385,7 +386,66 @@ pub extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.wina
 pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
+pub extern "kernel32" fn QueryPerformanceCounter(count: *i64) callconv(.winapi) BOOL;
+pub extern "kernel32" fn QueryPerformanceFrequency(freq: *i64) callconv(.winapi) BOOL;
 pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn CreateEventW(
+    attrs: ?*anyopaque,
+    manual_reset: BOOL,
+    initial_state: BOOL,
+    name: ?LPCWSTR,
+) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn SetEvent(event: HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn WaitForSingleObject(handle: HANDLE, ms: DWORD) callconv(.winapi) DWORD;
+
+// Native file dialogs (comdlg32). lpstrFilter is label/pattern pairs, each
+// NUL-terminated, the whole list double-NUL-terminated.
+pub const OPENFILENAMEW = extern struct {
+    lStructSize: DWORD,
+    hwndOwner: ?HWND,
+    hInstance: ?HINSTANCE,
+    lpstrFilter: ?[*:0]const u16,
+    lpstrCustomFilter: ?[*]u16,
+    nMaxCustFilter: DWORD,
+    nFilterIndex: DWORD,
+    lpstrFile: [*]u16,
+    nMaxFile: DWORD,
+    lpstrFileTitle: ?[*]u16,
+    nMaxFileTitle: DWORD,
+    lpstrInitialDir: ?[*:0]const u16,
+    lpstrTitle: ?[*:0]const u16,
+    Flags: DWORD,
+    nFileOffset: u16,
+    nFileExtension: u16,
+    lpstrDefExt: ?[*:0]const u16,
+    lCustData: LPARAM,
+    lpfnHook: ?*anyopaque,
+    lpTemplateName: ?[*:0]const u16,
+    pvReserved: ?*anyopaque,
+    dwReserved: DWORD,
+    FlagsEx: DWORD,
+};
+pub const OFN_OVERWRITEPROMPT: DWORD = 0x0002;
+pub const OFN_NOCHANGEDIR: DWORD = 0x0008;
+pub const OFN_PATHMUSTEXIST: DWORD = 0x0800;
+pub const OFN_FILEMUSTEXIST: DWORD = 0x1000;
+pub extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+pub extern "comdlg32" fn GetSaveFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+pub extern "comdlg32" fn CommDlgExtendedError() callconv(.winapi) DWORD;
+
+// Explorer file drop (WM_DROPFILES). DragQueryFileW with index 0xFFFFFFFF
+// returns the file count; with a null buffer, the required length for a file.
+pub const WM_DROPFILES: UINT = 0x0233;
+pub const HDROP = *opaque {};
+pub extern "shell32" fn DragAcceptFiles(hwnd: HWND, accept: BOOL) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryFileW(
+    hdrop: HDROP,
+    index: UINT,
+    file: ?[*]u16,
+    cch: UINT,
+) callconv(.winapi) UINT;
+pub extern "shell32" fn DragQueryPoint(hdrop: HDROP, pt: *POINT) callconv(.winapi) BOOL;
+pub extern "shell32" fn DragFinish(hdrop: HDROP) callconv(.winapi) void;
 // Idle-sleep inhibitor: ES_CONTINUOUS holds the state until the next call, the
 // DISPLAY/SYSTEM bits keep the screen + machine awake.
 pub const ES_CONTINUOUS: u32 = 0x80000000;
@@ -446,6 +506,16 @@ pub extern "user32" fn PostThreadMessageW(
     w: WPARAM,
     l: LPARAM,
 ) callconv(.winapi) BOOL;
+// WM_TIMER is delivered inside the Win32 modal size/move loop whenever the input
+// burst pauses, which makes it the standard vehicle for repainting during a live
+// resize. The callback stays null; the timer id is dispatched through wnd_proc.
+pub extern "user32" fn SetTimer(
+    hwnd: ?HWND,
+    id: usize,
+    elapse_ms: UINT,
+    callback: ?*const anyopaque,
+) callconv(.winapi) usize;
+pub extern "user32" fn KillTimer(hwnd: ?HWND, id: usize) callconv(.winapi) BOOL;
 pub extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetWindowRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: DWORD) callconv(.winapi) ?HMONITOR;

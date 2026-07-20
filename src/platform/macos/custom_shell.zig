@@ -21,6 +21,7 @@ const NSWindowStyleMaskResizable: NSUInteger = 1 << 3;
 const NSWindowStyleMaskFullScreen: NSUInteger = 1 << 14;
 const NSWindowStyleMaskFullSizeContentView: NSUInteger = 1 << 15;
 const NSBackingStoreBuffered: NSUInteger = 2;
+const NSWindowOcclusionStateVisible: NSUInteger = 1 << 1;
 
 const NSViewWidthSizable: NSUInteger = 1 << 1;
 const NSViewHeightSizable: NSUInteger = 1 << 4;
@@ -89,6 +90,8 @@ pub const MouseDispatch = struct {
     on_exit: *const fn (ctx: *anyopaque) void,
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_file_drop: *const fn (ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,
@@ -244,12 +247,13 @@ pub const HitTestFn = *const fn (ctx: *anyopaque, x: f32, y: f32, band_h: f32) b
 pub const RedrawFn = *const fn (ctx: *anyopaque) void;
 var g_hit_test: ?HitTestFn = null;
 var g_hit_ctx: ?*anyopaque = null;
+var g_redraw: ?RedrawFn = null;
 var g_titlebar_band_h: f32 = 0;
 
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
     g_hit_test = hit_test_cb;
     g_hit_ctx = ctx;
-    _ = redraw_cb; // macOS redraws on its own; only Windows needs the paint poke
+    g_redraw = redraw_cb; // occlusion flips poke exactly the flipped window with it
 }
 
 fn is_flipped_yes_imp(_: Id, _: Sel) callconv(.c) bool {
@@ -341,12 +345,96 @@ fn custom_body_right_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .right, false);
 }
 
-fn custom_body_other_mouse_down_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
-    if (g_grabbed) raw_button(event, .middle, true);
+fn custom_body_other_mouse_down_imp(self: Id, _: Sel, event: Id) callconv(.c) void {
+    if (g_grabbed) return raw_button(event, .middle, true);
+    // otherMouseDown fires for any non-left/right button; buttonNumber 2 is middle.
+    if (objc.msg_send(isize, event, "buttonNumber", .{}) != 2) return;
+    const d = g_mouse_dispatch orelse return;
+    const win_loc: NSPoint = objc.msg_send(NSPoint, event, "locationInWindow", .{});
+    const loc: NSPoint = objc.msg_send(
+        NSPoint,
+        self,
+        "convertPoint:fromView:",
+        .{ win_loc, @as(?Id, null) },
+    );
+    d.on_middle_down(view_ctx(self, d.ctx), @floatCast(loc.x), @floatCast(loc.y));
 }
 
 fn custom_body_other_mouse_up_imp(_: Id, _: Sel, event: Id) callconv(.c) void {
     if (g_grabbed) raw_button(event, .middle, false);
+}
+
+// Finder file drop (NSDraggingDestination on the body view). Each dropped file
+// lands as one absolute path, newline-joined, matching the X11 XDND payload the
+// shared parser accepts. The buffer matches the parser's cap; entries past it
+// are dropped, and the callee consumes the bytes before the call returns, so a
+// stack buffer suffices.
+const NSDragOperationNone: NSUInteger = 0;
+const NSDragOperationCopy: NSUInteger = 1;
+const DROP_BUF_CAP = 8 * 1024;
+
+// Whether the drag carries file URLs, via the same class filter the drop reads
+// with - so entered/updated and perform can never disagree.
+fn drop_url_classes(sender: Id) ?struct { pb: Id, classes: Id } {
+    const pb = objc.msg_send(Id, sender, "draggingPasteboard", .{});
+    if (@intFromPtr(pb) == 0) return null;
+    const NSURL = objc.get_class("NSURL") orelse return null;
+    const NSArray = objc.get_class("NSArray") orelse return null;
+    const classes = objc.msg_send(Id, NSArray, "arrayWithObject:", .{@as(Id, @ptrCast(NSURL))});
+    return .{ .pb = pb, .classes = classes };
+}
+
+fn dragging_entered_imp(_: Id, _: Sel, sender: Id) callconv(.c) NSUInteger {
+    const c = drop_url_classes(sender) orelse return NSDragOperationNone;
+    const ok = objc.msg_send(bool, c.pb, "canReadObjectForClasses:options:", .{
+        c.classes, @as(?Id, null),
+    });
+    return if (ok) NSDragOperationCopy else NSDragOperationNone;
+}
+
+fn prepare_drag_operation_imp(_: Id, _: Sel, _: Id) callconv(.c) bool {
+    return true;
+}
+
+fn perform_drag_operation_imp(self: Id, _: Sel, sender: Id) callconv(.c) bool {
+    const d = g_mouse_dispatch orelse return false;
+    const c = drop_url_classes(sender) orelse return false;
+    const urls = objc.msg_send(Id, c.pb, "readObjectsForClasses:options:", .{
+        c.classes, @as(?Id, null),
+    });
+    if (@intFromPtr(urls) == 0) return false;
+    const count: NSUInteger = objc.msg_send(NSUInteger, urls, "count", .{});
+    var buf: [DROP_BUF_CAP]u8 = undefined;
+    var len: usize = 0;
+    var i: NSUInteger = 0;
+    while (i < count) : (i += 1) {
+        const url = objc.msg_send(Id, urls, "objectAtIndex:", .{i});
+        if (!objc.msg_send(bool, url, "isFileURL", .{})) continue;
+        const path = objc.msg_send(Id, url, "path", .{});
+        if (@intFromPtr(path) == 0) continue;
+        const cstr = objc.msg_send([*:0]const u8, path, "UTF8String", .{});
+        const plen = std.mem.len(cstr);
+        if (len + plen + 1 > buf.len) break;
+        if (len > 0) {
+            buf[len] = '\n';
+            len += 1;
+        }
+        @memcpy(buf[len..][0..plen], cstr[0..plen]);
+        len += plen;
+    }
+    std.debug.assert(len <= buf.len);
+    if (len == 0) return false;
+    // draggingLocation is window coords; the flipped view conversion lands it
+    // top-left origin like every mouse handler above.
+    const win_loc: NSPoint = objc.msg_send(NSPoint, sender, "draggingLocation", .{});
+    const loc: NSPoint = objc.msg_send(
+        NSPoint,
+        self,
+        "convertPoint:fromView:",
+        .{ win_loc, @as(?Id, null) },
+    );
+    d.on_file_drop(view_ctx(self, d.ctx), &buf, len, @floatCast(loc.x), @floatCast(loc.y));
+    return true;
 }
 
 fn custom_body_mouse_exited_imp(self: Id, _: Sel, _: Id) callconv(.c) void {
@@ -650,6 +738,30 @@ fn ensure_custom_body_class() ?Class {
         @ptrCast(&custom_body_update_tracking_areas_imp),
         "v@:",
     );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("draggingEntered:"),
+        @ptrCast(&dragging_entered_imp),
+        "Q@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("draggingUpdated:"),
+        @ptrCast(&dragging_entered_imp),
+        "Q@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("prepareForDragOperation:"),
+        @ptrCast(&prepare_drag_operation_imp),
+        "B@:@",
+    );
+    _ = objc.class_addMethod(
+        cls,
+        objc.sel("performDragOperation:"),
+        @ptrCast(&perform_drag_operation_imp),
+        "B@:@",
+    );
     objc.objc_registerClassPair(cls);
     g_custom_body_class = cls;
     return cls;
@@ -677,6 +789,11 @@ pub const CustomShellHandle = struct {
         return (mask & NSWindowStyleMaskFullScreen) != 0;
     }
 
+    pub fn is_occluded(self: CustomShellHandle) bool {
+        const state: NSUInteger = objc.msg_send(NSUInteger, self.window, "occlusionState", .{});
+        return (state & NSWindowOcclusionStateVisible) == 0;
+    }
+
     // Whether this window currently has keyboard focus. With more than one window
     // the app uses this so only the key window drives the shared native editor.
     pub fn is_key(self: CustomShellHandle) bool {
@@ -689,6 +806,16 @@ pub const CustomShellHandle = struct {
         std.debug.assert(@intFromPtr(self.window) != 0);
         if (self.is_fullscreen() == on) return;
         objc.msg_send(void, self.window, "toggleFullScreen:", .{@as(?Id, null)});
+    }
+
+    pub fn minimize(self: CustomShellHandle) void {
+        std.debug.assert(@intFromPtr(self.window) != 0);
+        objc.msg_send(void, self.window, "miniaturize:", .{@as(?Id, null)});
+    }
+    pub fn hide(_: CustomShellHandle) void {
+        const app_class = objc.get_class("NSApplication") orelse return;
+        const app = objc.msg_send(Id, app_class, "sharedApplication", .{});
+        objc.msg_send(void, app, "hide:", .{@as(?Id, null)});
     }
 
     pub fn get_content_size(self: CustomShellHandle) NSSize {
@@ -756,6 +883,21 @@ fn window_did_resize_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     if (@intFromPtr(win) != 0) recenter_traffic_lights(win);
 }
 
+// Occlusion flips need one frame either way: on hide so a view can park its
+// scheduled redraws (is_occluded), on reveal so the parked UI catches up. The
+// flipped window's own context is armed via its content-view ivar; a global
+// edge would race other windows' ticks and could leave this one stale. Strictly
+// the ivar, no global fallback: both go stale when a closing window's context is
+// freed, and the ivar is the one cleared on close.
+fn window_occlusion_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
+    const cb = g_redraw orelse return;
+    const win = objc.msg_send(Id, notif, "object", .{});
+    if (@intFromPtr(win) == 0) return;
+    const cv = objc.msg_send(?Id, win, "contentView", .{}) orelse return;
+    const ctx = objc.get_ivar(anyopaque, cv, CTX_IVAR) orelse return;
+    cb(ctx);
+}
+
 // Fired when any of our windows is closing; the runtime stops that window's
 // render loop so its display link can't keep driving a torn-down surface.
 pub const WindowCloseFn = *const fn (ctx: *anyopaque, ns_window: ?*anyopaque) void;
@@ -769,13 +911,18 @@ pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
 
 fn window_will_close_imp(_: Id, _: Sel, notif: Id) callconv(.c) void {
     const win = objc.msg_send(Id, notif, "object", .{});
+    var cv: ?Id = null;
     if (@intFromPtr(win) != 0) {
-        const cv = objc.msg_send(?Id, win, "contentView", .{});
+        cv = objc.msg_send(?Id, win, "contentView", .{});
         if (cv) |v| release_editor_if_owned(v);
     }
-    const cb = g_window_close orelse return;
-    const ctx = g_window_close_ctx orelse return;
-    cb(ctx, win);
+    if (g_window_close) |cb| {
+        if (g_window_close_ctx) |ctx| cb(ctx, win);
+    }
+    // The close callback frees the window's render context, but AppKit keeps the
+    // window (and delegate) alive until the close finishes - a late occlusion
+    // notification must find no stale ivar to dereference.
+    if (cv) |v| objc.set_ivar(v, CTX_IVAR, @as(?*anyopaque, null));
 }
 
 // Drop the editor's owner when the owning window goes away, so a later window's
@@ -817,6 +964,12 @@ fn ensure_window_delegate() ?Id {
             c,
             objc.sel("windowWillClose:"),
             @ptrCast(&window_will_close_imp),
+            "v@:@",
+        );
+        _ = objc.class_addMethod(
+            c,
+            objc.sel("windowDidChangeOcclusionState:"),
+            @ptrCast(&window_occlusion_imp),
             "v@:@",
         );
         objc.objc_registerClassPair(c);
@@ -967,6 +1120,9 @@ pub fn show_text_field(
         g_active_secure = secure;
         g_active_id = id;
         g_field_owner = handle.content_view;
+        // setStringValue: above reset the storage to the plain text color; force the
+        // next color_text_field to reapply the token colors + mono font.
+        g_recolor_hash = 0;
     }
     return true;
 }
@@ -992,6 +1148,133 @@ pub fn text_field_value(buf: []u8) []const u8 {
     var i: usize = 0;
     while (i < buf.len and cstr[i] != 0) : (i += 1) buf[i] = cstr[i];
     return buf[0..i];
+}
+
+const NSRange = extern struct { location: objc.NSUInteger, length: objc.NSUInteger };
+
+// Hash of the last text+color applied by color_text_field; its dirty gate. Reset to
+// 0 on every show_text_field (re)seed so a newly seeded field always recolors.
+var g_recolor_hash: u64 = 0;
+
+// Live per-token coloring for the focused (non-secure) native editor: recolors the
+// field editor's textStorage each frame and applies a mono font, so a single-line
+// input highlights its {{var}} tokens WHILE the user types (the NSTextField draws
+// the text itself, so the kit's overlay path can't reach it). Everything allocated
+// here is autoreleased and drained by a per-frame pool, so nothing is cached across
+// frames (a cached NSColor/NSFont without an explicit retain would be a UAF).
+pub fn color_text_field(
+    value: []const u8,
+    spans: []const types.FieldSpan,
+    base: types.Rgba,
+    font: ?[]const u8,
+    font_size: f32,
+) void {
+    if (spans.len == 0 or g_active_secure) return; // never color masked plaintext
+    // Dirty gate: recolor only when the text changed. Mutating textStorage every
+    // frame restarts NSTextView's caret-blink timer, so an idle field's caret would
+    // never blink; skipping unchanged frames lets the native blink run. Reset to 0
+    // on every (re)seed (show_text_field) so a freshly seeded field always recolors.
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(value);
+    hasher.update(std.mem.asBytes(&base));
+    const h = hasher.final();
+    if (h == g_recolor_hash) return;
+    const f = g_field orelse return;
+    const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return;
+    // During IME / dead-key composition the field editor holds provisional marked
+    // text our byte-offset spans don't describe; mutating it corrupts the compose.
+    if (objc.msg_send(objc.BOOL, editor, "hasMarkedText", .{}) != objc.NO) return;
+    const storage = objc.msg_send(?Id, editor, "textStorage", .{}) orelse return;
+    const len = objc.msg_send(objc.NSUInteger, storage, "length", .{});
+    if (len == 0) return;
+    const NSColor = objc.get_class("NSColor") orelse return;
+
+    const pool = objc.autorelease_pool_push();
+    defer objc.autorelease_pool_pop(pool);
+
+    // Attribute-name keys = the underlying string values of the
+    // NSForegroundColorAttributeName / NSFontAttributeName constants (the working
+    // pattern in status_bar.zig, rather than linking the AppKit globals).
+    var ck: [8]u8 = undefined;
+    const key_color = nsstring_from_stack(&ck, "NSColor");
+    var fk: [8]u8 = undefined;
+    const key_font = nsstring_from_stack(&fk, "NSFont");
+
+    objc.msg_send(void, storage, "beginEditing", .{});
+
+    // Reset the whole run to the base color (+ mono font) first, so a color from a
+    // now-deleted or retyped token can't linger.
+    const full = NSRange{ .location = 0, .length = len };
+    objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_color, ns_color(NSColor, base), full });
+    if (mono_font(font, font_size)) |mf|
+        objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_font, mf, full });
+
+    for (spans) |sp| {
+        const b0 = @min(@as(usize, sp.start), value.len);
+        const b1 = @min(@as(usize, sp.end), value.len);
+        if (b1 <= b0) continue;
+        // Offsets are UTF-8 bytes; NSTextStorage ranges are UTF-16 code units. Map,
+        // and drop a range that falls outside the live text so addAttribute can't
+        // raise NSRangeException (which would abort - Zig has no @catch for it).
+        const lo = utf16_units(value[0..b0]);
+        const hi = utf16_units(value[0..b1]);
+        if (lo >= len or hi <= lo) continue;
+        const rng = NSRange{ .location = lo, .length = @min(hi, len) - lo };
+        objc.msg_send(void, storage, "addAttribute:value:range:", .{ key_color, ns_color(NSColor, sp.color), rng });
+    }
+
+    objc.msg_send(void, storage, "endEditing", .{});
+    g_recolor_hash = h; // colored this text; skip until it changes so the caret blinks
+}
+
+fn ns_color(NSColor: objc.Class, c: types.Rgba) Id {
+    return objc.msg_send(Id, NSColor, "colorWithSRGBRed:green:blue:alpha:", .{
+        @as(CGFloat, c.r), @as(CGFloat, c.g), @as(CGFloat, c.b), @as(CGFloat, c.a),
+    });
+}
+
+// A mono NSFont for `font` family; falls back to the system monospaced face, then
+// the plain system face. Autoreleased - the caller's frame pool drains it.
+fn mono_font(font: ?[]const u8, size: f32) ?Id {
+    const NSFont = objc.get_class("NSFont") orelse return null;
+    const fs = @as(CGFloat, size);
+    if (font) |fam| {
+        var buf: [MAX_NSSTRING_BYTES]u8 = undefined;
+        const name = nsstring_from_stack(&buf, fam);
+        if (objc.msg_send(?Id, NSFont, "fontWithName:size:", .{ name, fs })) |face| return face;
+    }
+    if (objc.msg_send(?Id, NSFont, "monospacedSystemFontOfSize:weight:", .{ fs, @as(CGFloat, 0) })) |m| return m;
+    return objc.msg_send(?Id, NSFont, "systemFontOfSize:", .{fs});
+}
+
+// UTF-16 code-unit count of a UTF-8 slice (an astral codepoint is a surrogate pair).
+fn utf16_units(s: []const u8) objc.NSUInteger {
+    var n: objc.NSUInteger = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        const step: usize = if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+        n += if (step == 4) 2 else 1;
+        i += step;
+    }
+    return n;
+}
+
+// Accept Finder drags on the body view. The modern file-URL UTI plus the legacy
+// filenames type, so drags from older apps register too; both read back as NSURL
+// through readObjectsForClasses.
+fn register_file_drop(view: Id) void {
+    const NSArray = objc.get_class("NSArray") orelse return;
+    var b1: [32]u8 = undefined;
+    var b2: [32]u8 = undefined;
+    const drag_types = [2]Id{
+        nsstring_from_stack(&b1, "public.file-url"),
+        nsstring_from_stack(&b2, "NSFilenamesPboardType"),
+    };
+    const arr = objc.msg_send(Id, NSArray, "arrayWithObjects:count:", .{
+        @as([*]const Id, &drag_types), @as(NSUInteger, drag_types.len),
+    });
+    objc.msg_send(void, view, "registerForDraggedTypes:", .{arr});
 }
 
 fn nsstring_from_stack(buf: []u8, s: []const u8) Id {
@@ -1186,6 +1469,7 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     }});
     objc.msg_send(void, metal_view, "setAutoresizingMask:", .{autoresize_mask});
     objc.msg_send(void, metal_view, "setWantsLayer:", .{objc.YES});
+    register_file_drop(metal_view);
 
     const metal_layer = objc.msg_send(Id, CAMetalLayer, "layer", .{});
     const scale: CGFloat = objc.msg_send(CGFloat, window, "backingScaleFactor", .{});

@@ -30,6 +30,15 @@ const CFRange = c.CFRange;
 
 const MAX_GLYPHS_PER_RUN: usize = 256;
 
+// Register a bundled font FILE (process scope) so CTFontCreateWithName resolves it
+// by the family name in its name table.
+pub fn register_app_font(path: []const u8) bool {
+    const url = c.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse
+        return false;
+    defer c.CFRelease(url);
+    return c.CTFontManagerRegisterFontsForURL(url, c.kCTFontManagerScopeProcess, null) != 0;
+}
+
 pub const MacTextSystem = struct {
     allocator: Allocator,
     fonts: std.ArrayListUnmanaged(CTFontRef) = .empty,
@@ -453,7 +462,32 @@ fn create_cf_string(str: []const u8) CFStringRef {
     );
 }
 
+// Off = grid-safe for a mono editor (a "=>" ligature would collapse two cells
+// into one glyph and desync the caret). Set once at startup.
+var disable_liga: bool = false;
+
+pub fn set_ligatures(on: bool) void {
+    disable_liga = !on;
+}
+
 fn create_attributes_dict(font: CTFontRef) CFDictionaryRef {
+    if (disable_liga) {
+        // kCTLigatureAttributeName = 0 turns off standard ligatures (Geist Mono's
+        // "=>" etc. are `liga`, not `calt`, so this covers them).
+        const zero: c_int = 0;
+        const num = c.CFNumberCreate(null, c.kCFNumberIntType, &zero);
+        defer if (num) |n| c.CFRelease(n);
+        var keys = [_]?*const anyopaque{ c.kCTFontAttributeName, c.kCTLigatureAttributeName };
+        var values = [_]?*const anyopaque{ font, num };
+        return c.CFDictionaryCreate(
+            null,
+            @ptrCast(&keys),
+            @ptrCast(&values),
+            2,
+            &c.kCFTypeDictionaryKeyCallBacks,
+            &c.kCFTypeDictionaryValueCallBacks,
+        );
+    }
     var keys = [_]?*const anyopaque{c.kCTFontAttributeName};
     var values = [_]?*const anyopaque{font};
 

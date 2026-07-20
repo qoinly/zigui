@@ -37,6 +37,7 @@ struct Quad {
     float4 border_widths;
     float4 transform;
     float4 clip_bounds;
+    float4 border_dash; // .x dash px, .y gap px (both 0 = solid)
 };
 
 struct QuadFragmentIn {
@@ -47,6 +48,7 @@ struct QuadFragmentIn {
     float4 corner_radii;
     float4 border_widths;
     float2 quad_size;
+    float2 border_dash;
 };
 
 struct QuadVertexOut {
@@ -90,6 +92,7 @@ vertex QuadVertexOut quad_vertex(
     out.frag.corner_radii = quad.corner_radii;
     out.frag.border_widths = quad.border_widths;
     out.frag.quad_size = quad.bounds.zw;
+    out.frag.border_dash = quad.border_dash.xy;
 
     float4 clip = compute_clip_distance(pixel_pos, quad.clip_bounds);
     out.clip_distance[0] = clip.x;
@@ -131,6 +134,31 @@ fragment float4 quad_fragment(QuadFragmentIn in [[stage_in]]) {
     }
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
+
+    // Dashed border: drop the border in the dash gaps. The dash coordinate is a
+    // CONTINUOUS clockwise arc length around the whole perimeter (top-centre = 0),
+    // so dashes flow through the corners instead of each edge phasing on its own.
+    if (in.border_dash.x > 0.0) {
+        float hw = half_size.x;
+        float hh = half_size.y;
+        float perim = 4.0 * (hw + hh);
+        float t;
+        if (abs(center_pos.y) * hw >= abs(center_pos.x) * hh) {
+            if (center_pos.y < 0.0)
+                t = center_pos.x >= 0.0 ? center_pos.x : perim + center_pos.x;
+            else
+                t = hw + 2.0 * hh + (hw - center_pos.x);
+        } else if (center_pos.x > 0.0) {
+            t = hw + (center_pos.y + hh);
+        } else {
+            t = 3.0 * hw + 2.0 * hh + (hh - center_pos.y);
+        }
+        float period = in.border_dash.x + in.border_dash.y;
+        float duty = in.border_dash.x / period;
+        float dc = fract(t / period);
+        float aa = max(fwidth(t) / period, 0.001);
+        border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
+    }
 
     float4 bg = in.background * (1.0 - border_blend);
     float4 border = in.border_color * border_blend;
@@ -474,6 +502,33 @@ vertex BlitOut blit_vertex(uint vid [[vertex_id]]) {
 fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
     constexpr sampler s(mag_filter::linear, min_filter::linear);
     return tex.sample(s, in.uv);
+}
+
+// Separable gaussian for the modal/frost backdrop, run at quarter res: a blit
+// downsamples the scene, H then V blur the small pair, and the final composite
+// blit upsamples. sigma is the full-res 12px divided by the downsample factor.
+constant float blur_sigma = 3.0;
+constant int blur_radius = 8;
+
+static float4 blur_1d(BlitOut in, texture2d<float> tex, float2 dir) {
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    float2 step = dir / float2(tex.get_width(), tex.get_height());
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    for (int i = -blur_radius; i <= blur_radius; i++) {
+        float w = exp(float(-i * i) / (2.0 * blur_sigma * blur_sigma));
+        acc += w * tex.sample(s, in.uv + float(i) * step);
+        wsum += w;
+    }
+    return acc / wsum;
+}
+
+fragment float4 blur_h_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    return blur_1d(in, tex, float2(1.0, 0.0));
+}
+
+fragment float4 blur_v_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    return blur_1d(in, tex, float2(0.0, 1.0));
 }
 
 // External-frame primitive: one textured quad per draw sampling a caller-owned

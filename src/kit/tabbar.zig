@@ -35,6 +35,9 @@ pub const TabCloseFn = *const fn (ctx: ?*anyopaque, index: usize) void;
 pub const TabNewFn = *const fn (ctx: ?*anyopaque) void;
 pub const TabMoveFn = *const fn (ctx: ?*anyopaque, from: usize, to: usize) void;
 pub const TabPinFn = *const fn (ctx: ?*anyopaque, index: usize) void;
+// Right-click on a tab body, with the pointer position so the caller can
+// anchor a context menu at the cursor (close others / close right, etc).
+pub const TabContextFn = *const fn (ctx: ?*anyopaque, index: usize, x: f32, y: f32) void;
 
 pub const TabBarOptions = struct {
     tabs: []const TabItem,
@@ -48,12 +51,20 @@ pub const TabBarOptions = struct {
     // and reports the proposed index move; caller reorders its own list.
     on_move: ?TabMoveFn = null,
     on_pin: ?TabPinFn = null,
+    on_context: ?TabContextFn = null,
     ctx: ?*anyopaque = null,
     height: f32 = 36,
     scroll_x: f32 = 0, // caller-owned horizontal pan; clamped on render
     min_tab_w: f32 = 120, // shrink floor; past it the strip scrolls
     max_tab_w: f32 = 220, // grow ceiling so few tabs don't stretch edge-to-edge
+    // Title point size; 0 = the theme's font_size. The prefix chip renders 2pt
+    // smaller and bold, matching a sidebar's method-label look.
+    label_size: f32 = 0,
 };
+
+fn title_size(opts: *const TabBarOptions) f32 {
+    return if (opts.label_size > 0) opts.label_size else opts.theme.font_size;
+}
 
 pub const NEW_BTN_W: f32 = 36;
 pub const MAX_TABS = 32;
@@ -92,6 +103,7 @@ pub const TabBarState = struct {
     on_new: ?TabNewFn = null,
     on_move: ?TabMoveFn = null,
     on_pin: ?TabPinFn = null,
+    on_context: ?TabContextFn = null,
     ctx: ?*anyopaque = null,
     drag_pending: bool = false,
     drag_active: bool = false,
@@ -121,6 +133,17 @@ fn new_click(ctx: ?*anyopaque) void {
 fn pin_click(ctx: ?*anyopaque) void {
     const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
     if (s.state.on_pin) |cb| cb(s.state.ctx, s.index);
+}
+
+fn tab_context(ctx: ?*anyopaque, x: f32, y: f32) void {
+    const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
+    if (s.state.on_context) |cb| cb(s.state.ctx, s.index, x, y);
+}
+
+// Middle-click a tab closes it, routed through the same on_close as the X button.
+fn tab_middle(ctx: ?*anyopaque) void {
+    const s: *const Shim = @ptrCast(@alignCast(ctx orelse return));
+    if (s.state.on_close) |cb| cb(s.state.ctx, s.index);
 }
 
 fn tab_point(ctx: ?*anyopaque, x: f32, y: f32) void {
@@ -242,6 +265,7 @@ pub fn render(
     state.on_new = opts.on_new;
     state.on_move = opts.on_move;
     state.on_pin = opts.on_pin;
+    state.on_context = opts.on_context;
     state.ctx = opts.ctx;
 
     var track = Quad.init(x, y, w, h);
@@ -328,7 +352,9 @@ fn render_tab(
         try b.append_quad(hl);
     }
     if (!active) {
-        var sep = Quad.init(tx + tab_w - 1, y + GAP, 1, h - GAP * 2);
+        // Full-height divider on the tab's right edge (flush with the strip's top
+        // and bottom borders), so tabs read as adjacent cells rather than floating.
+        var sep = Quad.init(tx + tab_w - 1, y, 1, h);
         _ = sep.set_background(theme.border);
         try b.append_quad(sep);
     }
@@ -367,8 +393,8 @@ fn render_tab(
 
     if (tab.prefix.len > 0) {
         const psty = label.Style{
-            .font_size = theme.font_size,
-            .weight = .semi_bold,
+            .font_size = title_size(opts) - 2,
+            .weight = .bold,
             .color = tab.prefix_color orelse theme.muted_foreground,
         };
         const pm = label.measure(b, tab.prefix, psty);
@@ -377,7 +403,7 @@ fn render_tab(
     }
 
     const sty = label.Style{
-        .font_size = theme.font_size,
+        .font_size = title_size(opts),
         .weight = if (active) .semi_bold else .medium,
         .color = if (active) theme.foreground else theme.muted_foreground,
     };
@@ -427,6 +453,14 @@ fn render_tab(
                 .ctx = @ptrCast(&state.close_shims[state.shim_len]),
             });
         }
+    } else if (tab.dirty and !hovered) {
+        // An unsaved tab shows a dirty dot whether or not it is active; hovering it
+        // (the branch below) swaps the dot for the close x so it can still be closed.
+        const dx = close_x + (CLOSE_SZ - DOT_SZ) / 2;
+        const dy = y + (h - DOT_SZ) / 2;
+        var dot = Quad.init(dx, dy, DOT_SZ, DOT_SZ);
+        _ = dot.set_background(theme.primary).set_corner_radius(DOT_SZ / 2);
+        try b.append_quad(dot);
     } else if (active or hovered) {
         if (p) |pp| {
             if (pp.is_hovered(close_x, cy, CLOSE_SZ, CLOSE_SZ)) {
@@ -456,12 +490,6 @@ fn render_tab(
                 .ctx = @ptrCast(&state.close_shims[state.shim_len]),
             });
         }
-    } else if (tab.dirty) {
-        const dx = close_x + (CLOSE_SZ - DOT_SZ) / 2;
-        const dy = y + (h - DOT_SZ) / 2;
-        var dot = Quad.init(dx, dy, DOT_SZ, DOT_SZ);
-        _ = dot.set_background(theme.muted_foreground).set_corner_radius(DOT_SZ / 2);
-        try b.append_quad(dot);
     }
     if (p != null) state.shim_len += 1;
 }
@@ -491,6 +519,8 @@ fn push_tab_hit(
             .h = h,
             .on_point = tab_point,
             .on_drag_end = tab_drop,
+            .on_context = tab_context,
+            .on_middle = tab_middle,
             .ctx = ctx,
         });
     } else {
@@ -500,6 +530,8 @@ fn push_tab_hit(
             .w = tab_w,
             .h = h,
             .on_click = select_click,
+            .on_context = tab_context,
+            .on_middle = tab_middle,
             .ctx = ctx,
         });
     }
@@ -573,7 +605,7 @@ fn render_drag_visuals(
         .set_border_width(1);
     try b.append_quad(gbg);
     const sty = label.Style{
-        .font_size = theme.font_size,
+        .font_size = title_size(opts),
         .weight = .medium,
         .color = theme.accent_foreground,
     };

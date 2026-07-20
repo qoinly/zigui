@@ -3,6 +3,7 @@
 // loop can reach the platform custom shell through one switch.
 
 const builtin = @import("builtin");
+const types = @import("window/types.zig");
 
 // Android is os.tag == .linux but has no desktop shell (NativeActivity owns one
 // fullscreen surface, no CSD, no clipboard/grab); it gets its own arm ahead of
@@ -41,6 +42,21 @@ pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
 
+// Recolor a native-painted single-line editor's text per `spans` and set `font`,
+// live while editing. Only meaningful where the native control draws the text
+// (macOS today); the overlay backends (Linux) already colorize via the kit, so
+// this is a no-op there. `value` is the field's current UTF-8 text (spans index
+// its bytes); `base` is the default color; `font` null keeps the system font.
+pub fn color_text_field(
+    value: []const u8,
+    spans: []const types.FieldSpan,
+    base: types.Rgba,
+    font: ?[]const u8,
+    font_size: f32,
+) void {
+    if (builtin.os.tag == .macos) impl.color_text_field(value, spans, base, font, font_size);
+}
+
 // Whether the platform's text-field overlay paints itself (a real native
 // control floats above the surface). When false the platform owns only the
 // editing state and the kit draws the value, caret, and selection.
@@ -48,6 +64,19 @@ pub const text_field_native_paint = builtin.os.tag != .linux;
 
 pub fn text_field_caret() usize {
     return if (builtin.os.tag == .linux) impl.text_field_caret() else 0;
+}
+
+// A special key the focused native field saw but leaves for app-level UI (find bar Enter /
+// Shift+Enter / Escape). Only wired on Linux for now; other backends return null until their
+// native fields forward it.
+pub const FieldKey = enum { enter, shift_enter, escape };
+pub fn text_field_special() ?FieldKey {
+    if (builtin.os.tag != .linux) return null;
+    return switch (impl.text_field_special() orelse return null) {
+        .enter => .enter,
+        .shift_enter => .shift_enter,
+        .escape => .escape,
+    };
 }
 
 pub fn text_field_selection() [2]usize {

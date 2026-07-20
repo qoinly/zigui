@@ -60,6 +60,7 @@ struct Quad {
     float4 border_widths;
     float4 transform;
     float4 clip_bounds;
+    float4 border_dash; // .x dash px, .y gap px (both 0 = solid)
 };
 
 StructuredBuffer<Quad> quads : register(t0);
@@ -72,6 +73,7 @@ struct QuadOut {
     float4 corner_radii : TEXCOORD1;
     float4 border_widths : TEXCOORD2;
     float2 quad_size : TEXCOORD3;
+    float2 border_dash : TEXCOORD4;
     float4 clip : SV_ClipDistance0;
 };
 
@@ -102,6 +104,7 @@ QuadOut quad_vertex(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.corner_radii = q.corner_radii;
     o.border_widths = q.border_widths;
     o.quad_size = q.bounds.zw;
+    o.border_dash = q.border_dash.xy;
     o.clip = compute_clip_distance(pixel_pos, q.clip_bounds);
     return o;
 }
@@ -128,6 +131,32 @@ float4 quad_fragment(QuadOut input) : SV_Target {
     }
 
     float border_blend = smoothstep(-0.5, 0.5, inner_dist);
+
+    // Dashed border: drop the border in the dash gaps. The dash coordinate is a
+    // CONTINUOUS clockwise arc length around the whole perimeter (top-centre = 0),
+    // so dashes flow through the corners instead of each edge phasing on its own.
+    if (input.border_dash.x > 0.0) {
+        float hw = half_size.x;
+        float hh = half_size.y;
+        float perim = 4.0 * (hw + hh);
+        float t;
+        if (abs(center_pos.y) * hw >= abs(center_pos.x) * hh) {
+            if (center_pos.y < 0.0)
+                t = center_pos.x >= 0.0 ? center_pos.x : perim + center_pos.x;
+            else
+                t = hw + 2.0 * hh + (hw - center_pos.x);
+        } else if (center_pos.x > 0.0) {
+            t = hw + (center_pos.y + hh);
+        } else {
+            t = 3.0 * hw + 2.0 * hh + (hh - center_pos.y);
+        }
+        float period = input.border_dash.x + input.border_dash.y;
+        float duty = input.border_dash.x / period;
+        float dc = frac(t / period);
+        float aa = max(fwidth(t) / period, 0.001);
+        border_blend *= 1.0 - smoothstep(duty - aa, duty + aa, dc);
+    }
+
     float4 bg = input.background * (1.0 - border_blend);
     float4 border = input.border_color * border_blend;
     float4 color = bg + border;
@@ -444,8 +473,8 @@ float4 blit_fragment(BlitOut input) : SV_Target {
     return blit_tex.Sample(atlas_sampler, input.uv);
 }
 
-// Separable Gaussian (the MPSImageGaussianBlur stand-in): one pass per axis,
-// pinned to a static radius so the loop unrolls. texel is 1/size in pixels;
+// Separable Gaussian (the macOS shaders.metal blur counterpart): one pass per
+// axis, pinned to a static radius so the loop unrolls. texel is 1/size in pixels;
 // sigma rides in the same constant so the weight falloff tracks the DPI scale.
 cbuffer BlurParams : register(b1) {
     float2 blur_texel;

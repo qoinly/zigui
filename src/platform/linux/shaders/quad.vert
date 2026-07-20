@@ -22,6 +22,7 @@ struct Quad {
     vec4 border_widths;
     vec4 transform;
     vec4 clip_bounds;
+    vec4 border_dash; // .x dash px, .y gap px (both 0 = solid)
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer Quads {
@@ -34,6 +35,7 @@ layout(location = 2) out vec2 v_quad_pos;
 layout(location = 3) out vec4 v_corner_radii;
 layout(location = 4) out vec4 v_border_widths;
 layout(location = 5) out vec2 v_quad_size;
+layout(location = 6) out vec2 v_border_dash;
 
 out gl_PerVertex {
     vec4 gl_Position;
@@ -74,4 +76,5 @@ void main() {
     v_corner_radii = q.corner_radii;
     v_border_widths = q.border_widths;
     v_quad_size = q.bounds.zw;
+    v_border_dash = q.border_dash.xy;
 }

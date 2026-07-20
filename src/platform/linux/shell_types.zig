@@ -34,11 +34,18 @@ pub const KeyEvent = struct {
     mods: KeyMods = .{},
 };
 
+// A special key the focused native field saw this frame but does not act on itself (a
+// single-line field has no use for them), surfaced so app-level UI (e.g. an in-editor find
+// bar) can: Enter to advance, Shift+Enter to go back, Escape to dismiss.
+pub const FieldKey = enum { enter, shift_enter, escape };
+
 pub const MouseDispatch = struct {
     on_move: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_exit: *const fn (ctx: *anyopaque) void,
     on_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_right_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_middle_down: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
+    on_file_drop: *const fn (ctx: *anyopaque, data: [*]const u8, len: usize, x: f32, y: f32) void,
     on_drag: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
     on_up: *const fn (ctx: *anyopaque) void,
     on_scroll: *const fn (ctx: *anyopaque, dx: f32, dy: f32) void,

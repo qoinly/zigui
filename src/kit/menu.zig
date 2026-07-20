@@ -4,6 +4,7 @@ const builder = @import("../render/builder.zig");
 const RenderError = builder.RenderError;
 const label = @import("../render/label.zig");
 const icon = @import("../render/icon.zig");
+const kbd = @import("kbd.zig");
 const primitives = @import("../primitives.zig");
 const custom_paint = @import("../window/paint.zig");
 const tr = @import("theme_resolve.zig");
@@ -24,12 +25,21 @@ pub const MenuEntry = struct {
     kind: ItemKind = .item,
     id: []const u8 = "",
     label: []const u8 = "",
-    // Leading icon, mutually exclusive with a check.
+    // Leading icon. On a plain item it replaces the check slot; on a checked radio
+    // it makes a select-style option (icon leads, the check moves to the trailing edge).
     icon: ?icon.Icon = null,
-    shortcut: []const u8 = "", // right-aligned hint, e.g. a caller-formatted "Cmd X"
+    shortcut: []const u8 = "", // right-aligned text hint, e.g. a caller-formatted "Cmd X"
+    keys: []const []const u8 = &.{}, // right-aligned kbd chips (takes precedence over shortcut)
     checked: bool = false,
     disabled: bool = false,
     destructive: bool = false, // red text; red fill on hover
+    // A color dot in its own column between the lead slot and the label (e.g. an
+    // environment's color). Independent of the check/icon, so a row can show a
+    // checkmark AND a dot. When any row in a menu sets it, all rows reserve the dot
+    // column so labels stay aligned. `dot_ring` draws it as a hollow outline instead
+    // of a filled disc (e.g. a "none" option).
+    dot: ?tr.Rgba = null,
+    dot_ring: bool = false,
     children: []const MenuEntry = &.{},
 };
 
@@ -40,6 +50,11 @@ pub const MenuOptions = struct {
     on_select: ?callbacks.SelectIdFn = null,
     ctx: ?*anyopaque = null,
     min_width: f32 = 200,
+    // Hug: an unmarked plain item (no check/radio/icon/dot) left-aligns at the
+    // padding instead of the mark column, and does not pad the panel out to fit the
+    // indent. Lets a short picker (e.g. an environment list with a trailing
+    // "Manage..." action) size to its content. Off keeps the uniform indent.
+    hug: bool = false,
     // Edge-flip region; a 0 extent disables that axis. Pass the content rect,
     // not the whole window, so the menu can't flip onto the chrome.
     view_x: f32 = 0,
@@ -61,9 +76,14 @@ const SEP_H: f32 = 9;
 const SIDE: f32 = 8;
 const ROW_INSET: f32 = 4;
 const LEAD_SLOT: f32 = 22; // check / icon column
+const DOT_SLOT: f32 = 18; // color-dot column (between the lead slot and the label)
+const DOT_R: f32 = 4; // color-dot radius
 const CHEVRON_SLOT: f32 = 16;
 const SHORTCUT_GAP: f32 = 24;
 const FONT_DELTA: f32 = 1;
+// The trailing shortcut / accessory text sits a notch smaller than the label, the
+// shadcn text-xs vs text-sm relationship, so it reads as secondary.
+const SHORTCUT_FONT_DELTA: f32 = 2;
 const ICON_PT: f32 = 14;
 const CHECK_PT: f32 = 13;
 const RADIO_R: f32 = 3;
@@ -108,6 +128,17 @@ fn any_lead(items: []const MenuEntry) bool {
     return false;
 }
 
+fn any_dot(items: []const MenuEntry) bool {
+    for (items) |it| if (it.dot != null) return true;
+    return false;
+}
+
+// In a hug menu, a plain unmarked item left-aligns at the padding and skips the
+// mark/dot indent (like the trailing "Manage..." action under a separator).
+fn full_bleed(it: MenuEntry, hug: bool) bool {
+    return hug and it.kind == .item and it.icon == null and it.dot == null;
+}
+
 fn panel_width(b: *RenderBuilder, opts: *const MenuOptions, items: []const MenuEntry) f32 {
     const sty = label.Style{
         .font_size = opts.theme.font_size - FONT_DELTA,
@@ -115,6 +146,7 @@ fn panel_width(b: *RenderBuilder, opts: *const MenuOptions, items: []const MenuE
         .color = opts.theme.popover_foreground,
     };
     const lead: f32 = if (any_lead(items)) LEAD_SLOT else 0;
+    const dot_col: f32 = if (any_dot(items)) DOT_SLOT else 0;
     var w = opts.min_width;
     for (items) |it| {
         if (it.kind == .separator) continue;
@@ -122,10 +154,15 @@ fn panel_width(b: *RenderBuilder, opts: *const MenuOptions, items: []const MenuE
         var trail: f32 = 0;
         if (it.kind == .submenu) {
             trail = CHEVRON_SLOT;
+        } else if (it.keys.len > 0) {
+            trail = kbd.measure(b, .{}, it.keys, .{ .theme = opts.theme, .size = .sm }).width + SHORTCUT_GAP;
         } else if (it.shortcut.len > 0) {
-            trail = label.measure(b, it.shortcut, sty).width + SHORTCUT_GAP;
+            var sc_sty = sty;
+            sc_sty.font_size = opts.theme.font_size - FONT_DELTA - SHORTCUT_FONT_DELTA;
+            trail = label.measure(b, it.shortcut, sc_sty).width + SHORTCUT_GAP;
         }
-        w = @max(w, lead + m.width + trail + SIDE * 2);
+        const off: f32 = if (full_bleed(it, opts.hug)) 0 else lead + dot_col;
+        w = @max(w, off + m.width + trail + SIDE * 2);
     }
     return w;
 }
@@ -185,6 +222,7 @@ const PanelView = struct {
     x: f32,
     w: f32,
     lead: f32,
+    dot: f32, // color-dot column width (0 when no row in the panel has a dot)
     depth: usize,
     vis_top: f32,
     vis_bot: f32,
@@ -255,7 +293,10 @@ fn draw_row_lead(
             .point_size = CHECK_PT,
             .color = fg,
         });
-    } else if (it.kind == .radio and it.checked) {
+        // A radio with an icon is a select-style option: the icon leads here and the
+        // check moves to the trailing edge (draw_row_trailing). Only an icon-less
+        // radio keeps the minimalist leading dot.
+    } else if (it.kind == .radio and it.checked and it.icon == null) {
         const dot_x = x + LEAD_SLOT / 2 - RADIO_R + 2;
         const dot_y = ry + ROW_H / 2 - RADIO_R;
         var dot = Quad.init(dot_x, dot_y, RADIO_R * 2, RADIO_R * 2);
@@ -281,14 +322,28 @@ fn draw_row_trailing(
     hovered: bool,
     tsty: label.Style,
 ) RenderError!void {
-    if (it.kind == .submenu) {
+    if (it.kind == .radio and it.checked and it.icon != null) {
+        // Select-style option: leading icon, trailing check for the current choice.
+        const ck_x = x + w - SIDE - CHECK_PT;
+        _ = try icon.render_icon_centered_y(b, ck_x, ry, ROW_H, .check, .{
+            .point_size = CHECK_PT,
+            .color = fg,
+        });
+    } else if (it.kind == .submenu) {
         const chev_x = x + w - SIDE - CHEVRON_SLOT + 2;
         _ = try icon.render_icon_centered_y(b, chev_x, ry, ROW_H, .chevron_right, .{
             .point_size = ICON_PT - 1,
             .color = fg,
         });
+    } else if (it.keys.len > 0) {
+        const kopts = kbd.KbdOptions{ .theme = theme, .size = .sm };
+        const km = kbd.measure(b, .{}, it.keys, kopts);
+        const kx = x + w - SIDE - km.width;
+        const ky = ry + (ROW_H - km.height) / 2;
+        _ = try kbd.render(b, kx, ky, it.keys, kopts);
     } else if (it.shortcut.len > 0) {
         var sc = tsty;
+        sc.font_size = theme.font_size - FONT_DELTA - SHORTCUT_FONT_DELTA; // a notch smaller than the label
         const sc_hl = hovered and !it.destructive;
         sc.color = if (sc_hl) theme.accent_foreground else theme.muted_foreground;
         if (it.disabled) sc.color.a *= 0.45;
@@ -407,6 +462,21 @@ fn draw_item(
     if (it.disabled) fg.a *= 0.45;
 
     try draw_row_lead(b, it, pv.x, ry, fg);
+    // A color dot in its own column, right after the lead slot (independent of the
+    // check, so an active row shows both). Dimmed with the row when disabled.
+    if (it.dot) |dot_color| {
+        var dc = dot_color;
+        if (it.disabled) dc.a *= 0.45;
+        const dot_x = pv.x + SIDE + pv.lead + (DOT_SLOT / 2 - DOT_R);
+        const dot_y = ry + ROW_H / 2 - DOT_R;
+        var d = Quad.init(dot_x, dot_y, DOT_R * 2, DOT_R * 2);
+        if (it.dot_ring) {
+            _ = d.set_background(tr.transparent()).set_border_color(dc).set_border_width(1.5).set_corner_radius(DOT_R);
+        } else {
+            _ = d.set_background(dc).set_corner_radius(DOT_R);
+        }
+        try b.append_quad(d);
+    }
     const tsty = label.Style{
         .font_size = theme.font_size - FONT_DELTA,
         .weight = .normal,
@@ -414,7 +484,8 @@ fn draw_item(
     };
     const tm = label.measure(b, it.label, tsty);
     const tm_y = ry + (ROW_H - (tm.ascent + tm.descent)) / 2;
-    _ = try label.render(b, pv.x + SIDE + pv.lead, tm_y, it.label, tsty);
+    const label_off: f32 = if (full_bleed(it, opts.hug)) 0 else pv.lead + pv.dot;
+    _ = try label.render(b, pv.x + SIDE + label_off, tm_y, it.label, tsty);
     try draw_row_trailing(b, theme, it, pv.x, pv.w, ry, fg, hovered, tsty);
     try add_row_hitbox(opts, state, it, row_x, row_w, ry, pv.vis_top, pv.vis_bot);
     const fly = flyout_for(b, opts, state, it, pv.x, pv.w, ry, pv.depth);
@@ -478,6 +549,7 @@ fn render_panel(
         .x = x,
         .w = w,
         .lead = if (any_lead(items)) LEAD_SLOT else 0,
+        .dot = if (any_dot(items)) DOT_SLOT else 0,
         .depth = depth,
         .vis_top = vis_top,
         .vis_bot = vis_bot,

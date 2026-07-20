@@ -68,13 +68,18 @@ pub const Node = struct {
     hover_bg: ?Rgba = null,
     border: ?Rgba = null,
     radius: f32 = 0,
+    corner_radii: ?[4]f32 = null, // per-corner tl,tr,bl,br; overrides `radius` when set
     border_width: f32 = 1,
+    border_dash: [2]f32 = .{ 0, 0 }, // dash px, gap px; (0,0) = solid
     // text (colour resolved at draw: explicit override, else muted/foreground)
     text: []const u8 = "",
     color: ?Rgba = null,
     muted: bool = false,
     font_size: f32 = 14,
     weight: FontWeight = .normal,
+    // Empty = the label default (system font / theme default resolved by the
+    // facade). Set to a registered family name to override per text node (mono).
+    font_family: []const u8 = "",
     leaf_measure: ?LeafMeasure = null,
     leaf_draw: ?LeafDraw = null,
     leaf_ctx: *anyopaque = undefined,
@@ -82,9 +87,25 @@ pub const Node = struct {
     // boxes/leaves.
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    // Make this box draggable (e.g. a sidebar row): on_drag fires on press and each
+    // pointer move with (x, y), on_drag_end on release, both with click_ctx. A drag
+    // capture supersedes on_click, so do a plain-click action inside on_drag_end when
+    // no movement happened (distinguish via a small threshold), the way the tabbar does.
+    on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
+    on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
+    // A stable id recorded as "hovered" while the pointer is over this box; the
+    // frame exposes the topmost one so a view can reveal-on-hover without a callback.
+    hover_id: []const u8 = "",
+    // A text node clamps to one line with a trailing ellipsis instead of wrapping.
+    truncate: bool = false,
     // Laid-out absolute rect written at draw; lets a container anchor an overlay
     // (menu/popover) to itself, the way the kit triggers expose their rect_out.
     rect_out: ?*[4]f32 = null,
+    // Hides text-sprites drawn before this node (the body) behind its rect, so a
+    // custom overlay's fill renders crisp without the frost a modal backdrop adds
+    // (the quads-then-sprites renderer otherwise lets body text bleed over an
+    // overlay's fill). The same mask the menu/select overlays apply internally.
+    backdrop_mask: bool = false,
     children: []const *Node = &.{},
     // A scroll viewport: clips its child to its box and offsets it by state.y.
     scroll: ?*ScrollState = null,
@@ -117,6 +138,14 @@ pub const Cfg = struct {
     col_gap: ?tokens.Spacing = null,
     pad: tokens.Spacing = .none,
     grow: f32 = 0,
+    // Shrink weight when the row/col overflows (CSS flex-shrink). Default 1 lets a
+    // box give up space; 0 pins it at its natural size so siblings absorb the
+    // overflow instead (e.g. a fixed action cluster while a label area shrinks).
+    shrink: f32 = 1,
+    // Flex-basis (main-axis start size before grow/shrink). null = auto (content).
+    // basis = 0 with grow lets siblings split the row EQUALLY regardless of content
+    // (two content-based grow cells otherwise drift by their content width).
+    basis: ?f32 = null,
     width: ?f32 = null,
     height: ?f32 = null,
     min_width: ?f32 = null,
@@ -129,10 +158,19 @@ pub const Cfg = struct {
     hover_bg: ?Rgba = null,
     border: ?Rgba = null,
     radius: f32 = 0,
+    // Per-corner radius (tl, tr, bl, br); overrides `radius` when set. For a bottom-
+    // rounded footer / top-rounded header flush inside a rounded card.
+    radii: ?[4]f32 = null,
     border_width: f32 = 1,
+    border_dash: [2]f32 = .{ 0, 0 }, // dash px, gap px; (0,0) = solid border
     on_click: ?callbacks.ClickFn = null,
     click_ctx: ?*anyopaque = null,
+    on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
+    on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
+    hover_id: []const u8 = "",
     rect_out: ?*[4]f32 = null,
+    // Crisp custom overlay: mask body text-sprites behind this box (see Node).
+    backdrop_mask: bool = false,
 };
 
 pub const Txt = struct {
@@ -140,6 +178,11 @@ pub const Txt = struct {
     weight: FontWeight = .normal,
     muted: bool = false,
     color: ?Rgba = null,
+    // Clamp to one line with a trailing ellipsis instead of wrapping.
+    truncate: bool = false,
+    // Override the font family for this text (e.g. a mono family for code/URLs).
+    // Empty inherits the theme's font_family (resolved by the facade).
+    font_family: []const u8 = "",
 };
 
 fn style_of(cfg: Cfg, dir: FlexDirection) Style {
@@ -149,6 +192,8 @@ fn style_of(cfg: Cfg, dir: FlexDirection) Style {
         .justify_content = cfg.justify,
         .align_items = cfg.cross,
         .flex_grow = cfg.grow,
+        .flex_shrink = cfg.shrink,
+        .flex_basis = if (cfg.basis) |b| .{ .px = b } else .auto,
         .width = if (cfg.width) |w| .{ .px = w } else .auto,
         .height = if (cfg.height) |h| .{ .px = h } else .auto,
         .min_width = if (cfg.min_width) |w| .{ .px = w } else .auto,
@@ -183,10 +228,16 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .hover_bg = cfg.hover_bg,
         .border = cfg.border,
         .radius = cfg.radius,
+        .corner_radii = cfg.radii,
         .border_width = cfg.border_width,
+        .border_dash = cfg.border_dash,
         .on_click = cfg.on_click,
         .click_ctx = cfg.click_ctx,
+        .on_drag = cfg.on_drag,
+        .on_drag_end = cfg.on_drag_end,
+        .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
+        .backdrop_mask = cfg.backdrop_mask,
         .children = own_kids(a, kids),
     });
 }
@@ -197,6 +248,16 @@ pub fn col(a: A, cfg: Cfg, kids: []const *Node) *Node {
 
 pub fn row(a: A, cfg: Cfg, kids: []const *Node) *Node {
     return box(a, .row, cfg, kids);
+}
+
+// Z-stack: children overlap at the same full box, drawn in order (last on top).
+// For layered overlays — e.g. a dropdown menu above an open modal.
+pub fn layers(a: A, kids: []const *Node) *Node {
+    return make(a, .{
+        .kind = .box,
+        .style = .{ .layers = true, .flex_grow = 1 },
+        .children = own_kids(a, kids),
+    });
 }
 
 // Greedy wrap row: children size themselves and wrap by width. For a fixed or
@@ -225,6 +286,8 @@ pub fn text(a: A, s: []const u8, o: Txt) *Node {
         .weight = o.weight,
         .muted = o.muted,
         .color = o.color,
+        .truncate = o.truncate,
+        .font_family = o.font_family,
     });
 }
 
@@ -239,6 +302,11 @@ pub const ScrollState = struct {
     y: f32 = 0,
     vel: f32 = 0, // points/sec, the coast velocity a flick leaves behind
     t_prev_s: f32 = 0, // previous frame's time, for the momentum/spring dt
+    // The viewport height draw_scroll laid out last frame (0 until first draw).
+    // A consumer building thousands of uniform rows windows them to y..y+viewport_h
+    // (real rows for the visible slice, spacers for the rest) instead of building
+    // nodes the clip would discard - and stays under the layout children cap.
+    viewport_h: f32 = 0,
 };
 
 // hidden: wheel-scrollable but no thumb drawn. auto: thumb shows while overflowing.
@@ -259,9 +327,15 @@ pub const ScrollOpts = struct {
 pub fn scroll(a: A, state: *ScrollState, o: ScrollOpts, child: *Node) *Node {
     child.style.flex_shrink = 0;
     const cfg = Cfg{ .grow = o.grow, .width = o.width, .height = o.height };
+    var style = style_of(cfg, .column);
+    // A scroll viewport clips its child, so it may shrink below the child's height
+    // (CSS overflow:scroll => min-size:0 on the scroll axis). Without this its
+    // min-content height is the tall child, so a fixed-height ancestor can't bound
+    // it and the content overflows the container instead of scrolling within it.
+    style.min_height = .{ .px = 0 };
     return make(a, .{
         .kind = .box,
-        .style = style_of(cfg, .column),
+        .style = style,
         .bg = o.bg,
         .scroll = state,
         .scroll_bar = o.bar,
@@ -355,7 +429,19 @@ fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(
     const n: *Node = @ptrCast(@alignCast(ctx));
     std.debug.assert(n.kind == .text);
     const b = measure_b.?;
-    const sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
+    var sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
+    if (n.font_family.len > 0) sty.font_family = n.font_family;
+    // A truncating label is a single clamped line, never wrapped: report a
+    // single-line height (so flex cross-centering keeps it vertically centered
+    // instead of top-anchored inside a two-line box) and a 0 min-content (free to
+    // shrink; draw() clamps it to the granted width with an ellipsis).
+    if (n.truncate) {
+        const m = label.measure(b, n.text, sty);
+        const line_h = m.ascent + m.descent;
+        if (proposal.min_content) return .{ .width = 0, .height = line_h };
+        const w = if (proposal.width) |pw| @min(m.width, pw) else m.width;
+        return .{ .width = w, .height = line_h };
+    }
     if (proposal.min_content) {
         const mc = label.min_content_width(b, n.text, sty);
         const wr = label.measure_wrapped(b, n.text, sty, mc);
@@ -405,15 +491,23 @@ fn draw_tree(
     const r = eng.get_bounds(n.id);
     const x = r.origin.x + ox;
     const y = r.origin.y + oy;
+    // For a backdrop-masking box: everything in the sprite buffer now is "behind"
+    // (the body); after this node's subtree draws, hide those sprites under its rect.
+    const mask_from: usize = if (n.backdrop_mask) b.sprites.items.len else 0;
     // Register the click target before recursing so a clickable child (added
     // later) wins over a clickable parent in the newest-first hit walk.
-    if (pc) |p| if (n.on_click) |cb| {
+    if (pc) |p| if (n.on_click != null or n.on_drag != null or n.hover_id.len > 0) {
         try p.add_hitbox(.{
             .x = x,
             .y = y,
             .w = r.size.width,
             .h = r.size.height,
-            .on_click = cb,
+            // A drag capture (on_point) supersedes on_click in the press dispatch, so a
+            // draggable box does its click via on_drag_end (no-movement release).
+            .on_click = if (n.on_drag == null) n.on_click else null,
+            .on_point = n.on_drag,
+            .on_drag_end = n.on_drag_end,
+            .hover_id = n.hover_id,
             .ctx = n.click_ctx,
         });
     };
@@ -428,16 +522,31 @@ fn draw_tree(
             if (fill != null or n.border != null) {
                 var q = Quad.init(x, y, r.size.width, r.size.height);
                 if (fill) |bg| _ = q.set_background(bg);
-                _ = q.set_corner_radius(n.radius);
-                if (n.border) |bc| _ = q.set_border_color(bc).set_border_width(n.border_width);
+                if (n.corner_radii) |cr| {
+                    _ = q.set_corner_radii(cr[0], cr[1], cr[2], cr[3]);
+                } else {
+                    _ = q.set_corner_radius(n.radius);
+                }
+                if (n.border) |bc| {
+                    _ = q.set_border_color(bc).set_border_width(n.border_width);
+                    if (n.border_dash[0] > 0) _ = q.set_border_dash(n.border_dash[0], n.border_dash[1]);
+                }
                 try b.append_quad(q);
             }
         },
-        .text => _ = try label.render_wrapped(b, x, y, n.text, .{
-            .font_size = n.font_size,
-            .weight = n.weight,
-            .color = text_color(theme, n),
-        }, r.size.width),
+        .text => {
+            var sty = label.Style{
+                .font_size = n.font_size,
+                .weight = n.weight,
+                .color = text_color(theme, n),
+            };
+            if (n.font_family.len > 0) sty.font_family = n.font_family;
+            if (n.truncate) {
+                _ = try label.render_clamped(b, x, y, n.text, r.size.width, sty);
+            } else {
+                _ = try label.render_wrapped(b, x, y, n.text, sty, r.size.width);
+            }
+        },
         .leaf => if (n.leaf_draw) |d| {
             try d(b, n.leaf_ctx, .{ .origin = .{ .x = x, .y = y }, .size = r.size });
         },
@@ -445,19 +554,35 @@ fn draw_tree(
     if (n.scroll) |st| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_scroll(b, eng, theme, n, depth, ox, oy, pc, view, st);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     if (n.slide_px) |dx| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_slide(b, eng, theme, n, depth, ox, oy, view, dx);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     if (n.parallax_t) |t| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_parallax(b, eng, theme, n, depth, ox, oy, view, t);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
+    if (n.backdrop_mask) mask_backdrop(b, mask_from, .{ x, y, r.size.width, r.size.height });
+}
+
+// Hide (clip to nothing) the text-sprites in b.sprites[0..count] that fall under
+// `rect` — the body sprites drawn before a backdrop_mask box — so the box's fill
+// renders crisp over them without the full-window frost a modal backdrop adds. The
+// same mask the menu/select overlays apply to their own panels.
+fn mask_backdrop(b: *RenderBuilder, count: usize, rect: [4]f32) void {
+    for (b.sprites.items[0..count]) |*s| {
+        const hit = s.position[0] + s.size[0] > rect[0] and s.position[0] < rect[0] + rect[2] and
+            s.position[1] + s.size[1] > rect[1] and s.position[1] < rect[1] + rect[3];
+        if (hit) s.clip_bounds = .{ 0, 0, 0, 0 };
+    }
 }
 
 // The slide-viewport draw: render the page children translated by dx and clip the
@@ -639,6 +764,7 @@ fn draw_scroll(
     std.debug.assert(vh >= 0);
     const content_h = eng.get_bounds(n.children[0].id).size.height;
     const max_y = @max(0, content_h - vh);
+    st.viewport_h = vh;
     if (builtin.os.tag == .ios) {
         if (pc) |p| scroll_step_ios(p, st, max_y, vh, view);
     } else {

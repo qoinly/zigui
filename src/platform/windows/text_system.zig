@@ -25,6 +25,75 @@ const FALLBACK_FAMILY = "Segoe UI";
 const MAX_GLYPHS = 4096; // shaped-run cap; a longer line is truncated, not crashed
 const MAX_GLYPH_PIXELS = 1024 * 1024; // one rasterized glyph's pixel budget
 
+// App fonts live in their own DirectWrite collection built from the registered
+// files (GDI AddFontResourceEx, even FR_PRIVATE, never reaches DirectWrite
+// enumeration, so the collection must be built explicitly). Family lookup
+// consults this collection before the system one. Process-global like the
+// CoreText/fontconfig registrations on the other backends.
+var g_app_fonts_added = false; // family caches drop on the next lookup
+var g_app_collection: ?*dwrite.IDWriteFontCollection = null;
+var g_app_files: [16]?*anyopaque = @splat(null); // IDWriteFontFile refs, kept for rebuilds
+var g_app_file_count: usize = 0;
+
+// Register a bundled font FILE so it resolves by family name. Requires
+// IDWriteFactory5 (Win10 1703+); on older runtimes this reports unsupported
+// and text falls back to the system families.
+pub fn register_app_font(path: []const u8) bool {
+    if (g_app_file_count == g_app_files.len) return false;
+
+    var factory_raw: ?*anyopaque = null;
+    if (com.failed(dwrite.DWriteCreateFactory(
+        dwrite.DWRITE_FACTORY_TYPE_SHARED,
+        &dwrite.IID_IDWriteFactory,
+        &factory_raw,
+    )) or factory_raw == null) return false;
+    const factory: *dwrite.IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
+    defer factory.release();
+
+    var wbuf: [1024]u16 = undefined;
+    const wlen = std.unicode.utf8ToUtf16Le(wbuf[0 .. wbuf.len - 1], path) catch return false;
+    wbuf[wlen] = 0;
+    var file: ?*anyopaque = null;
+    if (com.failed(factory.create_font_file_reference(@ptrCast(&wbuf), &file)) or file == null)
+        return false;
+
+    g_app_files[g_app_file_count] = file;
+    g_app_file_count += 1;
+    if (!rebuild_app_collection(factory)) {
+        g_app_file_count -= 1;
+        com.release(&g_app_files[g_app_file_count]);
+        return false;
+    }
+    g_app_fonts_added = true;
+    return true;
+}
+
+fn rebuild_app_collection(factory: *dwrite.IDWriteFactory) bool {
+    var f5_raw: ?*anyopaque = null;
+    if (com.failed(com.query_interface(factory, &dwrite.IID_IDWriteFactory5, &f5_raw)) or
+        f5_raw == null) return false;
+    defer com.release(&f5_raw);
+    const f5: *dwrite.IDWriteFactory5 = @ptrCast(@alignCast(f5_raw.?));
+
+    var builder: ?*dwrite.IDWriteFontSetBuilder1 = null;
+    if (com.failed(f5.create_font_set_builder(&builder)) or builder == null) return false;
+    defer builder.?.release();
+
+    for (g_app_files[0..g_app_file_count]) |file| {
+        if (com.failed(builder.?.add_font_file(file.?))) return false;
+    }
+    var set: ?*anyopaque = null;
+    if (com.failed(builder.?.create_font_set(&set)) or set == null) return false;
+    defer com.release(&set);
+
+    var coll: ?*dwrite.IDWriteFontCollection = null;
+    if (com.failed(f5.create_font_collection_from_font_set(set.?, &coll)) or coll == null)
+        return false;
+    if (g_app_collection) |old| old.release();
+    g_app_collection = coll;
+    return true;
+}
+
 const FontEntry = struct {
     face: *dwrite.IDWriteFontFace,
     units_per_em: f32,
@@ -327,6 +396,15 @@ pub const WinTextSystem = struct {
     }
 
     fn get_or_create_font(self: *Self, family: []const u8, weight: FontWeight) FontId {
+        // Families cached before an app font landed may point at fallback faces;
+        // drop the cache so they re-resolve. Existing FontIds stay valid (the
+        // fonts list is untouched, re-resolved families append new entries).
+        if (g_app_fonts_added) {
+            g_app_fonts_added = false;
+            var it = self.font_cache.keyIterator();
+            while (it.next()) |k| self.allocator.free(k.*);
+            self.font_cache.clearRetainingCapacity();
+        }
         const lookup = if (family.len == 0 or std.mem.eql(u8, family, ".AppleSystemUIFont"))
             FALLBACK_FAMILY
         else
@@ -358,8 +436,14 @@ pub const WinTextSystem = struct {
     }
 
     fn create_face(self: *Self, family: []const u8, weight: FontWeight) ?FontEntry {
+        if (g_app_collection) |ac| {
+            if (create_face_in(ac, family, weight)) |entry| return entry;
+        }
         const collection = self.collection orelse return null;
+        return create_face_in(collection, family, weight);
+    }
 
+    fn create_face_in(collection: *dwrite.IDWriteFontCollection, family: []const u8, weight: FontWeight) ?FontEntry {
         var wbuf: [128]u16 = undefined;
         const wlen = std.unicode.utf8ToUtf16Le(&wbuf, family) catch return null;
         if (wlen >= wbuf.len) return null;

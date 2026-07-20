@@ -730,6 +730,19 @@ pub const PFN_D3DCompile = *const fn (
     errors: *?*ID3DBlob,
 ) callconv(.winapi) HRESULT;
 
+pub extern "d3d11" fn D3D11CreateDevice(
+    adapter: ?*anyopaque,
+    driver_type: u32,
+    software: ?HMODULE,
+    flags: u32,
+    feature_levels: ?[*]const u32,
+    num_feature_levels: u32,
+    sdk_version: u32,
+    device: *?*ID3D11Device,
+    feature_level: ?*u32,
+    immediate_context: *?*ID3D11DeviceContext,
+) callconv(.winapi) HRESULT;
+
 pub extern "d3d11" fn D3D11CreateDeviceAndSwapChain(
     adapter: ?*anyopaque,
     driver_type: u32,

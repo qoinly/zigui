@@ -210,6 +210,11 @@ pub const CustomShellHandle = struct {
         return false;
     }
 
+    pub fn minimize(self: CustomShellHandle) void {
+        std.debug.assert(self.window.in_use);
+        perform_caption_action(self.window, .minimize);
+    }
+
     pub fn is_key(self: CustomShellHandle) bool {
         std.debug.assert(self.window.in_use);
         return self.window.activated;
@@ -912,6 +917,8 @@ fn on_pointer_button(
         }
     } else if (button == BTN_RIGHT and pressed) {
         if (g_dispatch) |d| d.on_right_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
+    } else if (button == BTN_MIDDLE and pressed) {
+        if (g_dispatch) |d| d.on_middle_down(ctx_for(win, d.ctx), g_pointer_x, g_pointer_y);
     }
 }
 

@@ -244,15 +244,37 @@ pub const TextStyle = struct {
 // Android (os.tag == .linux) cannot dlopen the private system freetype/harfbuzz,
 // so it rasterizes through android.graphics instead; the GPU atlas below is
 // backend-neutral and stays shared with Linux.
-const NativeText = if (builtin.abi.isAndroid())
-    @import("platform/android/text_system.zig").AndroidTextSystem
+const native_text_mod = if (builtin.abi.isAndroid())
+    @import("platform/android/text_system.zig")
 else switch (builtin.os.tag) {
-    .macos => @import("platform/macos/text_system.zig").MacTextSystem,
-    .ios => @import("platform/macos/text_system.zig").MacTextSystem,
-    .windows => @import("platform/windows/text_system.zig").WinTextSystem,
-    .linux => @import("platform/linux/text_system.zig").LinuxTextSystem,
+    .macos, .ios => @import("platform/macos/text_system.zig"),
+    .windows => @import("platform/windows/text_system.zig"),
+    .linux => @import("platform/linux/text_system.zig"),
     else => @compileError("zigui: unsupported OS for TextSystem"),
 };
+
+const NativeText = if (builtin.abi.isAndroid())
+    native_text_mod.AndroidTextSystem
+else switch (builtin.os.tag) {
+    .macos, .ios => native_text_mod.MacTextSystem,
+    .windows => native_text_mod.WinTextSystem,
+    .linux => native_text_mod.LinuxTextSystem,
+    else => @compileError("zigui: unsupported OS for TextSystem"),
+};
+
+// Register a bundled font FILE (process-global) so it resolves by family name
+// through the normal pipeline. Returns false on backends that don't support it.
+pub fn register_app_font(path: []const u8) bool {
+    if (@hasDecl(native_text_mod, "register_app_font"))
+        return native_text_mod.register_app_font(path);
+    return false;
+}
+
+// Enable/disable ligatures + contextual alternates for all shaping. No-op on
+// backends that don't support it.
+pub fn set_ligatures(on: bool) void {
+    if (@hasDecl(native_text_mod, "set_ligatures")) native_text_mod.set_ligatures(on);
+}
 
 const NativeAtlas = switch (builtin.os.tag) {
     .macos => @import("platform/macos/mono_atlas.zig").MetalMonoAtlas,

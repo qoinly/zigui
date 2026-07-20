@@ -237,6 +237,8 @@ pub const GE_GENERIC: u8 = 35;
 pub const ATOM_ATOM: u32 = 4;
 pub const ATOM_STRING: u32 = 31;
 pub const ATOM_WM_NAME: u32 = 39;
+pub const ATOM_WM_NORMAL_HINTS: u32 = 40; // predefined; carries WM_SIZE_HINTS
+pub const ATOM_WM_SIZE_HINTS: u32 = 41; // the type of the WM_NORMAL_HINTS property
 
 const COPY_FROM_PARENT: u8 = 0;
 const WINDOW_CLASS_INPUT_OUTPUT: u16 = 1;

@@ -136,7 +136,6 @@ fn link_macos(zigui: *std.Build.Module) void {
     zigui.linkFramework("AppKit", .{});
     zigui.linkFramework("Foundation", .{});
     zigui.linkFramework("Metal", .{});
-    zigui.linkFramework("MetalPerformanceShaders", .{});
     zigui.linkFramework("QuartzCore", .{});
     zigui.linkFramework("CoreVideo", .{});
     zigui.linkFramework("CoreText", .{});
@@ -155,6 +154,8 @@ fn link_windows(zigui: *std.Build.Module) void {
     zigui.linkSystemLibrary("dwmapi", .{});
     zigui.linkSystemLibrary("shcore", .{});
     zigui.linkSystemLibrary("ole32", .{});
+    zigui.linkSystemLibrary("shell32", .{}); // DragAcceptFiles / DragQueryFileW (file drop)
+    zigui.linkSystemLibrary("comdlg32", .{}); // GetOpenFileNameW / GetSaveFileNameW (file pickers)
 }
 
 fn add_examples(
