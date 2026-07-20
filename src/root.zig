@@ -219,6 +219,28 @@ pub fn text_field_special() ?FieldKey {
     return frame_ctx.get().paint.text_field_special();
 }
 
+// The focused single-line field's caret byte offset (0 off Linux). For reading the text
+// before the caret to drive a `{{` / `{{$` completion popup.
+pub fn text_field_caret() usize {
+    return frame_ctx.get().paint.text_field_caret();
+}
+
+// The focused single-line field's live value, copied into `buf`. Empty when none is focused.
+pub fn text_field_value(buf: []u8) []const u8 {
+    return frame_ctx.get().paint.text_field_value(buf);
+}
+
+// While active, the focused field forwards Up/Down/Tab as `text_field_special` values so an
+// open completion popup drives its selection. Turn off when the popup closes.
+pub fn set_field_intercept(active: bool) void {
+    frame_ctx.get().paint.set_field_intercept(active);
+}
+
+// Replace bytes [a, b) of the focused field with `bytes` (accept a completion); caret lands after.
+pub fn text_field_replace(a: usize, b: usize, bytes: []const u8) void {
+    frame_ctx.get().paint.text_field_replace(a, b, bytes);
+}
+
 // Whether the pointer is over the given rect (typically a node's rect_out from last frame) this
 // frame. A build-time hover query for gating hover popovers/HUDs; respects overlay hover-blocking.
 pub fn rect_hovered(r: [4]f32) bool {
