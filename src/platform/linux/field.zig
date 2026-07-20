@@ -27,12 +27,29 @@ var g_buf: [FIELD_BUF_MAX]u8 = undefined;
 var g_len: usize = 0;
 var g_caret: usize = 0; // byte offset, always a codepoint boundary
 var g_anchor: usize = 0; // selection anchor; == caret means no selection
-var g_special: ?shell_types.FieldKey = null; // Enter/Shift+Enter/Escape seen this frame
+var g_special: ?shell_types.FieldKey = null; // Enter/Shift+Enter/Escape (and, under intercept, up/down/tab)
+var g_intercept: bool = false; // an open completion popup: forward up/down/tab instead of ignoring them
 
 // Enter/Shift+Enter/Escape the focused field saw but does not act on; the app polls it once.
 pub fn take_special() ?shell_types.FieldKey {
     defer g_special = null;
     return g_special;
+}
+
+// While on, the field forwards Up/Down/Tab as specials (an open completion popup drives its
+// selection with them) instead of ignoring them. Enter/Escape are always specials.
+pub fn set_intercept(on: bool) void {
+    g_intercept = on;
+}
+
+// Replace bytes [a, b) with `text` at the caret, for programmatic edits (accepting a
+// completion). Clamped to the buffer; the caret lands after the inserted text.
+pub fn replace_range(a: usize, b: usize, text: []const u8) void {
+    if (!g_visible) return;
+    const lo = @min(a, g_len);
+    const hi = @min(@max(b, lo), g_len);
+    delete_range(lo, hi); // caret + anchor collapse to lo, so insert has no selection to drop
+    insert(text);
 }
 
 pub fn show(win: *anyopaque, initial: []const u8, is_secure: bool, numeric: bool, id: u32) void {
@@ -190,8 +207,12 @@ pub fn apply_key(event: KeyEvent, clipboard: Clipboard) void {
             g_special = .escape;
         },
         .enter => g_special = if (event.mods.shift) .shift_enter else .enter,
-        // Consumed but inert in a single-line field, the EDIT child model.
-        .tab, .up, .down, .page_up, .page_down => {},
+        // Inert in a single-line field (the EDIT child model), unless a completion popup is
+        // open: then Up/Down/Tab drive its selection, forwarded as specials.
+        .up => g_special = if (g_intercept) .up else null,
+        .down => g_special = if (g_intercept) .down else null,
+        .tab => g_special = if (g_intercept) .tab else null,
+        .page_up, .page_down => {},
     }
 }
 

@@ -510,6 +510,18 @@ pub const PaintContext = struct {
         _ = self;
         return custom_shell.text_field_special();
     }
+    pub fn text_field_caret(self: *PaintContext) usize {
+        _ = self;
+        return custom_shell.text_field_caret();
+    }
+    pub fn set_field_intercept(self: *PaintContext, on: bool) void {
+        _ = self;
+        custom_shell.set_field_intercept(on);
+    }
+    pub fn text_field_replace(self: *PaintContext, a: usize, b: usize, text: []const u8) void {
+        _ = self;
+        custom_shell.text_field_replace(a, b, text);
+    }
     pub fn hide_text_field(self: *PaintContext) void {
         custom_shell.hide_text_field(self.handle);
     }

@@ -310,6 +310,14 @@ pub fn text_field_special() ?shell_types.FieldKey {
     return field.take_special();
 }
 
+pub fn set_field_intercept(on: bool) void {
+    field.set_intercept(on);
+}
+
+pub fn text_field_replace(a: usize, b: usize, text: []const u8) void {
+    field.replace_range(a, b, text);
+}
+
 pub fn text_field_caret() usize {
     return switch (backend.active) {
         .wayland => wayland_shell.text_field_caret(),

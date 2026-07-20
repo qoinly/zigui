@@ -1651,6 +1651,8 @@ fn edit_native(
     font: ?[]const u8,
     secure: bool,
     numeric: bool,
+    caret_out: ?*[4]f32,
+    caret_index_out: ?*usize,
 ) RenderError!void {
     std.debug.assert(id != 0); // 0 is the native editor's inactive sentinel
     const ex = r.origin.x + input_kit.PAD; // editor text aligns with the box text
@@ -1675,7 +1677,7 @@ fn edit_native(
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
     if (!custom_shell.text_field_native_paint) {
-        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font);
+        try draw_field_overlay(b, pc, ex, ey, ew, EDITOR_H, field.slice(), theme, spans, font, caret_out, caret_index_out);
     } else if (spans.len > 0 and !secure) {
         // Native-painted backends (macOS) draw the text themselves, so the overlay
         // above can't reach it; hand the token colors to the native editor instead.
@@ -1706,6 +1708,8 @@ fn draw_field_overlay(
     theme: *const Theme,
     spans: []const textarea_kit.TextSpan,
     font: ?[]const u8,
+    caret_out: ?*[4]f32,
+    caret_index_out: ?*usize,
 ) RenderError!void {
     std.debug.assert(!custom_shell.text_field_native_paint);
     // A secure field must never paint its plaintext; bullets carry the same
@@ -1732,6 +1736,10 @@ fn draw_field_overlay(
     const top = label_render.centered_top(y, h, m);
     const line_h = @max(m.ascent + m.descent, theme.font_size);
     const clip: [4]f32 = .{ x, y - 2, w, h + 4 }; // caret may stand taller than glyphs
+
+    // Publish the caret (window-abs rect + raw byte offset) for anchoring a completion popup.
+    if (caret_index_out) |ci| ci.* = custom_shell.text_field_caret();
+    if (caret_out) |co| co.* = .{ x - shift + caret_x, top, 1.5, line_h };
 
     if (sel[0] != sel[1] and sel[1] <= shown_value.len) {
         // The textarea's selection recipe, so the two editors read as one family.
@@ -1825,6 +1833,13 @@ pub const TextInputOpts = struct {
     // (overlay backends, incl. Linux); native-painted fields (macOS/Windows) draw
     // plain until their native side adopts spans.
     spans: []const textarea_kit.TextSpan = &.{},
+    // Window-abs caret rect [x,y,w,h] + the caret's byte offset, written every focused frame
+    // (zeroed/untouched when unfocused), for anchoring a {{var}} completion popup at the caret
+    // and reading the text before it. Like a node's rect_out: the value lands during render, so
+    // the popup reads it the next frame. Overlay backends (Linux) only; native-painted fields
+    // (macOS/Windows) leave them untouched until their native side reports the caret.
+    caret_out: ?*[4]f32 = null,
+    caret_index_out: ?*usize = null,
     // Editor overlay font; null keeps the theme UI font. A URL/code field passes a
     // mono family so the idle and editing text read as one.
     font_family: ?[]const u8 = null,
@@ -1870,7 +1885,7 @@ const TextInputSpec = struct {
         if (self.o.focused) if (self.o.paint) |pc| {
             // A revealed password shows plaintext, so its focused editor is not secure.
             const secure = self.o.kind == .password and !self.o.reveal;
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family, secure, self.o.kind == .number);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, self.o.spans, self.o.font_family, secure, self.o.kind == .number, self.o.caret_out, self.o.caret_index_out);
         };
     }
 };
@@ -1914,7 +1929,7 @@ const TextEditableSpec = struct {
             .ctx = self.o.ctx,
         });
         if (self.o.focused) if (self.o.paint) |pc| {
-            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null, false, false);
+            try edit_native(b, pc, r, self.field, self.theme, self.o.id, &.{}, null, false, false, null, null);
         };
     }
 };

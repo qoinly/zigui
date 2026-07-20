@@ -36,8 +36,9 @@ pub const KeyEvent = struct {
 
 // A special key the focused native field saw this frame but does not act on itself (a
 // single-line field has no use for them), surfaced so app-level UI (e.g. an in-editor find
-// bar) can: Enter to advance, Shift+Enter to go back, Escape to dismiss.
-pub const FieldKey = enum { enter, shift_enter, escape };
+// bar) can: Enter to advance, Shift+Enter to go back, Escape to dismiss. up/down/tab are
+// forwarded only while intercept is on (an open completion popup drives them).
+pub const FieldKey = enum { enter, shift_enter, escape, up, down, tab };
 
 pub const MouseDispatch = struct {
     on_move: *const fn (ctx: *anyopaque, x: f32, y: f32) void,
