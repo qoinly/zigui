@@ -63,15 +63,25 @@ pub fn color_text_field(
 pub const text_field_native_paint = builtin.os.tag != .linux;
 
 pub fn text_field_caret() usize {
-    return if (builtin.os.tag == .linux) impl.text_field_caret() else 0;
+    return switch (builtin.os.tag) {
+        .linux, .macos => impl.text_field_caret(),
+        else => 0,
+    };
+}
+
+// The focused native field's caret rect (window-abs [x,y,w,h], renderer points) for anchoring
+// a completion popup. Overlay backends (Linux) publish it from the kit while drawing the caret,
+// so this native-side query is only meaningful where the platform paints the field (macOS).
+pub fn text_field_caret_rect() ?[4]f32 {
+    return if (builtin.os.tag == .macos) impl.text_field_caret_rect() else null;
 }
 
 // A special key the focused native field saw but leaves for app-level UI (find bar Enter /
-// Shift+Enter / Escape). Only wired on Linux for now; other backends return null until their
-// native fields forward it.
+// Shift+Enter / Escape; Up/Down/Tab while a completion popup intercepts). Wired on Linux and
+// macOS; other backends return null until their native fields forward it.
 pub const FieldKey = enum { enter, shift_enter, escape, up, down, tab };
 pub fn text_field_special() ?FieldKey {
-    if (builtin.os.tag != .linux) return null;
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return null;
     return switch (impl.text_field_special() orelse return null) {
         .enter => .enter,
         .shift_enter => .shift_enter,
@@ -83,14 +93,14 @@ pub fn text_field_special() ?FieldKey {
 }
 
 // Forward Up/Down/Tab from a focused single-line field as specials while a completion
-// popup is open (so it can drive its selection). No-op off Linux.
+// popup is open (so it can drive its selection). No-op off Linux/macOS.
 pub fn set_field_intercept(on: bool) void {
-    if (builtin.os.tag == .linux) impl.set_field_intercept(on);
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) impl.set_field_intercept(on);
 }
 
-// Replace bytes [a, b) of the focused field with `text` (accepting a completion). No-op off Linux.
+// Replace bytes [a, b) of the focused field with `text` (accept a completion). No-op elsewhere.
 pub fn text_field_replace(a: usize, b: usize, text: []const u8) void {
-    if (builtin.os.tag == .linux) impl.text_field_replace(a, b, text);
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) impl.text_field_replace(a, b, text);
 }
 
 pub fn text_field_selection() [2]usize {

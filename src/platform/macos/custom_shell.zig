@@ -1051,6 +1051,7 @@ fn ensure_field(content_view: Id, secure: bool) ?Id {
     objc.msg_send(void, f, "setSelectable:", .{objc.YES});
     objc.msg_send(void, f, "setFocusRingType:", .{NSFocusRingTypeNone});
     objc.msg_send(void, f, "setHidden:", .{objc.YES});
+    if (ensure_field_delegate()) |d| objc.msg_send(void, f, "setDelegate:", .{d});
     objc.msg_send(void, content_view, "addSubview:", .{f});
     if (secure) g_secure_field = f else g_field = f;
     return f;
@@ -1151,6 +1152,172 @@ pub fn text_field_value(buf: []u8) []const u8 {
 }
 
 const NSRange = extern struct { location: objc.NSUInteger, length: objc.NSUInteger };
+
+const NSUTF16 = struct {
+    // AppKit reports caret/selection offsets in UTF-16 code units; the kit works in
+    // UTF-8 bytes. A 4-byte codepoint is one surrogate pair (2 units), otherwise 1.
+    fn units_of(bytes: []const u8) NSUInteger {
+        var units: NSUInteger = 0;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const step = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+            std.debug.assert(step >= 1); // guarantees progress, so the loop is bounded by bytes.len
+            std.debug.assert(step <= 4);
+            if (i + step > bytes.len) break;
+            units += if (step == 4) 2 else 1;
+            i += step;
+        }
+        return units;
+    }
+
+    // The byte offset in `bytes` at `target` UTF-16 units in (clamped to the end).
+    fn byte_at(bytes: []const u8, target: NSUInteger) usize {
+        var units: NSUInteger = 0;
+        var i: usize = 0;
+        while (i < bytes.len and units < target) {
+            const step = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+            std.debug.assert(step >= 1); // guarantees progress, so the loop is bounded by bytes.len
+            std.debug.assert(step <= 4);
+            if (i + step > bytes.len) break;
+            units += if (step == 4) 2 else 1;
+            i += step;
+        }
+        return i;
+    }
+};
+
+// A completion popup drives the focused field with Up/Down/Tab while open; the field
+// forwards them (plus the always-forwarded Enter/Escape) as specials the app polls once.
+pub const FieldKey = enum { enter, shift_enter, escape, up, down, tab };
+var g_field_special: ?FieldKey = null;
+var g_field_intercept: bool = false;
+var g_field_delegate: ?Id = null;
+var g_field_delegate_class: ?Class = null;
+
+pub fn text_field_special() ?FieldKey {
+    defer g_field_special = null;
+    return g_field_special;
+}
+
+pub fn set_field_intercept(on: bool) void {
+    g_field_intercept = on;
+}
+
+// The field editor calls this for command keys (arrows, Tab, Enter, Escape), never for
+// plain character input, so recording a special here is off the typing hot path. Return
+// YES to swallow the key so the single-line editor does not act on it (the app does).
+fn field_do_command_imp(_: Id, _: Sel, _: Id, _: Id, command: Sel) callconv(.c) bool {
+    std.debug.assert(@intFromPtr(command) != 0);
+    if (g_field_intercept) {
+        if (command == objc.sel("moveUp:")) {
+            g_field_special = .up;
+            return true;
+        }
+        if (command == objc.sel("moveDown:")) {
+            g_field_special = .down;
+            return true;
+        }
+        if (command == objc.sel("insertTab:")) {
+            g_field_special = .tab;
+            return true;
+        }
+    }
+    if (command == objc.sel("insertNewline:")) {
+        g_field_special = if (current_shift_down()) .shift_enter else .enter;
+        return true;
+    }
+    if (command == objc.sel("cancelOperation:")) {
+        g_field_special = .escape;
+        return true;
+    }
+    return false;
+}
+
+fn ensure_field_delegate() ?Id {
+    if (g_field_delegate) |d| return d;
+    const NSObject = objc.get_class("NSObject") orelse return null;
+    const cls = g_field_delegate_class orelse blk: {
+        const c = objc.objc_allocateClassPair(NSObject, "ZigUIFieldDelegate", 0) orelse return null;
+        _ = objc.class_addMethod(
+            c,
+            objc.sel("control:textView:doCommandBySelector:"),
+            @ptrCast(&field_do_command_imp),
+            "B@:@@:",
+        );
+        objc.objc_registerClassPair(c);
+        g_field_delegate_class = c;
+        break :blk c;
+    };
+    const obj = objc.msg_send(Id, objc.alloc(cls), "init", .{});
+    std.debug.assert(@intFromPtr(obj) != 0);
+    g_field_delegate = obj;
+    return obj;
+}
+
+pub fn text_field_caret() usize {
+    const f = (if (g_active_secure) g_secure_field else g_field) orelse return 0;
+    const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return 0;
+    const sel_range: NSRange = objc.msg_send(NSRange, editor, "selectedRange", .{});
+    const caret_u16 = sel_range.location + sel_range.length;
+    var buf: [MAX_NSSTRING_BYTES]u8 = undefined;
+    const value = text_field_value(&buf);
+    const off = NSUTF16.byte_at(value, caret_u16);
+    std.debug.assert(off <= value.len);
+    return off;
+}
+
+// The caret's window-abs rect (renderer points, top-left origin) for anchoring a popup.
+// firstRectForCharacterRange: is in screen coords; convert through the window into the
+// flipped content view, whose coordinate system IS renderer points.
+pub fn text_field_caret_rect() ?[4]f32 {
+    const f = (if (g_active_secure) g_secure_field else g_field) orelse return null;
+    const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return null;
+    const win = objc.msg_send(?Id, f, "window", .{}) orelse return null;
+    const cv = objc.msg_send(?Id, f, "superview", .{}) orelse return null;
+    const sel_range: NSRange = objc.msg_send(NSRange, editor, "selectedRange", .{});
+    const caret = NSRange{ .location = sel_range.location + sel_range.length, .length = 0 };
+    const screen: NSRect = objc.msg_send(
+        NSRect,
+        editor,
+        "firstRectForCharacterRange:actualRange:",
+        .{ caret, @as(?*NSRange, null) },
+    );
+    const in_win: NSRect = objc.msg_send(NSRect, win, "convertRectFromScreen:", .{screen});
+    const in_cv: NSRect = objc.msg_send(
+        NSRect,
+        cv,
+        "convertRect:fromView:",
+        .{ in_win, @as(?Id, null) },
+    );
+    std.debug.assert(in_cv.size.height >= 0);
+    return .{
+        @floatCast(in_cv.origin.x),
+        @floatCast(in_cv.origin.y),
+        1.5, // caret thickness, matching the overlay backend's published width
+        @floatCast(in_cv.size.height),
+    };
+}
+
+// Replace bytes [a, b) of the focused field with `text` and drop the caret after it
+// (accepting a completion). Byte offsets cross into the field editor as UTF-16 ranges.
+pub fn text_field_replace(a: usize, b: usize, text: []const u8) void {
+    const f = (if (g_active_secure) g_secure_field else g_field) orelse return;
+    const editor = objc.msg_send(?Id, f, "currentEditor", .{}) orelse return;
+    // text_field_value caps at MAX_NSSTRING_BYTES; the kit's completion field is far
+    // shorter, so a and b always land inside the copied prefix.
+    var buf: [MAX_NSSTRING_BYTES]u8 = undefined;
+    const value = text_field_value(&buf);
+    const lo = @min(a, value.len);
+    const hi = @min(@max(b, lo), value.len);
+    std.debug.assert(lo <= hi);
+    std.debug.assert(hi <= value.len);
+    const u16_lo = NSUTF16.units_of(value[0..lo]);
+    const u16_hi = NSUTF16.units_of(value[0..hi]);
+    const range = NSRange{ .location = u16_lo, .length = u16_hi - u16_lo };
+    objc.msg_send(void, editor, "setSelectedRange:", .{range});
+    var ns: [MAX_NSSTRING_BYTES]u8 = undefined;
+    objc.msg_send(void, editor, "insertText:", .{nsstring_from_stack(&ns, text)});
+}
 
 // Hash of the last text+color applied by color_text_field; its dirty gate. Reset to
 // 0 on every show_text_field (re)seed so a newly seeded field always recolors.
