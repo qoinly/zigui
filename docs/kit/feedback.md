@@ -50,6 +50,10 @@ whole stack; you own the slot array and push into it from a callback.
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `slots` | `[]ToastSlot` | (required) | Caller-owned, cross-frame; one entry per concurrent toast |
+| `bottom_inset` | `f32` | `0` | Extra space reserved at the bottom of the hud, so the stack floats above a footer / status bar the hud draws over |
+
+Long lines don't overflow: the toast title and description are clamped to the
+card's inner width and ellipsized.
 
 `ToastSlot`:
 

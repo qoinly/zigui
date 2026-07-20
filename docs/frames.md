@@ -53,6 +53,39 @@ fn render(f: *zigui.Frame, app: *App) *zigui.Node {
 | `.fill` | stretch to the rect, ignore aspect |
 | `.native` | 1:1 source pixels, centered |
 
+## Static images
+
+A `frame` is for *live* pixels. For a decoded still - a PNG or baseline JPEG
+bundled with the app, an avatar, an icon sheet - use an `ImageSource` and the
+`image` node. It uploads one texture once, drops the CPU copy, and (unlike
+`frame`) does **not** keep the render loop animating - a still needs no repaint.
+
+```zig
+const App = struct { logo: zigui.ImageSource };
+
+// once, at startup (App owns it; it must not move after the first draw):
+app.logo = try zigui.ImageSource.decode(gpa, @embedFile("logo.png"));
+defer app.logo.deinit();
+
+// in the view:
+zigui.image(&app.logo, .{ .fit = .contain })
+```
+
+The decoders are pure Zig, no C dependency (PNG and baseline JPEG).
+
+| `ImageSource` method | What it does |
+|---|---|
+| `decode(gpa, bytes) !ImageSource` | decode PNG / baseline JPEG bytes into an image source |
+| `init_rgba(gpa, rgba, width, height) !ImageSource` | take already-decoded 8-bit RGBA (`width*height*4`); the input is not retained |
+| `dims() [2]f32` | source pixel size |
+| `deinit()` | free the CPU copy and destroy the GPU texture (call when off-screen) |
+
+`image(source, opts)` takes the same `FrameOpts` (`fit`, `opacity`) and `FrameFit`
+values as `frame` above; it fills its cell (`grow` 1) and letterboxes per `fit`
+(default `.contain`). The texture is owned by `source`; the node only references
+it. Already have raw pixels from your own decoder? Skip `decode` and hand them to
+`init_rgba`.
+
 ## Colorspace
 
 `submit_surface` takes a `FrameMeta` so the YUV->RGB matrix is built once per format

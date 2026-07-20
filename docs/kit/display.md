@@ -6,6 +6,7 @@ get a `*Node`. No allocator, no theme, no context; the frame supplies them.
 
 - [badge](#badge)
 - [avatar](#avatar)
+- [image](#image)
 - [icon](#icon)
 - [separator](#separator)
 - [skeleton](#skeleton)
@@ -51,6 +52,29 @@ fn avatar(initials: []const u8, size: f32) *Node
 
 `size` is the circle diameter in points. Pass one or two letters; the kit centers
 them and sizes the text to the circle.
+
+## image
+
+A decoded PNG or baseline JPEG, drawn as a node - a real avatar photo, a logo, an
+illustration. Decode once into an App-owned `ImageSource`, then reference it; the
+texture uploads lazily and a still image never re-renders on its own.
+
+```zig
+const App = struct { photo: zigui.ImageSource };
+
+app.photo = try zigui.ImageSource.decode(gpa, @embedFile("me.png"));
+defer app.photo.deinit();
+
+zigui.image(&app.photo, .{ .fit = .cover })
+```
+
+```zig
+fn image(source: *zigui.ImageSource, opts: zigui.FrameOpts) *Node
+```
+
+It fills its cell and fits per `opts.fit` (`.contain` default). `image` shares
+`FrameOpts` / `FrameFit` with live frames - see [External frames](../frames.md)
+for the `ImageSource` methods, the decode/upload details, and the fit table.
 
 ## icon
 
@@ -148,6 +172,7 @@ instead of a hardcoded glyph so the combo reads right on each OS:
 | `zigui.key_command` | the Command sign | `Ctrl` |
 | `zigui.key_shift` | the Shift sign | `Shift` |
 | `zigui.key_option` | the Option sign | `Alt` |
+| `zigui.key_return` | the Return sign | `Enter` |
 
 The key strings are borrowed by pointer and must outlive the frame - string
 literals are static, so a `&.{ ... }` call site is safe.

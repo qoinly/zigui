@@ -1,9 +1,9 @@
 # Inputs
 
 Form controls: `input` / `text_input` / `text_editable`, `textarea`, `checkbox`,
-`radio`, `toggle`, `slider`, `select`. They return `*zigui.Node`, so they nest in
-`col` / `row` / `grid` like any node. No allocator, theme, or paint to pass - the
-frame supplies them.
+`radio`, `toggle`, `toggle_group`, `slider`, `select`. They return `*zigui.Node`,
+so they nest in `col` / `row` / `grid` like any node. No allocator, theme, or paint
+to pass - the frame supplies them.
 
 Most are stateful: the cursor, focus, drag geometry, and open/closed state live in
 a struct you own. Keep it in your app struct, pass a pointer, and read the value
@@ -50,6 +50,11 @@ fn view(f: *zigui.Frame, app: *App) *zigui.Node {
 | `focused` | `bool` | `false` | drives the box ring + activates the native editor |
 | `id` | `u32` | `1` | distinct per field so the singleton editor re-seeds when focus moves |
 | `on_focus` | `?FocusFn` | `null` | fires on click; set your focus flag here |
+| `invalid` | `bool` | `false` | destructive error border |
+| `kind` | `InputKind` | `.text` | `.text`, `.number`, or `.password` (see below) |
+| `ctx` | `?*anyopaque` | `null` | focus-callback context; defaults to the run state (pass a per-cell ctx for a grid of fields sharing one `on_focus`) |
+| `font_family` | `?[]const u8` | `null` | editor font; null keeps the theme UI font (pass a mono family for a URL / code field) |
+| `spans` | `[]const TextSpan` | `&.{}` | inline token colouring of the value while editing (e.g. `{{var}}` in a URL); overlay backends |
 
 The field is one editor across the app, so each `text_input` needs its own `id`.
 A click that misses every field should blur - wire it on the enclosing container:
@@ -68,6 +73,34 @@ zigui.col(.{ .grow = 1, .on_click = zigui.on(App, blur) }, &.{ ... })
 | `len` | `usize` | `0` |
 
 Methods: `slice() []const u8` (the typed value), `set(text: []const u8) void`.
+
+### Password & number fields
+
+`kind` switches the field's behaviour:
+
+- `.password` masks the value - bullets when idle, a secure native editor when
+  focused (`NSSecureTextField` on macOS), and it never reaches the clipboard. Add
+  a show/hide eye by passing `on_reveal_toggle` and driving `reveal` (caller-owned):
+
+  ```zig
+  zigui.text_input(&app.pw, .{
+      .kind = .password,
+      .reveal = app.show_pw,
+      .on_reveal_toggle = zigui.on(App, toggle_show_pw),
+  })
+  ```
+
+- `.number` rejects non-numeric keystrokes. Pass `on_increment` / `on_decrement`
+  to render the stepper buttons.
+
+### Inline completion
+
+For a `{{var}}` / autocomplete popup anchored at the caret, set `caret_out` (a
+window-abs caret rect `[x, y, w, h]`) and `caret_index_out` (the caret's byte
+offset). Both are written every focused frame on overlay backends (Linux);
+native-painted fields (macOS / Windows) leave them until their native side reports
+the caret. Read them the next frame - like a node's `rect_out` - and drive the
+popup through the [text-field completion seam](../input.md#text-field-completion).
 
 ### Editable text
 
@@ -105,6 +138,7 @@ Use it for a fixed value or a disabled/invalid display.
 | `focused` | `bool` | `false` | ring + editor |
 | `disabled` | `bool` | `false` | dims, suppresses the focus hitbox |
 | `invalid` | `bool` | `false` | destructive border |
+| `rect_out` | `?*[4]f32` | `null` | laid-out rect, written when focused (anchor a popup) |
 
 ```zig
 zigui.input("Cannot edit this", "", .default, .{ .disabled = true })
@@ -149,8 +183,20 @@ fn view(f: *zigui.Frame, app: *App) *zigui.Node {
 |---|---|---|---|
 | `spans` | `[]const TextSpan` | `&.{}` | coloured runs (a syntax highlighter); empty = plain |
 | `height` | `f32` | `132` | box height; the editor scrolls internally |
+| `grow` | `f32` | `0` | `> 0` fills the flex parent's main axis instead of `height` (no one-frame measure lag) |
 | `read_only` | `bool` | `false` | view-only; keys don't mutate |
 | `wrap` | `bool` | `true` | soft-wrap long lines to the view width |
+| `bordered` | `bool` | `true` | draw the box border; `false` for a bare embedded pane |
+| `line_numbers` | `bool` | `false` | a logical-line gutter |
+| `code_edits` | `bool` | `false` | bracket match + auto-close/indent + Tab/Shift-Tab indent (see below) |
+| `folding` | `bool` | `false` | fold chevrons for multi-line `{...}` / `[...]` (needs `line_numbers`) |
+| `match_ranges` | `[]const [2]u32` | `&.{}` | find-highlight bands (byte ranges) |
+| `active_match` | `i32` | `-1` | index into `match_ranges` drawn brighter (the current hit) |
+| `font_family` | `[]const u8` | `"SF Mono"` | editor font family |
+| `font_size` | `f32` | `13` | editor font size |
+| `caret_out` | `?*[4]f32` | `null` | window-abs caret rect, for anchoring a completion popup |
+| `completion` | `?*Completion` | `null` | inline-completion popup nav state (see below) |
+| `snippet` | `?*Snippet` | `null` | active snippet tabstop nav state (see below) |
 | `on_focus` | `?FocusFn` | `null` | fires on click |
 
 State you read/write directly on the struct:
@@ -158,11 +204,18 @@ State you read/write directly on the struct:
 | Field | Type | Meaning |
 |---|---|---|
 | `buf` | `TextBuffer` | the editable bytes; `buf.slice()` is the text |
+| `caret` | `usize` | caret byte offset (a UTF-8 lead boundary) |
 | `focused` | `bool` | set it to focus; clear it (and your other areas) to blur |
+| `full` | `bool` | the last insert hit the backing capacity (show a cap hint) |
 
 `TextBuffer`: `bytes: []u8` (your backing store), `len: usize`, `edit_seq: u64`
 (bumps on every edit - gate a re-tokenise on it). Methods: `slice()`,
 `insert_bytes(at, text)`, `delete_range(start, end)`.
+
+`TextAreaState` methods for programmatic edits (find/replace, go-to-line,
+snippet insert): `goto(off)` moves the caret and scrolls it into view;
+`replace_range(a, b, text)` swaps bytes `[a, b)`; `insert_at_caret(text)` inserts
+at the caret. These keep undo history and the line index consistent.
 
 `TextSpan` for highlighting (caller sorts by `start`, non-overlapping):
 
@@ -179,6 +232,42 @@ field(zigui.textarea(&app.json, .{
     .on_focus = zigui.on(App, focus_json),
 }))
 ```
+
+### Code editor
+
+Set `code_edits = true` for editor behaviours: bracket-pair match highlight,
+auto-close and skip of brackets/quotes (with pair-aware backspace), Enter
+auto-indent, and Tab / Shift-Tab to indent or dedent. Add `line_numbers` for a
+gutter and `folding` to collapse multi-line `{...}` / `[...]` blocks. Word and
+document caret jumps work regardless (Cmd/Option+arrow on macOS, Ctrl+arrow /
+Ctrl+Home/End elsewhere).
+
+There is no built-in find UI - you drive it. Highlight matches by handing byte
+ranges to `match_ranges` and the current one to `active_match`; jump to a match or
+a line with `state.goto(offset)`; do a find/replace with `state.replace_range`.
+
+```zig
+zigui.textarea(&app.code, .{
+    .code_edits = true,
+    .line_numbers = true,
+    .folding = true,
+    .match_ranges = app.hits[0..app.hit_n],
+    .active_match = app.active_hit,
+    .font_family = "SF Mono",
+})
+```
+
+### Inline completion & snippets
+
+`completion` and `snippet` are caller-owned nav-state hooks. While a `Completion`
+is `open`, the editor routes Up/Down/Enter/Tab/Esc to popup navigation instead of
+the caret; you read `commit` / `dismiss` and consume them. While a `Snippet` is
+`active`, Tab / Shift-Tab / Esc drive tabstops instead of indent. Anchor the popup
+with `caret_out`.
+
+| `Completion` | `open`, `count`, `selected`, `commit`, `dismiss` |
+|---|---|
+| `Snippet` | `active`, `next`, `prev`, `cancel` |
 
 ## Checkbox, radio, toggle
 
@@ -207,6 +296,44 @@ Signatures:
 
 Radio is a group by convention - one `bool` per option, derived from one selected
 index. There's no group widget; you write `selected = app.pick == i`.
+
+## Toggle group
+
+A row of two-state buttons - a segmented single-select (alignment) or an
+independent multi-select (bold / italic / underline). Each item owns its pressed
+flag and toggle handler; the group only styles them.
+
+`toggle_group(items: []const ToggleGroupItem, o: ToggleGroupOpts) *Node`
+
+| `ToggleGroupItem` | Type | Default | Meaning |
+|---|---|---|---|
+| `label` | `[]const u8` | `""` | button text (or empty for an icon-only button) |
+| `icon` | `?Icon` | `null` | leading icon |
+| `on` | `bool` | `false` | pressed state |
+| `on_toggle` | `?ToggleFn` | `null` | fires on press; wrap with `zigui.on(State, f)` |
+| `ctx` | `?*anyopaque` | `null` | handler context (defaults to the run state) |
+
+| `ToggleGroupOpts` | Type | Default | Meaning |
+|---|---|---|---|
+| `variant` | `ToggleVariant` | `.default` | button style (as `toggle_button`, e.g. `.outline`) |
+| `size` | `kit.Size` | `.default` | `sm`, `default`, `lg` |
+| `connected` | `bool` | `false` | joined segments (shared borders) vs separate buttons |
+
+```zig
+// single select: derive each item's `on` from one selected index
+zigui.toggle_group(&.{
+    .{ .icon = .align_left,   .on = app.align == 0, .on_toggle = zigui.on(App, align0) },
+    .{ .icon = .align_center, .on = app.align == 1, .on_toggle = zigui.on(App, align1) },
+    .{ .icon = .align_right,  .on = app.align == 2, .on_toggle = zigui.on(App, align2) },
+}, .{ .variant = .outline, .connected = true })
+
+// multi select: each item flips its own bool
+zigui.toggle_group(&.{
+    .{ .icon = .bold,      .on = app.bold,      .on_toggle = zigui.on(App, t_bold) },
+    .{ .icon = .italic,    .on = app.italic,    .on_toggle = zigui.on(App, t_italic) },
+    .{ .icon = .underline, .on = app.underline, .on_toggle = zigui.on(App, t_underline) },
+}, .{ .variant = .outline })
+```
 
 ## Slider
 

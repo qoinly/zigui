@@ -120,6 +120,16 @@ A pointer move or click already triggers a redraw, so input-driven feedback
 if (s.t != target) zigui.animate(); // tick only while sliding
 ```
 
+For a *slow* periodic refresh - a clock that reads once a second, a meter that
+re-polls - `animate()` (which redraws every vsync) is wasteful. Call
+`zigui.request_redraw_after(seconds)` to schedule a single redraw that far out
+and re-arm it each frame; the loop parks in between. Pair it with
+`zigui.window_occluded()` to stop re-arming while the window is hidden.
+
+```zig
+zigui.request_redraw_after(1.0); // wake once a second to re-read the clock
+```
+
 ## Batching (why overlays mask glyphs)
 
 Draw output is batched: all quads draw together, all text draws together, as

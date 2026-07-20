@@ -9,7 +9,11 @@ Containers group and stack content (`card`), switch between views (`tabs`,
 - [Sidebar](#sidebar) - a nav tree with disclosure + resize
 - [Tab bar](#tab-bar) - closeable, reorderable page tabs
 - [Bottom bar](#bottom-bar) - a mobile bottom navigation bar
-- [Overlays](#overlays) - dialog, sheet, menu, popover
+- [Resize handle](#resize-handle) - a draggable divider between two panes
+- [Overlays](#overlays) - dialog, sheet, menu, popover, `modal_backdrop`
+
+Scrolling (`scroll`) and z-stacking (`layers`) are core layout nodes, documented
+in [Layout](../layout.md).
 
 ## Card
 
@@ -204,6 +208,10 @@ zigui.tabbar(.{
 | `on_new` | `?TabNewFn` | `null` | wrap with `zigui.on(State, f)`; `null` = no + button |
 | `on_move` | `?TabMoveFn` | `null` | wrap with `zigui.on_move2(State, f)` (`fn(*State, usize, usize)`) - enables drag-reorder |
 | `on_pin` | `?TabPinFn` | `null` | wrap with `zigui.on_index(State, f)` |
+| `on_context` | `?TabContextFn` | `null` | wrap with `zigui.on_index(State, f)`; fires on right-click so you can anchor a menu at that tab |
+| `label_size` | `f32` | `0` | tab label font size; `0` = the theme font size |
+| `min_tab_w` | `f32` | `120` | tabs shrink to fill the strip down to this, then the strip scrolls |
+| `max_tab_w` | `f32` | `220` | tabs never grow past this; set `min == max` for a fixed tab width |
 
 `TabItem`:
 
@@ -288,6 +296,35 @@ to match your palette. `bottom_bar` only draws the bar - render the body per
 `active` yourself. The `state` and the `items` slice must outlive the frame -
 store `items` as a module-level constant. Re-exported: `BottomBarItem`,
 `BottomBarState`, `BottomBarStyle`, `BottomBarOpts`.
+
+## Resize handle
+
+A single draggable divider as a composable node: drop it between two panes in a
+`row` (or `col`) and it reads its own laid-out length. The `(x, y)` it reports is
+window-space, so clamp it into the new pane size yourself (as the sidebar's own
+handle does).
+
+```zig
+fn resize(app: *App, x: f32, _: f32) void {
+    app.left_w = std.math.clamp(x, 200, 600);
+}
+
+zigui.row(.{ .grow = 1 }, &.{
+    left_pane(app),
+    zigui.resize_handle(.{ .on_drag = zigui.on_drag(App, resize) }),
+    right_pane(app),
+})
+```
+
+`resize_handle(o)`:
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `orientation` | `Orientation` | `.horizontal` | `.horizontal` = panes side by side (a vertical grabber); `.vertical` = stacked panes |
+| `kind` | `HandleKind` | `.line` | the grabber styling (a hairline) |
+| `on_drag` | `?DragFn` | `null` | wrap with `zigui.on_drag(State, f)` (`fn(*State, f32, f32)`) |
+| `on_drag_end` | `?DragEndFn` | `null` | wrap with `zigui.on(State, f)`; fires on release |
+| `ctx` | `?*anyopaque` | `null` | handler context (defaults to the run state) |
 
 ## Overlays
 
@@ -499,11 +536,14 @@ fn overlay(f: *zigui.Frame, app: *App) ?*zigui.Node {
 | `kind` | `ItemKind` | `.item` | `.item`, `.separator`, `.label`, `.checkbox`, `.radio`, `.submenu` |
 | `id` | `[]const u8` | `""` | select id |
 | `label` | `[]const u8` | `""` | row text |
-| `icon` | `?Icon` | `null` | leading glyph (exclusive with a check) |
-| `shortcut` | `[]const u8` | `""` | right-aligned hint, e.g. `zigui.key_command ++ " P"` |
+| `icon` | `?Icon` | `null` | leading glyph; on a checked `.radio` it makes a select-style row (icon leads, the check moves to the trailing edge) |
+| `shortcut` | `[]const u8` | `""` | right-aligned text hint, e.g. `zigui.key_command ++ " P"` |
+| `keys` | `[]const []const u8` | `&.{}` | right-aligned `kbd` chips; takes precedence over `shortcut` |
 | `checked` | `bool` | `false` | for `.checkbox` / `.radio` |
 | `disabled` | `bool` | `false` | dimmed, non-interactive |
 | `destructive` | `bool` | `false` | red text, red hover fill |
+| `dot` | `?Rgba` | `null` | a colour dot in its own column (e.g. an environment colour), independent of the check; when any row sets it, all rows reserve the column |
+| `dot_ring` | `bool` | `false` | draw the dot as a hollow ring instead of a filled disc (e.g. a "none" option) |
 | `children` | `[]const MenuEntry` | `&.{}` | submenu rows (with `kind = .submenu`) |
 
 `on_select` fires with the row's `id`; close the menu yourself (a `.checkbox`
@@ -537,6 +577,15 @@ zigui.popover_overlay(.{
 | `view_y` | `f32` | `0` | content top for the flip-above clamp |
 | `view_h` | `f32` | `0` | content height; `0` disables the flip |
 | `on_dismiss` | `?ClickFn` | `null` | wrap with `zigui.on(State, f)` |
+
+### modal_backdrop
+
+`zigui.modal_backdrop()` is a zero-size marker node. Drop it as the first child of
+a modal you compose yourself - a `col` card in the overlay region, placed after
+your own scrim - to lift every sibling drawn after it onto the modal top layer,
+crisp over a frosted backdrop (the same layer the built-in `dialog` / `sheet`
+use). You only need it when hand-composing a modal; the facade overlays lift
+themselves.
 
 ## See also
 
