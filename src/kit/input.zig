@@ -27,6 +27,7 @@ pub const InputOptions = struct {
     focused: bool = false,
     disabled: bool = false,
     invalid: bool = false,
+    frameless: bool = false, // skip the box (bg + border): a borderless inline field, e.g. a grid cell
     reveal: bool = false,
     theme: *const Theme,
     paint: ?*custom_paint.PaintContext = null,
@@ -85,19 +86,22 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, opts: InputOptions) Ren
         });
     }
 
-    var box = Quad.init(x, y, w, h);
-    const border = if (opts.invalid)
-        theme.destructive
-    else if (opts.focused)
-        theme.ring
-    else
-        theme.border;
-    const bg = if (opts.disabled) theme.muted else theme.background;
-    _ = box.set_background(bg)
-        .set_corner_radius(theme.radius - 2)
-        .set_border_color(border)
-        .set_border_width(if (opts.focused or opts.invalid) 2 else 1);
-    try b.append_quad(box);
+    // A frameless field draws no box (bg + border): it reads as inline editable text (grid cells).
+    if (!opts.frameless) {
+        var box = Quad.init(x, y, w, h);
+        const border = if (opts.invalid)
+            theme.destructive
+        else if (opts.focused)
+            theme.ring
+        else
+            theme.border;
+        const bg = if (opts.disabled) theme.muted else theme.background;
+        _ = box.set_background(bg)
+            .set_corner_radius(theme.radius - 2)
+            .set_border_color(border)
+            .set_border_width(if (opts.focused or opts.invalid) 2 else 1);
+        try b.append_quad(box);
+    }
 
     const has_val = opts.value.len > 0;
     const fg = if (opts.disabled)
