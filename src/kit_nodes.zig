@@ -1222,6 +1222,7 @@ pub const SelectOverlay = struct {
     trigger: *const [4]f32, // read at draw, after the trigger wrote it this frame
     position: select_kit.SelectPosition = .item_aligned,
     scroll: *f32, // caller-owned offset; the wheel re-clamps it each frame
+    width: f32 = 0, // panel width; 0 = match the trigger width
     max_height: f32 = 280,
     search: bool = false,
     search_field: ?*TextField = null, // non-null only for the combobox variant
@@ -1317,6 +1318,7 @@ const SelectOverlaySpec = struct {
             .trigger_x = tg[0],
             .trigger_y = tg[1],
             .trigger_w = tg[2],
+            .width = o.width,
             .max_height = o.max_height,
             .scroll = o.scroll.*,
             .on_scroll = o.on_scroll,
@@ -1352,7 +1354,9 @@ const SelectOverlaySpec = struct {
                         fld.slice(),
                         theme,
                         &.{},
-                        null,
+                        null, // font
+                        null, // caret_out
+                        null, // caret_index_out
                     );
                 }
             }
