@@ -20,6 +20,7 @@ pub const TabItem = struct {
     id: []const u8,
     title: []const u8,
     icon: ?icon.Icon = null,
+    icon_color: ?Rgba = null, // null = the active/muted foreground (matches the title)
     // Always shown; only the title ellipsizes when space is tight.
     prefix: []const u8 = "",
     prefix_color: ?Rgba = null, // null = muted_foreground
@@ -381,7 +382,7 @@ fn render_tab(
             ICON_SZ,
             ICON_SZ,
             ic,
-            .{ .point_size = ICON_SZ, .color = fg },
+            .{ .point_size = ICON_SZ, .color = tab.icon_color orelse fg },
         );
         content_x += ICON_SZ + GAP;
     }
