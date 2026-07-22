@@ -106,6 +106,11 @@ pub const Node = struct {
     // (the quads-then-sprites renderer otherwise lets body text bleed over an
     // overlay's fill). The same mask the menu/select overlays apply internally.
     backdrop_mask: bool = false,
+    // Clip children to this node's box at draw time, WITHOUT the scroll viewport's layout override
+    // (min-size 0 / natural-height child). Layout (incl. flex_grow) is unchanged, so a grow child
+    // still fills the box; only what overflows the box is clipped. Use for a fixed/flex region whose
+    // content must not bleed past its bounds (e.g. a resizable pane) but that still grows to fit.
+    clip: bool = false,
     children: []const *Node = &.{},
     // A scroll viewport: clips its child to its box and offsets it by state.y.
     scroll: ?*ScrollState = null,
@@ -171,6 +176,8 @@ pub const Cfg = struct {
     rect_out: ?*[4]f32 = null,
     // Crisp custom overlay: mask body text-sprites behind this box (see Node).
     backdrop_mask: bool = false,
+    // Clip children to this box at draw time (layout/grow unchanged); see Node.clip.
+    clip: bool = false,
 };
 
 pub const Txt = struct {
@@ -238,6 +245,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
         .backdrop_mask = cfg.backdrop_mask,
+        .clip = cfg.clip,
         .children = own_kids(a, kids),
     });
 }
@@ -566,6 +574,25 @@ fn draw_tree(
     if (n.parallax_t) |t| {
         const view = [4]f32{ x, y, r.size.width, r.size.height };
         try draw_parallax(b, eng, theme, n, depth, ox, oy, view, t);
+        if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
+        return;
+    }
+    if (n.clip) {
+        // Draw children with the normal layout (no scroll offset), then clip everything they emitted
+        // to this box — a plain overflow:hidden. Unlike scroll, layout is untouched, so a flex_grow
+        // child fills the box; only what spills past the box edges is clipped.
+        const view = [4]f32{ x, y, r.size.width, r.size.height };
+        const prim0 = b.prims.items.len;
+        const spr0 = b.sprites.items.len;
+        const cspr0 = b.color_sprites.items.len;
+        for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
+        for (b.prims.items[prim0..]) |*p| switch (p.*) {
+            inline else => |*v| {
+                v.clip_bounds = clip_isect(v.clip_bounds, view);
+            },
+        };
+        for (b.sprites.items[spr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
+        for (b.color_sprites.items[cspr0..]) |*s| s.clip_bounds = clip_isect(s.clip_bounds, view);
         if (n.backdrop_mask) mask_backdrop(b, mask_from, view);
         return;
     }

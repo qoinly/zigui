@@ -1829,7 +1829,9 @@ pub fn render(
     opts: TextAreaOptions,
 ) RenderError!SizeF {
     std.debug.assert(w > 0);
-    std.debug.assert(h >= opts.pad * 2);
+    // Too short to lay out even the padding (a caller clipped/collapsed the box below the text area):
+    // draw nothing and report the box size, rather than underflowing the interior height below.
+    if (h < opts.pad * 2) return SizeF.init(w, h);
     std.debug.assert(opts.state.buf.bytes.len <= std.math.maxInt(u32)); // line/undo offsets are u32
     const st = opts.state;
     const theme = opts.theme;
