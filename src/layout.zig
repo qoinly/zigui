@@ -356,6 +356,22 @@ pub const LayoutEngine = struct {
             // min/max clamps (with redistribution when a clamp binds).
             actual_main = resolved[idx];
             actual_cross = style_cross orelse base[idx].cross;
+            // child_base measures content at the FULL available main (before siblings
+            // consume it / shrink runs), so a child whose main axis ended up smaller than
+            // that must have its cross re-measured at the resolved width. Wrapping content
+            // (text, or a container holding it) gets TALLER as it narrows, and skipping this
+            // leaves the line too short so its wrapped tail overlaps the next one.
+            if (style_cross == null and actual_main + 0.5 < base[idx].main) {
+                const aw = if (is_row) actual_main else cross_size;
+                const ah = if (is_row) cross_size else actual_main;
+                if (child.measure_fn) |mf| {
+                    const m = finite_size(mf(child.measure_ctx.?, .{ .width = aw, .height = ah }));
+                    actual_cross = if (is_row) m.height else m.width;
+                } else if (child.children.items.len > 0) {
+                    const intr = self.measure_intrinsic_size(child_id, aw, ah, depth + 1);
+                    actual_cross = if (is_row) intr.height else intr.width;
+                }
+            }
             if (!base[idx].has_content and style_cross == null) actual_cross = cross_size;
             var child_cross_offset = cross_offset;
 
@@ -1078,20 +1094,27 @@ pub const LayoutEngine = struct {
         var total_main: f32 = 0;
         var max_cross: f32 = 0;
         var child_count: usize = 0;
+        // Row children share the main-axis width; measure each at what's LEFT after the ones
+        // before it, so a wrapping child (text next to a fixed key/indent) reports its real,
+        // taller height instead of a single line at the full width - otherwise a parent stacking
+        // a sibling underneath reserves too little and they overlap. Columns give every child the
+        // full width (they stack), so this narrowing is row-only and never enlarges the estimate.
+        var used_main: f32 = 0;
 
         for (node.children.items) |child_id| {
             var child = &self.nodes.items[child_id.index];
+            const avail_w = if (is_row) @max(content_width - used_main, 0) else content_width;
 
             var child_size: Size(f32) = undefined;
 
             if (child.measure_fn) |measure_fn| {
-                const prop = SizeProposal{ .width = content_width, .height = content_height };
+                const prop = SizeProposal{ .width = avail_w, .height = content_height };
                 child_size = finite_size(measure_fn(child.measure_ctx.?, prop));
                 child.content_size = child_size;
             } else if (child.children.items.len > 0) {
                 child_size = self.measure_intrinsic_size(
                     child_id,
-                    content_width,
+                    avail_w,
                     content_height,
                     depth + 1,
                 );
@@ -1108,6 +1131,7 @@ pub const LayoutEngine = struct {
 
             total_main += child_main;
             max_cross = @max(max_cross, child_cross);
+            if (is_row) used_main += child_main + gap;
             child_count += 1;
         }
 
