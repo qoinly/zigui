@@ -154,6 +154,8 @@ pub const TextAreaState = struct {
     vis_count: usize = 1,
     vis_seq: u64 = std.math.maxInt(u64),
     vis_cols: usize = 0,
+    wrap_indent: bool = false, // hanging-indent wrapped rows (set from options each frame)
+    vis_wrap_indent: bool = false, // the wrap_indent the current vis index was built with
 
     // Fold regions (multi-line bracket pairs), recomputed when the buffer changes; each is a
     // logical [open_line, close_line] with close_line > open_line. `collapsed` is keyed by open
@@ -251,6 +253,7 @@ pub const TextAreaOptions = struct {
     pad: f32 = 10,
     read_only: bool = false,
     wrap: bool = true, // soft-wrap long lines to the view width (no h-scroll exists)
+    wrap_indent: bool = false, // hanging indent: wrapped continuation rows align to the line's indent
     line_numbers: bool = false, // a left gutter numbering logical (newline) lines
     // Find highlighting: byte ranges to band behind the text (search matches); the one at
     // `active_match` reads brighter. Caller navigates by setting caret/sel_anchor to a match.
@@ -447,6 +450,35 @@ fn wrap_point(st: *const TextAreaState, start: usize, le: usize, cols_max: usize
     return le;
 }
 
+// Leading-whitespace display columns of logical line `r` (spaces + tabs).
+fn leading_indent_cols(st: *const TextAreaState, r: usize) usize {
+    const bytes = st.buf.slice();
+    var i = st.line_starts[r];
+    const le = line_end(st, r);
+    var col: usize = 0;
+    while (i < le) : (i += 1) {
+        if (bytes[i] == ' ') col += 1 else if (bytes[i] == '\t') col = (col / TAB + 1) * TAB else break;
+    }
+    return col;
+}
+
+// Hanging-indent columns a wrapped continuation of logical line `r` is shifted by: its leading
+// indent, capped at half the width so the continuation always keeps room. 0 when wrap_indent is off.
+fn cont_indent_cols(st: *const TextAreaState, r: usize, cols_max: usize) usize {
+    if (!st.wrap_indent or cols_max == 0) return 0;
+    return @min(leading_indent_cols(st, r), cols_max / 2);
+}
+
+// The indent columns for visual row `r`: the continuation indent for a wrapped row, 0 for the first
+// row of its logical line (or when off). Draw + hit-test add this * char_w to the row's base x.
+fn row_indent_cols(st: *const TextAreaState, r: usize) usize {
+    if (!st.wrap_indent or st.vis_cols == 0) return 0;
+    const ls = st.vis_starts[r];
+    const logical = row_of_offset(st, ls);
+    if (ls == st.line_starts[logical]) return 0;
+    return cont_indent_cols(st, logical, st.vis_cols);
+}
+
 // Rebuild the visual index from the (current) logical index. cols_max == 0 ->
 // no wrap, so it mirrors line_starts; otherwise each logical line splits into
 // wrap_point segments. Clamps at MAX_VIS like the line index. Gated on
@@ -541,6 +573,7 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize, folding: bool) void {
         }
         st.vis_seq = st.buf.edit_seq;
         st.vis_cols = 0;
+        st.vis_wrap_indent = st.wrap_indent;
         st.vis_collapse_seq = st.collapse_seq;
         return;
     }
@@ -548,15 +581,20 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize, folding: bool) void {
     var r: usize = 0;
     outer: while (r < st.line_count) : (r += 1) {
         const le = line_end(st, r);
+        const indent = cont_indent_cols(st, r, cols_max);
         var seg: usize = st.line_starts[r];
+        var first = true;
         while (true) {
             if (v >= MAX_VIS) break :outer;
             st.vis_starts[v] = @intCast(seg);
             v += 1;
-            const nxt = wrap_point(st, seg, le, cols_max);
+            // Continuation rows are shifted right by `indent`, so they wrap in the narrower width left.
+            const cw = if (first) cols_max else @max(1, cols_max -| indent);
+            const nxt = wrap_point(st, seg, le, cw);
             std.debug.assert(nxt > seg or seg >= le); // a non-empty segment must advance
             if (nxt >= le) break;
             seg = nxt;
+            first = false;
         }
         // A collapsed header shows its own (wrapped) rows; jump past the hidden body to the closer.
         if (folding and line_is_collapsed(st, r)) {
@@ -572,6 +610,7 @@ fn rebuild_vis_index(st: *TextAreaState, cols_max: usize, folding: bool) void {
     st.vis_count = v;
     st.vis_seq = st.buf.edit_seq;
     st.vis_cols = cols_max;
+    st.vis_wrap_indent = st.wrap_indent;
     st.vis_collapse_seq = st.collapse_seq;
 }
 
@@ -669,7 +708,8 @@ fn click_thunk(ctx: ?*anyopaque, px: f32, py: f32) void {
     var row: usize =
         if (rel_y <= 0 or st.last_line_h <= 0) 0 else @intFromFloat(rel_y / st.last_line_h);
     if (row >= st.vis_count) row = st.vis_count - 1;
-    const rel_x = px - st.last_text_x;
+    // Undo the row's hanging indent so the column maps to the row's first char at 0.
+    const rel_x = px - st.last_text_x - @as(f32, @floatFromInt(row_indent_cols(st, row))) * st.char_w;
     const col: usize =
         if (rel_x <= 0 or st.char_w <= 0) 0 else @intFromFloat(rel_x / st.char_w + 0.5);
     const off = byte_offset_at_vis_col(st, row, col);
@@ -1449,7 +1489,7 @@ fn draw_row_glyphs(
     b: *RenderBuilder,
     st: *TextAreaState,
     opts: TextAreaOptions,
-    g: Geom,
+    row_x: f32,
     ls: usize,
     le: usize,
     yy: f32,
@@ -1460,7 +1500,7 @@ fn draw_row_glyphs(
     const spans = opts.spans;
     const t0 = b.sprites.items.len;
     if (spans.len == 0) {
-        if (le > ls) _ = try label.render(b, g.text_x, yy, st.buf.bytes[ls..le], base_style);
+        if (le > ls) _ = try label.render(b, row_x, yy, st.buf.bytes[ls..le], base_style);
     } else {
         var cursor = ls;
         var col: usize = 0;
@@ -1480,7 +1520,7 @@ fn draw_row_glyphs(
                 spans[span_i.*].weight,
             ) else base_style;
             const seg = st.buf.bytes[cursor..seg_end];
-            const seg_x = g.text_x + @as(f32, @floatFromInt(col)) * st.char_w;
+            const seg_x = row_x + @as(f32, @floatFromInt(col)) * st.char_w;
             _ = try label.render(b, seg_x, yy, seg, sty);
             col = advance_col(col, seg);
             cursor = seg_end;
@@ -1521,6 +1561,7 @@ fn draw_rows(
         const ls: usize = st.vis_starts[r];
         const le = vis_line_end(st, r);
         const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+        const row_x = g.text_x + @as(f32, @floatFromInt(row_indent_cols(st, r))) * st.char_w;
 
         // Selection band BEFORE glyphs (quads honour submission order, then all
         // glyphs flush on top) so the band sits behind the row's text.
@@ -1529,7 +1570,7 @@ fn draw_rows(
             const seg_b: usize = if (r == erow) s.b else le;
             const col_a = vis_col_of(st, r, seg_a);
             const col_b = vis_col_of(st, r, seg_b);
-            const bx = g.text_x + @as(f32, @floatFromInt(col_a)) * st.char_w;
+            const bx = row_x + @as(f32, @floatFromInt(col_a)) * st.char_w;
             var bw = @as(f32, @floatFromInt(col_b - col_a)) * st.char_w;
             // Only a hard newline at the row's end draws the swallow-stub; a soft
             // wrap keeps no '\n', so its fully-selected row stops at the text.
@@ -1545,7 +1586,7 @@ fn draw_rows(
             try b.append_quad(band_q);
         };
 
-        try draw_row_glyphs(b, st, opts, g, ls, le, yy, base_style, &span_i, band);
+        try draw_row_glyphs(b, st, opts, row_x, ls, le, yy, base_style, &span_i, band);
 
         // A collapsed region shows a muted "…}" right after its header (the ellipsis stands in for the
         // hidden body, the closer makes the bracket read whole).
@@ -1553,7 +1594,7 @@ fn draw_rows(
             const logical = row_of_offset(st, ls);
             if (line_is_collapsed(st, logical) and le == line_end(st, logical)) {
                 const mcol = vis_col_of(st, r, le);
-                const mx = g.text_x + @as(f32, @floatFromInt(mcol)) * st.char_w;
+                const mx = row_x + @as(f32, @floatFromInt(mcol)) * st.char_w;
                 const msty = mono_style(opts.font_family, opts.font_size, theme.muted_foreground, .normal);
                 var mbuf: [5]u8 = undefined;
                 const marker = std.fmt.bufPrint(&mbuf, "\u{2026}{c}", .{fold_cchar_at(st, logical)}) catch "\u{2026}";
@@ -1577,7 +1618,7 @@ fn draw_caret(
     if (!(st.focused and caret_visible(st, st.now_cached))) return;
     const caret_row = vis_row_of_offset(st, st.caret);
     const ccol = vis_col_of(st, caret_row, st.caret);
-    const cx = g.text_x + @as(f32, @floatFromInt(ccol)) * st.char_w;
+    const cx = g.text_x + @as(f32, @floatFromInt(ccol + row_indent_cols(st, caret_row))) * st.char_w;
     const cy = g.text_y + @as(f32, @floatFromInt(caret_row)) * g.line_h - st.scroll_y;
     if (cy + g.line_h > g.text_y and cy < g.text_y + g.view_h) {
         var caret = Quad.init(cx, cy, CARET_W, g.line_h);
@@ -1667,7 +1708,7 @@ fn draw_match_bands(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions
             if (sb <= sa) continue;
             const col_a = vis_col_of(st, r, sa);
             const col_b = vis_col_of(st, r, sb);
-            const bx = g.text_x + @as(f32, @floatFromInt(col_a)) * st.char_w;
+            const bx = g.text_x + @as(f32, @floatFromInt(col_a + row_indent_cols(st, r))) * st.char_w;
             const bw = @as(f32, @floatFromInt(col_b - col_a)) * st.char_w;
             const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
             var q = Quad.init(bx, yy, bw, g.line_h);
@@ -1796,7 +1837,8 @@ fn prepare(
         @max(1, @as(usize, @intFromFloat(text_w / st.char_w)))
     else
         0;
-    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols or
+    st.wrap_indent = opts.wrap_indent; // read by the wrap rebuild + the per-row draw/hit offset
+    if (st.buf.edit_seq != st.vis_seq or cols_max != st.vis_cols or st.wrap_indent != st.vis_wrap_indent or
         (opts.folding and st.collapse_seq != st.vis_collapse_seq)) rebuild_vis_index(st, cols_max, opts.folding);
     return .{
         .x = x,
