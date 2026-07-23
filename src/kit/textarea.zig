@@ -1237,6 +1237,7 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, cod
         },
         .enter => {
             if (read_only) return false;
+            if (ev.mods.cmd or ev.mods.ctrl) return false; // Cmd/Ctrl+Enter is a shortcut (send), not a newline
             if (code) return code_newline(st);
             return edit_at_selection(st, "\n", false);
         },
@@ -1250,6 +1251,9 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, cod
             // delete the range, not one char
             if (sel_range(st)) |r| return edit_replace(st, r.a, r.b, "", false);
             if (st.caret == 0) return false;
+            // Option (macOS) / Ctrl (Linux/Win) + Backspace deletes the previous word.
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (word) return edit_replace(st, prev_word(bytes, st.caret), st.caret, "", false);
             if (code and st.caret < st.buf.len and is_empty_pair(bytes[st.caret - 1], bytes[st.caret]))
                 return edit_replace(st, st.caret - 1, st.caret + 1, "", false); // drop both of an empty pair
             return edit_replace(st, prev_boundary(bytes, st.caret), st.caret, "", false);
@@ -1258,6 +1262,8 @@ fn apply_key(st: *TextAreaState, ev: custom_shell.KeyEvent, read_only: bool, cod
             if (read_only) return false;
             if (sel_range(st)) |r| return edit_replace(st, r.a, r.b, "", false);
             if (st.caret >= st.buf.len) return false;
+            const word = if (is_mac) ev.mods.alt else ev.mods.cmd;
+            if (word) return edit_replace(st, st.caret, next_word(bytes, st.caret), "", false); // delete the next word
             return edit_replace(st, st.caret, next_boundary(bytes, st.caret), "", false);
         },
         .left => {
