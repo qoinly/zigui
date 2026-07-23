@@ -183,6 +183,8 @@ pub const TextAreaState = struct {
     // tell the caller to unfocus its other text areas (only one drains keys).
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
     focus_ctx: ?*anyopaque = null,
+    on_pick: ?*const fn (ctx: ?*anyopaque, offset: usize) void = null,
+    pick_ctx: ?*anyopaque = null,
 
     // Insert text at the caret (snippet / programmatic), replacing any selection.
     // Funnels through the same recorded chokepoint, so a caller can cmd-Z it.
@@ -265,6 +267,9 @@ pub const TextAreaOptions = struct {
     font_family: []const u8 = "SF Mono",
     on_change: ?*const fn (ctx: ?*anyopaque) void = null,
     on_focus: ?*const fn (ctx: ?*anyopaque) void = null,
+    // Fired on a fresh (non-drag) click with the clicked byte offset into the buffer. Lets a
+    // read-only viewer act on the token under the cursor (e.g. a JSON value -> add an assertion).
+    on_pick: ?*const fn (ctx: ?*anyopaque, offset: usize) void = null,
     ctx: ?*anyopaque = null,
     // Window-absolute caret rect [x, y, w, h], written every focused frame (zeroed when unfocused)
     // for anchoring an overlay (a completion popup) at the caret. Like a node's rect_out: the value
@@ -684,6 +689,7 @@ fn click_thunk(ctx: ?*anyopaque, px: f32, py: f32) void {
         st.drag_autoscroll_dy = 0;
         st.undo_coalesce = false; // a click ends the typing run
         if (st.on_focus) |cb| cb(st.focus_ctx); // caller unfocuses its other areas
+        if (st.on_pick) |cb| cb(st.pick_ctx, off); // report the clicked byte for a read-only viewer
     } else {
         st.caret = off;
         st.goal_col = col;
@@ -1845,6 +1851,8 @@ pub fn render(
     st.now_cached = p.now_s; // mouse thunks run between frames; they read this
     st.on_focus = opts.on_focus; // stash so the click handler (ctx = state) reaches the caller
     st.focus_ctx = opts.ctx;
+    st.on_pick = opts.on_pick;
+    st.pick_ctx = opts.ctx;
     st.folding_on = opts.folding;
 
     snap_caret(st);
