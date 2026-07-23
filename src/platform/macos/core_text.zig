@@ -255,3 +255,7 @@ pub extern "CoreGraphics" fn CGContextClearRect(ctx: CGContextRef, rect: CGRect)
 pub extern "CoreGraphics" fn CGImageGetWidth(image: CGImageRef) usize;
 pub extern "CoreGraphics" fn CGImageGetHeight(image: CGImageRef) usize;
 pub extern "CoreGraphics" fn CGColorSpaceCreateDeviceRGB() CGColorSpaceRef;
+
+pub const CTFontSymbolicTraits = u32;
+pub const kCTFontTraitColorGlyphs: CTFontSymbolicTraits = 1 << 13; // the font renders color bitmaps (emoji)
+pub extern "CoreText" fn CTFontGetSymbolicTraits(font: CTFontRef) CTFontSymbolicTraits;

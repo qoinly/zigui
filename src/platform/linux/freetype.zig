@@ -98,8 +98,10 @@ pub const Face = extern struct {
 
 pub const LOAD_DEFAULT: i32 = 0;
 pub const LOAD_RENDER: i32 = 4;
+pub const LOAD_COLOR: i32 = 1 << 20; // FT_LOAD_COLOR: return embedded color bitmaps (emoji) as BGRA
 pub const RENDER_MODE_NORMAL: c_uint = 0;
 pub const PIXEL_MODE_GRAY: u8 = 2;
+pub const PIXEL_MODE_BGRA: u8 = 7; // color bitmap, 4 bytes/px, premultiplied
 
 extern "c" fn dlopen(file: [*:0]const u8, mode: c_int) ?*anyopaque;
 extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
@@ -113,6 +115,7 @@ const Fns = struct {
     FT_Set_Char_Size: *const fn (*Face, c_long, c_long, c_uint, c_uint) callconv(.c) c_int,
     FT_Load_Glyph: *const fn (*Face, c_uint, i32) callconv(.c) c_int,
     FT_Render_Glyph: *const fn (*GlyphSlot, c_uint) callconv(.c) c_int,
+    FT_Select_Size: *const fn (*Face, c_int) callconv(.c) c_int,
 };
 
 var fns: Fns = undefined;
@@ -154,11 +157,22 @@ pub fn set_pixel_size(face: *Face, size_px: f32) bool {
     return fns.FT_Set_Char_Size(face, 0, size_26_6, 72, 72) == 0;
 }
 
+// Select a fixed bitmap strike by index (for color-bitmap fonts like Noto Color Emoji, which have no
+// scalable outline, so set_pixel_size fails). Returns the strike's vertical ppem, or 0 on failure.
+pub fn select_strike(face: *Face, index: i32) f32 {
+    std.debug.assert(g_loaded);
+    if (fns.FT_Select_Size(face, index) != 0) return 0;
+    const size = face.size orelse return 0;
+    return @floatFromInt(size.metrics.y_ppem);
+}
+
 pub fn load_and_render(face: *Face, glyph_index: u32) ?*GlyphSlot {
     std.debug.assert(g_loaded);
-    if (fns.FT_Load_Glyph(face, glyph_index, LOAD_RENDER) != 0) return null;
+    // LOAD_COLOR is inert for outline glyphs (they still render as gray coverage); an emoji glyph
+    // with an embedded color bitmap comes back as premultiplied BGRA.
+    if (fns.FT_Load_Glyph(face, glyph_index, LOAD_RENDER | LOAD_COLOR) != 0) return null;
     const slot = face.glyph orelse return null;
-    std.debug.assert(slot.bitmap.pixel_mode == PIXEL_MODE_GRAY or slot.bitmap.rows == 0);
+    std.debug.assert(slot.bitmap.rows == 0 or slot.bitmap.pixel_mode == PIXEL_MODE_GRAY or slot.bitmap.pixel_mode == PIXEL_MODE_BGRA);
     return slot;
 }
 
