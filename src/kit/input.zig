@@ -110,9 +110,15 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, opts: InputOptions) Ren
         theme.foreground
     else
         theme.muted_foreground;
-    // When focused the native editor draws the text; drawing it here too would
-    // show the value through the editor.
-    if (!opts.focused and (has_val or opts.placeholder.len > 0)) {
+    // When focused, the native editor draws the text; drawing it here too would ghost
+    // through it. But the native backends (macOS/Windows) only present the editor while the
+    // window is key — while it's backgrounded the editor is hidden, so without this the field
+    // would look empty until focus returns (a flash on Cmd/Alt-Tab back). Fall back to drawing
+    // the value ourselves then. The Linux overlay backend always draws, so stays suppressed.
+    const native_backend = @import("builtin").os.tag == .macos or @import("builtin").os.tag == .windows;
+    const editor_showing = opts.focused and
+        (!native_backend or (if (opts.paint) |p| p.handle.is_key() else true));
+    if (!editor_showing and (has_val or opts.placeholder.len > 0)) {
         var mask_buf: [MAX_MASK * 3]u8 = undefined;
         const shown = if (!has_val)
             opts.placeholder
