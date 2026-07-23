@@ -380,7 +380,6 @@ pub const MacTextSystem = struct {
 
     fn rasterize_glyph(self: *Self, params: RenderGlyphParams) ?GlyphBitmap {
         if (params.font_id >= self.fonts.items.len) return null;
-        if (params.is_emoji) return null; // color path deferred
 
         const bounds = self.get_glyph_raster_bounds(params);
         const width: u32 = @intCast(@max(0, bounds.size.width));
@@ -392,7 +391,67 @@ pub const MacTextSystem = struct {
         const font = c.CTFontCreateCopyWithAttributes(base_font, scaled_size, null, null);
         defer c.CFRelease(font);
 
+        // A color-glyph font (the substituted emoji font, e.g. Apple Color Emoji) rasterizes RGBA and
+        // draws without a tint; everything else stays alpha-coverage mono.
+        if (c.CTFontGetSymbolicTraits(font) & c.kCTFontTraitColorGlyphs != 0) {
+            return self.rasterize_color_glyph(params, font, bounds, width, height);
+        }
         return self.rasterize_monochrome_glyph(params, font, bounds, width, height);
+    }
+
+    // The color path: an RGBA (premultiplied) context, same layout the app-icon path uses so the shared
+    // color atlas + shader consume it directly. CoreText scales the emoji to the CTFont size, so unlike
+    // the FreeType path there is no strike-downscale.
+    fn rasterize_color_glyph(
+        self: *Self,
+        params: RenderGlyphParams,
+        font: CTFontRef,
+        bounds: geometry.Bounds(i32),
+        width: u32,
+        height: u32,
+    ) ?GlyphBitmap {
+        const byte_count = width * height * 4;
+        self.bitmap_buffer.clearRetainingCapacity();
+        self.bitmap_buffer.resize(self.allocator, byte_count) catch return null;
+        @memset(self.bitmap_buffer.items, 0);
+
+        const color_space = c.CGColorSpaceCreateDeviceRGB();
+        defer c.CGColorSpaceRelease(color_space);
+
+        const context = c.CGBitmapContextCreate(
+            self.bitmap_buffer.items.ptr,
+            width,
+            height,
+            8,
+            width * 4,
+            color_space,
+            c.kCGImageAlphaPremultipliedLast | c.kCGBitmapByteOrder32Big,
+        );
+        if (context == null) return null;
+        defer c.CGContextRelease(context);
+
+        c.CGContextSetAllowsAntialiasing(context, 1);
+        c.CGContextSetShouldAntialias(context, 1);
+        c.CGContextSetAllowsFontSubpixelPositioning(context, 1);
+        c.CGContextSetShouldSubpixelPositionFonts(context, 1);
+
+        const subpixel_x: f32 = @as(f32, @floatFromInt(params.subpixel_variant.x)) / 4.0;
+        const subpixel_y: f32 = @as(f32, @floatFromInt(params.subpixel_variant.y)) / 4.0;
+        const draw_x: CGFloat = -@as(CGFloat, @floatFromInt(bounds.origin.x)) + subpixel_x;
+        const height_f: CGFloat = @floatFromInt(height);
+        const origin_y_f: CGFloat = @floatFromInt(bounds.origin.y);
+        const draw_y: CGFloat = height_f + origin_y_f + subpixel_y;
+
+        const glyphs: [1]CGGlyph = .{@intCast(params.glyph_id)};
+        const positions: [1]CGPoint = .{.{ .x = draw_x, .y = draw_y }};
+        c.CTFontDrawGlyphs(font, &glyphs, &positions, 1, context);
+
+        return .{
+            .width = width,
+            .height = height,
+            .data = self.bitmap_buffer.items,
+            .is_colored = true,
+        };
     }
 
     fn rasterize_monochrome_glyph(

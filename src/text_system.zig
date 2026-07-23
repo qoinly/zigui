@@ -6,6 +6,7 @@ const primitives = @import("primitives.zig");
 
 const Allocator = std.mem.Allocator;
 const MonochromeSprite = primitives.MonochromeSprite;
+const PolychromeSprite = primitives.PolychromeSprite;
 
 pub const FontId = u32;
 pub const GlyphId = u32;
@@ -284,6 +285,16 @@ const NativeAtlas = switch (builtin.os.tag) {
     else => @compileError("zigui: unsupported OS for mono atlas"),
 };
 
+// The RGBA atlas for color glyphs (emoji). Same type the app-icon path uses, so glyphs and icons
+// share one color texture; the two key with different seeds so they can't collide.
+pub const ColorAtlas = switch (builtin.os.tag) {
+    .macos => @import("platform/macos/mono_atlas.zig").MetalColorAtlas,
+    .ios => @import("platform/macos/mono_atlas.zig").MetalColorAtlas,
+    .windows => @import("platform/windows/atlas.zig").WinColorAtlas,
+    .linux => @import("platform/linux/atlas.zig").LinuxColorAtlas,
+    else => @compileError("zigui: unsupported OS for color atlas"),
+};
+
 pub const MonoAtlas = NativeAtlas;
 
 const UNSET_FONT_ID: FontId = std.math.maxInt(FontId);
@@ -479,7 +490,38 @@ pub const TextSystem = struct {
         return &self.atlas;
     }
 
-    // origin_{x,y} = baseline position in point coords (top-left viewport).
+    // The pixel geometry a glyph tile maps to on screen (shared by the mono and color sprite builds).
+    const SpriteGeom = struct { sx: f32, sy: f32, w: f32, h: f32, u0: f32, v0: f32, uw: f32, vh: f32 };
+
+    fn sprite_geom(t: AtlasTile, atlas_size_px: f32, gx: f32, origin_x: f32, origin_y: f32, scale_factor: f32) SpriteGeom {
+        const tw_px: f32 = @floatFromInt(t.bounds.size.width);
+        const th_px: f32 = @floatFromInt(t.bounds.size.height);
+        const ox_px: f32 = @floatFromInt(t.bounds.origin.x);
+        const oy_px: f32 = @floatFromInt(t.bounds.origin.y);
+        const raster_x_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.x)) / scale_factor;
+        const raster_y_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.y)) / scale_factor;
+        var sx = origin_x + gx + raster_x_pt;
+        var sy = origin_y + raster_y_pt;
+        // At 1x a fractional position drags the glyph through the linear sampler half a pixel out of
+        // phase (visible blur). At 2x+ subpixel placement is finer than the eye; leave it.
+        if (scale_factor == 1.0) {
+            sx = @round(sx);
+            sy = @round(sy);
+        }
+        return .{
+            .sx = sx,
+            .sy = sy,
+            .w = tw_px / scale_factor,
+            .h = th_px / scale_factor,
+            .u0 = ox_px / atlas_size_px,
+            .v0 = oy_px / atlas_size_px,
+            .uw = tw_px / atlas_size_px,
+            .vh = th_px / atlas_size_px,
+        };
+    }
+
+    // origin_{x,y} = baseline position in point coords (top-left viewport). Emoji (color-bitmap) glyphs
+    // go to the color atlas + color_sprites, drawn RGBA without a tint; everything else stays mono.
     pub fn sprites_for_line(
         self: *TextSystem,
         line: ShapedLine,
@@ -488,10 +530,13 @@ pub const TextSystem = struct {
         rgba: color.Rgba,
         scale_factor: f32,
         sprites: *std.ArrayListUnmanaged(MonochromeSprite),
+        color_atlas: *ColorAtlas,
+        color_sprites: *std.ArrayListUnmanaged(PolychromeSprite),
         out_allocator: Allocator,
     ) !void {
         std.debug.assert(scale_factor > 0);
-        const atlas_size_px: f32 = @floatFromInt(self.atlas.get_texture_size());
+        const mono_size_px: f32 = @floatFromInt(self.atlas.get_texture_size());
+        const color_size_px: f32 = @floatFromInt(color_atlas.get_texture_size());
 
         for (line.runs) |run| {
             for (run.glyphs) |g| {
@@ -503,45 +548,35 @@ pub const TextSystem = struct {
                     .scale_factor = scale_factor,
                     .is_emoji = false,
                 };
-                const key_hash = GlyphKey.from_params(params).hash();
+                const key = GlyphKey.from_params(params);
+                const key_hash = key.hash();
+                // Seed 2 = color-glyph domain in the shared color atlas (icons use their own keys).
+                const color_hash = std.hash.Wyhash.hash(2, std.mem.asBytes(&key));
 
-                var tile = self.atlas.get(key_hash);
-                if (tile == null) {
-                    const bitmap = self.platform().rasterize_glyph(params);
-                    const bounds = self.platform().glyph_raster_bounds(params);
-                    tile = self.atlas.get_or_insert(key_hash, bitmap, bounds.origin);
+                if (self.atlas.get(key_hash)) |t| {
+                    const s = sprite_geom(t, mono_size_px, g.position.x, origin_x, origin_y, scale_factor);
+                    try sprites.append(out_allocator, .{ .position = .{ s.sx, s.sy }, .size = .{ s.w, s.h }, .uv_origin = .{ s.u0, s.v0 }, .uv_size = .{ s.uw, s.vh }, .sprite_color = .{ rgba.r, rgba.g, rgba.b, rgba.a } });
+                    continue;
+                }
+                if (color_atlas.get(color_hash)) |t| {
+                    const s = sprite_geom(t, color_size_px, g.position.x, origin_x, origin_y, scale_factor);
+                    try color_sprites.append(out_allocator, .{ .position = .{ s.sx, s.sy }, .size = .{ s.w, s.h }, .uv_origin = .{ s.u0, s.v0 }, .uv_size = .{ s.uw, s.vh } });
+                    continue;
                 }
 
-                const t = tile orelse continue;
-
-                const tw_px: f32 = @floatFromInt(t.bounds.size.width);
-                const th_px: f32 = @floatFromInt(t.bounds.size.height);
-                const ox_px: f32 = @floatFromInt(t.bounds.origin.x);
-                const oy_px: f32 = @floatFromInt(t.bounds.origin.y);
-
-                const sprite_w = tw_px / scale_factor;
-                const sprite_h = th_px / scale_factor;
-
-                const raster_x_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.x)) / scale_factor;
-                const raster_y_pt: f32 = @as(f32, @floatFromInt(t.raster_origin.y)) / scale_factor;
-
-                var sx = origin_x + g.position.x + raster_x_pt;
-                var sy = origin_y + raster_y_pt;
-                // At 1x a fractional position drags the glyph through the
-                // linear sampler half a pixel out of phase - visible blur. At
-                // 2x+ subpixel placement is finer than the eye; leave it.
-                if (scale_factor == 1.0) {
-                    sx = @round(sx);
-                    sy = @round(sy);
+                // First encounter: rasterize and route by whether it came back as a color bitmap.
+                const bitmap = self.platform().rasterize_glyph(params);
+                const bounds = self.platform().glyph_raster_bounds(params);
+                const colored = if (bitmap) |bm| bm.is_colored else false;
+                if (colored) {
+                    const t = color_atlas.get_or_insert(color_hash, bitmap, bounds.origin) orelse continue;
+                    const s = sprite_geom(t, color_size_px, g.position.x, origin_x, origin_y, scale_factor);
+                    try color_sprites.append(out_allocator, .{ .position = .{ s.sx, s.sy }, .size = .{ s.w, s.h }, .uv_origin = .{ s.u0, s.v0 }, .uv_size = .{ s.uw, s.vh } });
+                } else {
+                    const t = self.atlas.get_or_insert(key_hash, bitmap, bounds.origin) orelse continue;
+                    const s = sprite_geom(t, mono_size_px, g.position.x, origin_x, origin_y, scale_factor);
+                    try sprites.append(out_allocator, .{ .position = .{ s.sx, s.sy }, .size = .{ s.w, s.h }, .uv_origin = .{ s.u0, s.v0 }, .uv_size = .{ s.uw, s.vh }, .sprite_color = .{ rgba.r, rgba.g, rgba.b, rgba.a } });
                 }
-
-                try sprites.append(out_allocator, .{
-                    .position = .{ sx, sy },
-                    .size = .{ sprite_w, sprite_h },
-                    .uv_origin = .{ ox_px / atlas_size_px, oy_px / atlas_size_px },
-                    .uv_size = .{ tw_px / atlas_size_px, th_px / atlas_size_px },
-                    .sprite_color = .{ rgba.r, rgba.g, rgba.b, rgba.a },
-                });
             }
         }
     }
