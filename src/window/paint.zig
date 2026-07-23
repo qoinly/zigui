@@ -731,6 +731,7 @@ pub const PaintContext = struct {
                 .prims = &self.prims,
                 .sprites = &self.sprites,
                 .color_sprites = &self.color_sprites,
+                .color_atlas = &self.color_atlas,
                 .text_system = &self.text_system,
                 .icon_system = &self.icon_system,
                 .app_icon_resolver = &self.app_icon_resolver,
@@ -923,6 +924,8 @@ pub const PaintContext = struct {
                 col,
                 self.scale_factor,
                 &self.sprites,
+                &self.color_atlas,
+                &self.color_sprites,
                 self.allocator,
             ) catch {};
         }

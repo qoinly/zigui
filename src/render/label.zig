@@ -31,6 +31,8 @@ pub fn render(
         style.color,
         b.scale_factor,
         b.sprites,
+        b.color_atlas,
+        b.color_sprites,
         b.allocator,
     );
     return line.width;

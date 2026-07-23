@@ -14,6 +14,7 @@ pub const RenderBuilder = struct {
     prims: *std.ArrayListUnmanaged(primitives.Primitive),
     sprites: *std.ArrayListUnmanaged(primitives.MonochromeSprite),
     color_sprites: *std.ArrayListUnmanaged(primitives.PolychromeSprite),
+    color_atlas: *text_system.ColorAtlas,
     text_system: *text_system.TextSystem,
     icon_system: ?*icon_system.IconSystem = null,
     app_icon_resolver: ?*app_icon.AppIconResolver = null,

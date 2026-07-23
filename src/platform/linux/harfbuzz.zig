@@ -48,6 +48,7 @@ const Fns = struct {
     hb_font_destroy: *const fn (*Font) callconv(.c) void,
     hb_font_set_scale: *const fn (*Font, c_int, c_int) callconv(.c) void,
     hb_font_get_glyph_extents: *const fn (*Font, u32, *GlyphExtents) callconv(.c) c_int,
+    hb_font_get_nominal_glyph: *const fn (*Font, u32, *u32) callconv(.c) c_int,
     hb_buffer_create: *const fn () callconv(.c) ?*Buffer,
     hb_buffer_destroy: *const fn (*Buffer) callconv(.c) void,
     hb_buffer_reset: *const fn (*Buffer) callconv(.c) void,
@@ -153,6 +154,14 @@ pub fn shape(font: *Font, buffer: *Buffer, text: []const u8) ?Shaped {
 pub fn glyph_extents(font: *Font, glyph_id: u32, out: *GlyphExtents) bool {
     std.debug.assert(g_loaded);
     return fns.hb_font_get_glyph_extents(font, glyph_id, out) != 0;
+}
+
+// Whether `font` has a glyph for `codepoint` (font-fallback coverage test: a miss routes the
+// codepoint to the emoji font).
+pub fn has_glyph(font: *Font, codepoint: u32) bool {
+    std.debug.assert(g_loaded);
+    var g: u32 = 0;
+    return fns.hb_font_get_nominal_glyph(font, codepoint, &g) != 0 and g != 0;
 }
 
 // In design units (the font scale set above); false when the font lacks the
