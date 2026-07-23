@@ -273,6 +273,9 @@ pub const TextAreaOptions = struct {
     // Fired on a fresh (non-drag) click with the clicked byte offset into the buffer. Lets a
     // read-only viewer act on the token under the cursor (e.g. a JSON value -> add an assertion).
     on_pick: ?*const fn (ctx: ?*anyopaque, offset: usize) void = null,
+    // Given the byte offset under the pointer, return the [start, end) byte range to highlight (the
+    // clickable token there) or null. Drawn as a subtle hover band, so on_pick targets read as live.
+    hover_span_fn: ?*const fn (ctx: ?*anyopaque, offset: usize) ?[2]u32 = null,
     ctx: ?*anyopaque = null,
     // Window-absolute caret rect [x, y, w, h], written every focused frame (zeroed when unfocused)
     // for anchoring an overlay (a completion popup) at the caret. Like a node's rect_out: the value
@@ -1718,6 +1721,52 @@ fn draw_match_bands(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions
     }
 }
 
+// The buffer byte offset under a pointer at (px, py), or null when it isn't over a text row.
+fn offset_at_point(st: *const TextAreaState, g: Geom, px: f32, py: f32) ?usize {
+    if (st.char_w <= 0 or g.line_h <= 0) return null;
+    const rel_y = py - g.text_y + st.scroll_y;
+    if (rel_y < 0) return null;
+    const row: usize = @intFromFloat(rel_y / g.line_h);
+    if (row >= st.vis_count) return null;
+    const rel_x = px - g.text_x - @as(f32, @floatFromInt(row_indent_cols(st, row))) * st.char_w;
+    const col: usize = if (rel_x <= 0) 0 else @intFromFloat(rel_x / st.char_w + 0.5);
+    return byte_offset_at_vis_col(st, row, col);
+}
+
+// A subtle band over the token the pointer is on (hover_span_fn), so a read-only viewer's click
+// targets read as interactive. Drawn behind the glyphs.
+fn draw_hover_band(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    const span_fn = opts.hover_span_fn orelse return;
+    if (st.dragging) return;
+    const p = opts.paint;
+    const text_w = g.w - (g.text_x - g.x) - opts.pad;
+    if (!p.is_hovered(g.text_x, g.text_y, text_w, g.view_h)) return;
+    const off = offset_at_point(st, g, p.mouse_x, p.mouse_y) orelse return;
+    const span = span_fn(opts.ctx, off) orelse return;
+    const start: usize = span[0];
+    const end: usize = span[1];
+    if (end <= start or start > st.buf.len) return;
+    const fill = tr.mix(opts.theme.background, opts.theme.primary, 0.16);
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    var r = vis_row_of_offset(st, start);
+    const end_row = vis_row_of_offset(st, end - 1);
+    while (r <= end_row and r < st.vis_count) : (r += 1) {
+        const rs = st.vis_starts[r];
+        const re = vis_line_end(st, r);
+        const sa = @max(start, rs);
+        const sb = @min(end, re);
+        if (sb <= sa) continue;
+        const col_a = vis_col_of(st, r, sa);
+        const col_b = vis_col_of(st, r, sb);
+        const bx = g.text_x + @as(f32, @floatFromInt(col_a + row_indent_cols(st, r))) * st.char_w;
+        const bw = @as(f32, @floatFromInt(col_b - col_a)) * st.char_w;
+        const yy = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y;
+        var q = Quad.init(bx, yy, bw, g.line_h);
+        _ = q.set_background(fill).set_corner_radius(3).set_clip_bounds(clip);
+        try b.append_quad(q);
+    }
+}
+
 // A faint band across the caret's visual row (behind the glyphs), only while focused.
 fn draw_current_line(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
     if (!st.focused) return;
@@ -1933,6 +1982,7 @@ pub fn render(
     const last_row = @min(st.vis_count, first_row + rows_in_view);
 
     try draw_current_line(b, st, opts, g, band); // behind the text (quads honour order)
+    try draw_hover_band(b, st, opts, g, band);
     if (opts.code_edits) try draw_bracket_match(b, st, opts, g, band);
     try draw_match_bands(b, st, opts, g, first_row, last_row, band);
     if (opts.line_numbers) try draw_gutter(b, st, opts, g, first_row, last_row);
