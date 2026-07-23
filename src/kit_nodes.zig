@@ -799,6 +799,9 @@ pub const Ta = struct {
     font_family: []const u8 = "SF Mono",
     font_size: f32 = 13,
     on_focus: ?callbacks.FocusFn = null,
+    // Fired on a fresh click with the clicked byte offset (a read-only viewer can act on the token
+    // under the cursor, e.g. a JSON value -> add an assertion). ctx is the same one on_focus gets.
+    on_pick: ?*const fn (ctx: ?*anyopaque, offset: usize) void = null,
     ctx: ?*anyopaque = null,
     caret_out: ?*[4]f32 = null, // window-abs caret rect, for anchoring a completion popup
     completion: ?*textarea_kit.Completion = null, // an open completion popup's nav state
@@ -826,6 +829,7 @@ const TextareaSpec = struct {
             .font_family = self.o.font_family,
             .font_size = self.o.font_size,
             .on_focus = self.o.on_focus,
+            .on_pick = self.o.on_pick,
             .ctx = self.o.ctx,
             .caret_out = self.o.caret_out,
             .completion = self.o.completion,
