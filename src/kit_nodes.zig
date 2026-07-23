@@ -803,6 +803,8 @@ pub const Ta = struct {
     // Fired on a fresh click with the clicked byte offset (a read-only viewer can act on the token
     // under the cursor, e.g. a JSON value -> add an assertion). ctx is the same one on_focus gets.
     on_pick: ?*const fn (ctx: ?*anyopaque, offset: usize) void = null,
+    // Byte offset under the pointer -> the [start,end) range to hover-highlight (a clickable token), or null.
+    hover_span_fn: ?*const fn (ctx: ?*anyopaque, offset: usize) ?[2]u32 = null,
     ctx: ?*anyopaque = null,
     caret_out: ?*[4]f32 = null, // window-abs caret rect, for anchoring a completion popup
     completion: ?*textarea_kit.Completion = null, // an open completion popup's nav state
@@ -832,6 +834,7 @@ const TextareaSpec = struct {
             .font_size = self.o.font_size,
             .on_focus = self.o.on_focus,
             .on_pick = self.o.on_pick,
+            .hover_span_fn = self.o.hover_span_fn,
             .ctx = self.o.ctx,
             .caret_out = self.o.caret_out,
             .completion = self.o.completion,
