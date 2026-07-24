@@ -259,6 +259,7 @@ pub const TextAreaOptions = struct {
     // `active_match` reads brighter. Caller navigates by setting caret/sel_anchor to a match.
     match_ranges: []const [2]u32 = &.{},
     active_match: i32 = -1,
+    error_ranges: []const [2]u32 = &.{}, // byte spans drawn with a red wavy underline (syntax errors)
     bordered: bool = true, // false = fill only, no border/ring (a code pane in a panel)
     // Code-editor smarts: bracket-pair match highlight, auto-close/skip brackets +
     // quotes, pair backspace, Enter auto-indent, Tab/Shift+Tab indent-dedent. Off =
@@ -1767,6 +1768,48 @@ fn draw_hover_band(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions,
     }
 }
 
+// A red wavy underline under each error byte-range (syntax errors), across its visual rows.
+fn draw_error_squiggles(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, first_row: usize, last_row: usize, band: [4]f32) RenderError!void {
+    if (opts.error_ranges.len == 0) return;
+    const red = Rgba.from_u8(244, 71, 71, 255);
+    const clip = tr.clip_intersect(.{ -1e9, -1e9, 2e9, 2e9 }, band);
+    for (opts.error_ranges) |m| {
+        const start: usize = m[0];
+        const end: usize = m[1];
+        if (end <= start or start > st.buf.len) continue;
+        var r = vis_row_of_offset(st, start);
+        const end_row = vis_row_of_offset(st, end - 1);
+        while (r <= end_row) : (r += 1) {
+            if (r < first_row or r >= last_row) continue;
+            const rs = st.vis_starts[r];
+            const re = vis_line_end(st, r);
+            const sa = @max(start, rs);
+            const sb = @min(end, re);
+            if (sb <= sa) continue;
+            const ind = @as(f32, @floatFromInt(row_indent_cols(st, r))) * st.char_w;
+            const x0 = g.text_x + ind + @as(f32, @floatFromInt(vis_col_of(st, r, sa))) * st.char_w;
+            const x1 = g.text_x + ind + @as(f32, @floatFromInt(vis_col_of(st, r, sb))) * st.char_w;
+            const yb = g.text_y + @as(f32, @floatFromInt(r)) * g.line_h - st.scroll_y + g.line_h - 2;
+            try draw_wave(b, x0, x1, yb, red, clip);
+        }
+    }
+}
+
+// A triangle-wave squiggle from x0..x1 at baseline yb, as a row of small overlapping dots.
+fn draw_wave(b: *RenderBuilder, x0: f32, x1: f32, yb: f32, col: Rgba, clip: [4]f32) RenderError!void {
+    const amp: f32 = 1.7;
+    const period: f32 = 4.0;
+    const dot: f32 = 1.5;
+    var x = x0;
+    while (x < x1) : (x += 1.0) {
+        const t = @mod(x - x0, period) / period;
+        const v = 1.0 - @abs(2.0 * t - 1.0); // 0 at the period ends, 1 at its middle
+        var q = Quad.init(x, yb - amp * v, dot, dot);
+        _ = q.set_background(col).set_clip_bounds(clip);
+        try b.append_quad(q);
+    }
+}
+
 // A faint band across the caret's visual row (behind the glyphs), only while focused.
 fn draw_current_line(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
     if (!st.focused) return;
@@ -1987,6 +2030,7 @@ pub fn render(
     try draw_match_bands(b, st, opts, g, first_row, last_row, band);
     if (opts.line_numbers) try draw_gutter(b, st, opts, g, first_row, last_row);
     try draw_rows(b, st, opts, g, first_row, last_row, band);
+    try draw_error_squiggles(b, st, opts, g, first_row, last_row, band);
     try draw_caret(b, st, opts, g, band);
     try add_body_hitbox(st, opts, g);
 
