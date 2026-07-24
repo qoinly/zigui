@@ -260,6 +260,9 @@ pub const TextAreaOptions = struct {
     match_ranges: []const [2]u32 = &.{},
     active_match: i32 = -1,
     error_ranges: []const [2]u32 = &.{}, // byte spans drawn with a red wavy underline (syntax errors)
+    // Parallel to error_ranges: the message shown in a small panel when the pointer hovers a range.
+    // Empty (or shorter than error_ranges) = that range underlines but shows no hover detail.
+    error_messages: []const []const u8 = &.{},
     bordered: bool = true, // false = fill only, no border/ring (a code pane in a panel)
     // Code-editor smarts: bracket-pair match highlight, auto-close/skip brackets +
     // quotes, pair backspace, Enter auto-indent, Tab/Shift+Tab indent-dedent. Off =
@@ -1810,6 +1813,53 @@ fn draw_wave(b: *RenderBuilder, x0: f32, x1: f32, yb: f32, col: Rgba, clip: [4]f
     }
 }
 
+// When the pointer rests on an error range, a small panel near it spells out the message (VS Code
+// style). Drawn last so it overlays the glyphs; flips above the row when there's no room below.
+fn draw_error_tooltip(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
+    if (opts.error_ranges.len == 0 or opts.error_messages.len == 0) return;
+    if (st.dragging) return;
+    const p = opts.paint;
+    const text_w = g.w - (g.text_x - g.x) - opts.pad;
+    if (!p.is_hovered(g.text_x, g.text_y, text_w, g.view_h)) return;
+    const off = offset_at_point(st, g, p.mouse_x, p.mouse_y) orelse return;
+    // Which error range is the pointer inside? Its parallel message is the detail.
+    var msg: []const u8 = "";
+    var hit_row: usize = 0;
+    for (opts.error_ranges, 0..) |m, i| {
+        if (off >= m[0] and off < m[1] and i < opts.error_messages.len and opts.error_messages[i].len > 0) {
+            msg = opts.error_messages[i];
+            hit_row = vis_row_of_offset(st, m[0]);
+            break;
+        }
+    }
+    if (msg.len == 0) return;
+
+    const theme = opts.theme;
+    const sty = label.Style{ .font_size = theme.font_size - 2, .weight = .medium, .color = theme.popover_foreground };
+    const m = label.measure(b, msg, sty);
+    const pad_x: f32 = 9;
+    const accent_w: f32 = 3; // a thin red rail so the panel reads as an error, not a plain popover
+    const w = m.width + pad_x * 2 + accent_w;
+    const hh: f32 = 24;
+
+    const row_top = g.text_y + @as(f32, @floatFromInt(hit_row)) * g.line_h - st.scroll_y;
+    const gap: f32 = 4;
+    var by = row_top + g.line_h + gap; // below the offending line by default
+    if (by + hh > band[1] + band[3]) by = row_top - hh - gap; // no room below -> flip above
+    // Follow the pointer horizontally, clamped inside the text band.
+    const bx = std.math.clamp(p.mouse_x, band[0], @max(band[0], band[0] + band[2] - w));
+
+    const clip: [4]f32 = .{ -1e9, -1e9, 2e9, 2e9 };
+    var panel = Quad.init(bx, by, w, hh);
+    _ = panel.set_background(theme.popover).set_corner_radius(5)
+        .set_border_color(theme.border).set_border_width(1).set_clip_bounds(clip);
+    try b.append_quad(panel);
+    var rail = Quad.init(bx, by, accent_w, hh);
+    _ = rail.set_background(Rgba.from_u8(244, 71, 71, 255)).set_clip_bounds(clip);
+    try b.append_quad(rail);
+    _ = try label.render(b, bx + accent_w + pad_x, label.centered_top(by, hh, m), msg, sty);
+}
+
 // A faint band across the caret's visual row (behind the glyphs), only while focused.
 fn draw_current_line(b: *RenderBuilder, st: *TextAreaState, opts: TextAreaOptions, g: Geom, band: [4]f32) RenderError!void {
     if (!st.focused) return;
@@ -2032,6 +2082,7 @@ pub fn render(
     try draw_rows(b, st, opts, g, first_row, last_row, band);
     try draw_error_squiggles(b, st, opts, g, first_row, last_row, band);
     try draw_caret(b, st, opts, g, band);
+    try draw_error_tooltip(b, st, opts, g, band); // last: overlays the glyphs
     try add_body_hitbox(st, opts, g);
 
     // A held edge-drag autoscrolls, so it needs every vsync. A focused caret only
