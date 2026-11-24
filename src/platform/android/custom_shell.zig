@@ -316,6 +316,21 @@ pub fn text_field_secure() bool {
     return false;
 }
 
+// Text input runs through the IME; the native field forwards no app-level specials and
+// drives no completion-popup interception yet. Stubs so the shared shell facade's
+// os.tag == .linux branches resolve on Android (see custom_shell.zig).
+pub fn text_field_special() ?shell_types.FieldKey {
+    return null;
+}
+pub fn set_field_intercept(on: bool) void {
+    _ = on;
+}
+pub fn text_field_replace(a: usize, b: usize, text: []const u8) void {
+    _ = a;
+    _ = b;
+    _ = text;
+}
+
 pub fn pasteboard_read_into(buf: []u8) []const u8 {
     return clipboard.read(buf);
 }

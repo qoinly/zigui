@@ -32,3 +32,9 @@ pub fn app_version(buf: []u8) []const u8 {
     if (@hasDecl(impl, "app_version")) return impl.app_version(buf);
     p.unsupported("device.app_version");
 }
+// The app's private files directory (Android Context.getFilesDir) copied into buf;
+// empty when unavailable. Where an app keeps its own persistent files.
+pub fn files_dir(buf: []u8) []const u8 {
+    if (@hasDecl(impl, "files_dir")) return impl.files_dir(buf);
+    p.unsupported("device.files_dir");
+}
