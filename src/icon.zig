@@ -187,7 +187,7 @@ const NativeIcons = switch (builtin.os.tag) {
     else => @compileError("zigui: unsupported OS for IconSystem"),
 };
 
-const WarnBits = std.StaticBitSet(@typeInfo(Icon).@"enum".fields.len);
+const WarnBits = std.StaticBitSet(@typeInfo(Icon).@"enum".field_names.len);
 
 pub const IconSystem = struct {
     allocator: Allocator,
@@ -197,7 +197,7 @@ pub const IconSystem = struct {
     default_source: IconSource = .native,
     // one missing-glyph warning per (Icon, source); render is per-frame, so a
     // raw log would flood. Indexed [native, bundled] by @intFromEnum(source).
-    warned: [2]WarnBits = .{ WarnBits.initEmpty(), WarnBits.initEmpty() },
+    warned: [2]WarnBits = .{ WarnBits.empty, WarnBits.empty },
 
     pub fn init(allocator: Allocator, atlas: *MonoAtlas) IconSystem {
         return .{

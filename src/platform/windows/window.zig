@@ -255,7 +255,7 @@ pub fn save_file(opts: types.FilePickerOptions, out_buf: []u8) []const u8 {
 
 fn run_file_dialog(opts: types.FilePickerOptions, out_buf: []u8, save: bool) []const u8 {
     // Result buffer, WTF-16; the save panel also seeds it with the suggested name.
-    var file_w = [_]u16{0} ** 1024;
+    var file_w: [1024]u16 = @splat(0);
     if (save and opts.default_filename.len > 0) {
         const n = std.unicode.utf8ToUtf16Le(file_w[0 .. file_w.len - 1], opts.default_filename) catch 0;
         file_w[n] = 0;

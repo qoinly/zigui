@@ -249,7 +249,7 @@ pub const Frame = struct {
     clip_bounds: [4]f32 = no_clip,
     tex: ?*anyopaque = null,
     tex_cbcr: ?*anyopaque = null,
-    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+    csc: [3][4]f32 = @splat(.{ 0, 0, 0, 0 }),
     opacity: f32 = 1.0,
 };
 

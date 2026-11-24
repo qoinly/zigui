@@ -67,9 +67,9 @@ var g_present = false;
 pub fn load() Error!void {
     if (g_loaded) return;
     const handle = dlopen("libxcb-randr.so.0", RTLD_NOW) orelse return error.LibraryLoadFailed;
-    inline for (@typeInfo(Fns).@"struct".fields) |fn_field| {
-        const sym = dlsym(handle, fn_field.name) orelse return error.LibraryLoadFailed;
-        @field(fns, fn_field.name) = @ptrCast(@alignCast(sym));
+    inline for (@typeInfo(Fns).@"struct".field_names) |fn_field| {
+        const sym = dlsym(handle, fn_field) orelse return error.LibraryLoadFailed;
+        @field(fns, fn_field) = @ptrCast(@alignCast(sym));
     }
     // The id symbol gates on the server actually speaking RandR.
     const id = dlsym(handle, "xcb_randr_id") orelse return error.LibraryLoadFailed;

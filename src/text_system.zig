@@ -221,9 +221,9 @@ pub const TextStyle = struct {
 
     pub fn merge_with(self: TextStyle, inherited: TextStyle) TextStyle {
         var result: TextStyle = .{};
-        inline for (@typeInfo(TextStyle).@"struct".fields) |field| {
-            @field(result, field.name) =
-                @field(self, field.name) orelse @field(inherited, field.name);
+        inline for (@typeInfo(TextStyle).@"struct".field_names) |field| {
+            @field(result, field) =
+                @field(self, field) orelse @field(inherited, field);
         }
         return result;
     }

@@ -114,7 +114,7 @@ pub const ShellWindow = struct {
 
 // Process-wide shell state, the windows custom_shell pattern: C event callbacks
 // have no instance, so windows live in a static slab and dispatch stays global.
-var g_windows: [MAX_WINDOWS]ShellWindow = [_]ShellWindow{.{}} ** MAX_WINDOWS;
+var g_windows: [MAX_WINDOWS]ShellWindow = @splat(.{});
 var g_dispatch: ?MouseDispatch = null;
 var g_raw: ?RawDispatch = null;
 var g_hit_test: ?HitTestFn = null;

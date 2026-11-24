@@ -316,7 +316,7 @@ fn hw_icd_glob() ?[*:0]const u8 {
     var node: u32 = 128;
     while (node < 136) : (node += 1) {
         var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "/sys/class/drm/renderD{d}/device/vendor", .{node}) catch continue;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "/sys/class/drm/renderD{d}/device/vendor", .{node}, 0) catch continue;
         const v = drm_vendor(path.ptr) orelse continue;
         if (found) |f| {
             if (f != v) return null; // more than one vendor present
@@ -353,13 +353,13 @@ pub const Renderer = struct {
     swapchain: vk.SwapchainKHR = vk.NULL_HANDLE,
     format: u32 = vk.FORMAT_B8G8R8A8_UNORM,
     color_space: u32 = vk.COLOR_SPACE_SRGB_NONLINEAR_KHR,
-    images: [MAX_SWAPCHAIN_IMAGES]vk.Image = [_]vk.Image{vk.NULL_HANDLE} ** MAX_SWAPCHAIN_IMAGES,
+    images: [MAX_SWAPCHAIN_IMAGES]vk.Image = @splat(vk.NULL_HANDLE),
     views: [MAX_SWAPCHAIN_IMAGES]vk.ImageView =
-        [_]vk.ImageView{vk.NULL_HANDLE} ** MAX_SWAPCHAIN_IMAGES,
+        @splat(vk.NULL_HANDLE),
     framebuffers: [MAX_SWAPCHAIN_IMAGES]vk.Framebuffer =
-        [_]vk.Framebuffer{vk.NULL_HANDLE} ** MAX_SWAPCHAIN_IMAGES,
+        @splat(vk.NULL_HANDLE),
     render_finished: [MAX_SWAPCHAIN_IMAGES]vk.Semaphore =
-        [_]vk.Semaphore{vk.NULL_HANDLE} ** MAX_SWAPCHAIN_IMAGES,
+        @splat(vk.NULL_HANDLE),
     image_count: u32 = 0,
     extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     // display/layout dims and the ndc divisor; equals extent unless a 90/270 rotation transposes the image.
@@ -414,7 +414,7 @@ pub const Renderer = struct {
     frame_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
     // One set per frame slot: each set is written then bound at most once per
     // recording, so updates never touch a set the command buffer already holds.
-    frame_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
+    frame_dsets: [MAX_FRAMES]vk.DescriptorSet = @splat(vk.NULL_HANDLE),
 
     // Dmabuf zero-copy import: present only when the loader speaks 1.1 and
     // the device carries the external-memory + drm-modifier extensions. The
@@ -429,7 +429,7 @@ pub const Renderer = struct {
     ycbcr_dsl: vk.DescriptorSetLayout = vk.NULL_HANDLE,
     ycbcr_pipeline_layout: vk.PipelineLayout = vk.NULL_HANDLE,
     ycbcr_pipeline: vk.Pipeline = vk.NULL_HANDLE,
-    ycbcr_dsets: [MAX_FRAMES]vk.DescriptorSet = [_]vk.DescriptorSet{vk.NULL_HANDLE} ** MAX_FRAMES,
+    ycbcr_dsets: [MAX_FRAMES]vk.DescriptorSet = @splat(vk.NULL_HANDLE),
     // AHardwareBuffer zero-copy import (the Android dmabuf analogue). Its ycbcr
     // pipeline shares the fields above, but is built LAZILY on the first import:
     // the buffer's pixel format (often an opaque external one) is unknown until a
@@ -1357,7 +1357,7 @@ pub const Renderer = struct {
             &self.frame_dsl,
         );
         if (dsl_rc != vk.SUCCESS) return error.PipelineCreateFailed;
-        const layouts = [_]vk.DescriptorSetLayout{self.frame_dsl} ** MAX_FRAMES;
+        const layouts: [MAX_FRAMES]vk.DescriptorSetLayout = @splat(self.frame_dsl);
         const set_info = vk.DescriptorSetAllocateInfo{
             .descriptor_pool = self.descriptor_pool,
             .descriptor_set_count = MAX_FRAMES,
@@ -1446,7 +1446,7 @@ pub const Renderer = struct {
         };
         if (self.dfns.vkCreateDescriptorSetLayout(device, &dsl_info, null, &self.ycbcr_dsl) !=
             vk.SUCCESS) return error.PipelineCreateFailed;
-        const layouts = [_]vk.DescriptorSetLayout{self.ycbcr_dsl} ** MAX_FRAMES;
+        const layouts: [MAX_FRAMES]vk.DescriptorSetLayout = @splat(self.ycbcr_dsl);
         const set_info = vk.DescriptorSetAllocateInfo{
             .descriptor_pool = self.descriptor_pool,
             .descriptor_set_count = MAX_FRAMES,

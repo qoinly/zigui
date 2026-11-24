@@ -15,7 +15,7 @@ pub const VsyncSlot = struct {
     running: bool = false,
 };
 
-pub var vsync_slots: [MAX_VSYNC_LINKS]VsyncSlot = [_]VsyncSlot{.{}} ** MAX_VSYNC_LINKS;
+pub var vsync_slots: [MAX_VSYNC_LINKS]VsyncSlot = @splat(.{});
 
 pub fn alloc_vsync_slot(callback: VsyncCallback, context: ?*anyopaque) ?u32 {
     std.debug.assert(@intFromPtr(callback) != 0);

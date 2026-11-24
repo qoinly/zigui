@@ -58,7 +58,7 @@ pub const X11Window = struct {
     needs_paint: bool = false,
 };
 
-var g_windows: [MAX_WINDOWS]X11Window = [_]X11Window{.{}} ** MAX_WINDOWS;
+var g_windows: [MAX_WINDOWS]X11Window = @splat(.{});
 var g_dispatch: ?MouseDispatch = null;
 var g_raw: ?RawDispatch = null;
 var g_hit_test: ?HitTestFn = null;
@@ -377,7 +377,7 @@ fn apply_xdnd_aware(window: u32) void {
 // is the ICCCM WM_SIZE_HINTS wire format: 18 CARD32s, min_width/min_height at slots 5/6.
 fn apply_size_hints(window: u32, min_w: u32, min_h: u32) void {
     const P_MIN_SIZE: u32 = 16;
-    var hints = [_]u32{0} ** 18;
+    var hints: [18]u32 = @splat(0);
     hints[0] = P_MIN_SIZE;
     hints[5] = min_w;
     hints[6] = min_h;
@@ -900,7 +900,7 @@ fn start_move_resize(win: *X11Window, ev: *const xcb.InputDeviceEvent, direction
 fn send_net_message(window: u32, message_type: u32, data: [5]u32) void {
     std.debug.assert(window != 0);
     std.debug.assert(message_type != 0);
-    var buf = [_]u32{0} ** 8;
+    var buf: [8]u32 = @splat(0);
     const message: *xcb.ClientMessageEvent = @ptrCast(&buf);
     message.response_type = xcb.CLIENT_MESSAGE;
     message.format = 32;
@@ -979,7 +979,7 @@ fn xdnd_selection_notify(n: *const xcb.SelectionNotifyEvent) void {
 // A 32-byte ClientMessage delivered to one window (the XDND status/finished replies).
 fn send_client_message(dest: u32, message_type: u32, data: [5]u32) void {
     if (dest == 0 or message_type == 0) return;
-    var buf = [_]u32{0} ** 8;
+    var buf: [8]u32 = @splat(0);
     const message: *xcb.ClientMessageEvent = @ptrCast(&buf);
     message.response_type = xcb.CLIENT_MESSAGE;
     message.format = 32;
@@ -1340,7 +1340,7 @@ fn on_selection_request(ev: *const xcb.SelectionRequestEvent) void {
             granted_property = ev.property;
         }
     }
-    var reply = [_]u32{0} ** 8;
+    var reply: [8]u32 = @splat(0);
     const notify: *xcb.SelectionNotifyEvent = @ptrCast(&reply);
     notify.response_type = xcb.SELECTION_NOTIFY;
     notify.time = ev.time;

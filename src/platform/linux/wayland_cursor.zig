@@ -48,9 +48,9 @@ pub fn load() Error!void {
     if (g_loaded) return;
     const handle = dlopen("libwayland-cursor.so.0", RTLD_NOW) orelse
         return error.LibraryLoadFailed;
-    inline for (@typeInfo(Fns).@"struct".fields) |field| {
-        const sym = dlsym(handle, field.name) orelse return error.LibraryLoadFailed;
-        @field(fns, field.name) = @ptrCast(@alignCast(sym));
+    inline for (@typeInfo(Fns).@"struct".field_names) |field| {
+        const sym = dlsym(handle, field) orelse return error.LibraryLoadFailed;
+        @field(fns, field) = @ptrCast(@alignCast(sym));
     }
     g_loaded = true;
     std.debug.assert(g_loaded);

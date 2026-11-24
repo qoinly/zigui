@@ -49,7 +49,7 @@ fn add_cli(b: *std.Build) void {
     cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
 
     const run = b.addRunArtifact(cli_exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const run_step = b.step("cli-run", "Run the zigui CLI: zig build cli-run -- <args>");
     run_step.dependOn(&run.step);
 }
@@ -555,7 +555,7 @@ pub const RunTarget = struct {
 pub fn runStep(b: *std.Build, targets: []const RunTarget) void {
     std.debug.assert(targets.len > 0);
     const run = b.step("run", "Run a target on a device: zig build run -- <target> [device]");
-    const which = if (b.args) |a| (if (a.len > 0) a[0] else targets[0].name) else targets[0].name;
+    const which = b.option([]const u8, "run-target", "which declared target to run") orelse targets[0].name;
     for (targets) |t| {
         if (std.mem.eql(u8, t.name, which)) {
             if (t.step) |s| run.dependOn(s);
@@ -596,7 +596,7 @@ pub const AppOptions = struct {
 // device from the `--` args. The low-level desktopExe/androidApk/iosApp stay for finer control.
 pub fn app(b: *std.Build, opts: AppOptions) void {
     const optimize = b.standardOptimizeOption(.{});
-    const device = if (b.args) |a| (if (a.len > 1) a[1] else "") else "";
+    const device = b.option([]const u8, "device", "device id for `zig build run`") orelse "";
     var targets: [3]RunTarget = undefined;
     var n: u8 = 0;
     if (opts.desktop) |d| {

@@ -125,9 +125,9 @@ var g_loaded: bool = false;
 pub fn load() Error!void {
     if (g_loaded) return;
     const handle = dlopen("libfreetype.so.6", RTLD_NOW) orelse return error.LibraryLoadFailed;
-    inline for (@typeInfo(Fns).@"struct".fields) |field| {
-        const sym = dlsym(handle, field.name) orelse return error.LibraryLoadFailed;
-        @field(fns, field.name) = @ptrCast(@alignCast(sym));
+    inline for (@typeInfo(Fns).@"struct".field_names) |field| {
+        const sym = dlsym(handle, field) orelse return error.LibraryLoadFailed;
+        @field(fns, field) = @ptrCast(@alignCast(sym));
     }
     var library: ?*Library = null;
     if (fns.FT_Init_FreeType(&library) != 0) return error.LibraryLoadFailed;

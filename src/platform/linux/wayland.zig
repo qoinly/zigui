@@ -83,12 +83,12 @@ var g_loaded: bool = false;
 
 fn load() Error!void {
     if (g_loaded) return;
-    std.debug.assert(@typeInfo(Fns).@"struct".fields.len >= 2);
+    std.debug.assert(@typeInfo(Fns).@"struct".field_names.len >= 2);
     const handle = dlopen("libwayland-client.so.0", RTLD_NOW) orelse
         return error.LibraryLoadFailed;
-    inline for (@typeInfo(Fns).@"struct".fields) |field| {
-        const sym = dlsym(handle, field.name) orelse return error.LibraryLoadFailed;
-        @field(fns, field.name) = @ptrCast(@alignCast(sym));
+    inline for (@typeInfo(Fns).@"struct".field_names) |field| {
+        const sym = dlsym(handle, field) orelse return error.LibraryLoadFailed;
+        @field(fns, field) = @ptrCast(@alignCast(sym));
     }
     g_loaded = true;
     std.debug.assert(g_loaded);
@@ -98,7 +98,7 @@ fn load() Error!void {
 
 // Eight null slots cover the widest all-scalar message below; libwayland reads
 // one entry per argument, so a shared oversized row is safe.
-const null_types = [1]?*const wl_interface{null} ** 8;
+const null_types: [8]?*const wl_interface = @splat(null);
 
 pub const wl_callback_interface: wl_interface = .{
     .name = "wl_callback",
@@ -573,7 +573,7 @@ pub const OutputInfo = struct {
     scale: i32 = 1,
 };
 
-pub var outputs: [MAX_OUTPUTS]OutputInfo = [_]OutputInfo{.{}} ** MAX_OUTPUTS;
+pub var outputs: [MAX_OUTPUTS]OutputInfo = @splat(.{});
 
 const OutputListener = extern struct {
     geometry: *const fn (

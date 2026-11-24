@@ -117,11 +117,7 @@ pub fn accent_color() ?color.Rgba {
 fn accent_from_kdeglobals() ?color.Rgba {
     const home = getenv("HOME") orelse return null;
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
-        &path_buf,
-        "{s}/.config/kdeglobals",
-        .{std.mem.sliceTo(home, 0)},
-    ) catch return null;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.config/kdeglobals", .{std.mem.sliceTo(home, 0)}, 0) catch return null;
     var contents: [CHUNK]u8 = undefined;
     const len = read_file_prefix(path, &contents) orelse return null;
     const text = contents[0..len];
@@ -176,11 +172,7 @@ fn theme_from_command(command: [*:0]const u8, buf: *[THEME_NAME_MAX]u8) ?[]const
 fn theme_from_settings_ini(buf: *[THEME_NAME_MAX]u8) ?[]const u8 {
     const home = getenv("HOME") orelse return null;
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
-        &path_buf,
-        "{s}/.config/gtk-3.0/settings.ini",
-        .{std.mem.sliceTo(home, 0)},
-    ) catch return null;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.config/gtk-3.0/settings.ini", .{std.mem.sliceTo(home, 0)}, 0) catch return null;
     var contents: [CHUNK]u8 = undefined;
     const len = read_file_prefix(path, &contents) orelse return null;
     const text = contents[0..len];
@@ -209,18 +201,10 @@ fn accent_from_theme(name: []const u8) ?color.Rgba {
     const home = getenv("HOME");
     var path_buf: [512]u8 = undefined;
     if (home) |h| {
-        const user_path = std.fmt.bufPrintZ(
-            &path_buf,
-            "{s}/.themes/{s}/gtk-3.0/gtk.css",
-            .{ std.mem.sliceTo(h, 0), name },
-        ) catch return null;
+        const user_path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.themes/{s}/gtk-3.0/gtk.css", .{ std.mem.sliceTo(h, 0), name }, 0) catch return null;
         if (scan_css_for_accent(user_path)) |rgba| return rgba;
     }
-    const sys_path = std.fmt.bufPrintZ(
-        &path_buf,
-        "/usr/share/themes/{s}/gtk-3.0/gtk.css",
-        .{name},
-    ) catch return null;
+    const sys_path = std.fmt.bufPrintSentinel(&path_buf, "/usr/share/themes/{s}/gtk-3.0/gtk.css", .{name}, 0) catch return null;
     return scan_css_for_accent(sys_path);
 }
 

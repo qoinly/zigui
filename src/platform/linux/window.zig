@@ -272,11 +272,11 @@ fn run_zenity(opts: types.FilePickerOptions, out_buf: []u8, save: bool) []const 
     }
     if (opts.allow_directories and !opts.allow_files) push(&argv, &argc, "--directory");
     if (opts.title.len > 0) {
-        const s: [:0]const u8 = std.fmt.bufPrintZ(&title_buf, "--title={s}", .{opts.title}) catch "--title=Open";
+        const s: [:0]const u8 = std.fmt.bufPrintSentinel(&title_buf, "--title={s}", .{opts.title}, 0) catch "--title=Open";
         push(&argv, &argc, s.ptr);
     }
     if (opts.default_filename.len > 0) {
-        const s = std.fmt.bufPrintZ(&name_buf, "--filename={s}", .{opts.default_filename}) catch return "";
+        const s = std.fmt.bufPrintSentinel(&name_buf, "--filename={s}", .{opts.default_filename}, 0) catch return "";
         push(&argv, &argc, s.ptr);
     }
     if (opts.allowed_extensions.len > 0)

@@ -147,7 +147,7 @@ const FrameGpu = extern struct {
     clip_bounds: [4]f32,
     opacity: f32,
     _pad: [3]f32 = .{ 0, 0, 0 },
-    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+    csc: [3][4]f32 = @splat(.{ 0, 0, 0, 0 }),
 
     comptime {
         // The shader reads this raw; a size/offset drift silently corrupts the draw.

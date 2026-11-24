@@ -159,18 +159,13 @@ pub fn msg_send_sel(
     args: anytype,
 ) ReturnType {
     const ArgsType = @TypeOf(args);
-    const fields = @typeInfo(ArgsType).@"struct".fields;
+    const field_types = @typeInfo(ArgsType).@"struct".field_types;
 
-    comptime var arg_types: [fields.len]type = undefined;
-    inline for (fields, 0..) |field, i| {
-        arg_types[i] = field.type;
-    }
-
-    const FnPtr = MsgSendFn(ReturnType, &arg_types);
+    const FnPtr = MsgSendFn(ReturnType, field_types);
     const func: FnPtr = @ptrCast(&objc_msgSend);
     const target_ptr: *anyopaque = @ptrCast(@constCast(target));
 
-    return switch (fields.len) {
+    return switch (field_types.len) {
         0 => func(target_ptr, selector),
         1 => func(target_ptr, selector, args[0]),
         2 => func(target_ptr, selector, args[0], args[1]),
@@ -244,17 +239,12 @@ pub fn msg_send_super_sel(
     args: anytype,
 ) ReturnType {
     const ArgsType = @TypeOf(args);
-    const fields = @typeInfo(ArgsType).@"struct".fields;
+    const field_types = @typeInfo(ArgsType).@"struct".field_types;
 
-    comptime var arg_types: [fields.len]type = undefined;
-    inline for (fields, 0..) |field, i| {
-        arg_types[i] = field.type;
-    }
-
-    const FnPtr = MsgSendSuperFn(ReturnType, &arg_types);
+    const FnPtr = MsgSendSuperFn(ReturnType, field_types);
     const func: FnPtr = @ptrCast(&objc_msgSendSuper);
 
-    return switch (fields.len) {
+    return switch (field_types.len) {
         0 => func(super, selector),
         1 => func(super, selector, args[0]),
         2 => func(super, selector, args[0], args[1]),

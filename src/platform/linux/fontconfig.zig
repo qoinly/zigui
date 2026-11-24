@@ -43,9 +43,9 @@ var g_loaded: bool = false;
 pub fn load() Error!void {
     if (g_loaded) return;
     const handle = dlopen("libfontconfig.so.1", RTLD_NOW) orelse return error.LibraryLoadFailed;
-    inline for (@typeInfo(Fns).@"struct".fields) |field| {
-        const sym = dlsym(handle, field.name) orelse return error.LibraryLoadFailed;
-        @field(fns, field.name) = @ptrCast(@alignCast(sym));
+    inline for (@typeInfo(Fns).@"struct".field_names) |field| {
+        const sym = dlsym(handle, field) orelse return error.LibraryLoadFailed;
+        @field(fns, field) = @ptrCast(@alignCast(sym));
     }
     g_config = fns.FcInitLoadConfigAndFonts() orelse return error.LibraryLoadFailed;
     g_loaded = true;

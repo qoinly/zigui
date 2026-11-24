@@ -1363,10 +1363,10 @@ pub fn load() Error!void {
         dlopen("libvulkan.so", RTLD_NOW) orelse return error.LibraryLoadFailed;
     const gipa = dlsym(handle, "vkGetInstanceProcAddr") orelse return error.LibraryLoadFailed;
     get_instance_proc_addr = @ptrCast(@alignCast(gipa));
-    inline for (@typeInfo(GlobalFns).@"struct".fields) |field| {
-        const proc = get_instance_proc_addr(null, field.name) orelse
+    inline for (@typeInfo(GlobalFns).@"struct".field_names) |field| {
+        const proc = get_instance_proc_addr(null, field) orelse
             return error.ProcLoadFailed;
-        @field(global, field.name) = @ptrCast(proc);
+        @field(global, field) = @ptrCast(proc);
     }
     g_loaded = true;
     std.debug.assert(g_loaded);
@@ -1387,11 +1387,11 @@ pub fn instance_api_version() u32 {
 
 pub fn load_instance_fns(instance: *Instance, fns: *InstanceFns) Error!void {
     std.debug.assert(g_loaded);
-    std.debug.assert(@typeInfo(InstanceFns).@"struct".fields.len >= 2);
-    inline for (@typeInfo(InstanceFns).@"struct".fields) |field| {
-        const proc = get_instance_proc_addr(instance, field.name) orelse
+    std.debug.assert(@typeInfo(InstanceFns).@"struct".field_names.len >= 2);
+    inline for (@typeInfo(InstanceFns).@"struct".field_names) |field| {
+        const proc = get_instance_proc_addr(instance, field) orelse
             return error.ProcLoadFailed;
-        @field(fns, field.name) = @ptrCast(proc);
+        @field(fns, field) = @ptrCast(proc);
     }
 }
 
@@ -1401,10 +1401,10 @@ pub fn load_device_fns(
     fns: *DeviceFns,
 ) Error!void {
     std.debug.assert(g_loaded);
-    std.debug.assert(@typeInfo(DeviceFns).@"struct".fields.len >= 2);
-    inline for (@typeInfo(DeviceFns).@"struct".fields) |field| {
-        const proc = get_device_proc_addr(device, field.name) orelse
+    std.debug.assert(@typeInfo(DeviceFns).@"struct".field_names.len >= 2);
+    inline for (@typeInfo(DeviceFns).@"struct".field_names) |field| {
+        const proc = get_device_proc_addr(device, field) orelse
             return error.ProcLoadFailed;
-        @field(fns, field.name) = @ptrCast(proc);
+        @field(fns, field) = @ptrCast(proc);
     }
 }

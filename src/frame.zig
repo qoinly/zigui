@@ -78,7 +78,7 @@ pub fn csc_rows(meta: FrameMeta) [3][4]f32 {
 pub const Current = struct {
     tex: *anyopaque,
     tex_cbcr: ?*anyopaque = null,
-    csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+    csc: [3][4]f32 = @splat(.{ 0, 0, 0, 0 }),
     width: f32,
     height: f32,
 };
@@ -148,16 +148,16 @@ pub const FrameSource = struct {
     // Newest-wins handoff of decoder CVPixelBuffers. We hold one ref per slot until
     // the slot is overwritten; the mailbox guarantees producer and consumer never
     // touch the same slot, so a held buffer is stable while the consumer reads it.
-    bufs: [SlotMailbox.slot_count]?*anyopaque = .{null} ** SlotMailbox.slot_count,
-    csc: [SlotMailbox.slot_count][3][4]f32 = .{.{.{ 0, 0, 0, 0 }} ** 3} ** SlotMailbox.slot_count,
+    bufs: [SlotMailbox.slot_count]?*anyopaque = @splat(null),
+    csc: [SlotMailbox.slot_count][3][4]f32 = @splat(@splat(.{ 0, 0, 0, 0 })),
     mailbox: SlotMailbox = .{},
 
     // Render-thread only: imported texture refs in flight + the frame in use now.
-    ring: [ring_count]CvSlot = .{CvSlot{}} ** ring_count,
+    ring: [ring_count]CvSlot = @splat(CvSlot{}),
     ring_at: u8 = 0,
     cur_tex: ?*anyopaque = null,
     cur_chroma: ?*anyopaque = null,
-    cur_csc: [3][4]f32 = .{.{ 0, 0, 0, 0 }} ** 3,
+    cur_csc: [3][4]f32 = @splat(.{ 0, 0, 0, 0 }),
     cur_w: u32 = 0,
     cur_h: u32 = 0,
 
