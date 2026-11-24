@@ -124,13 +124,35 @@ fn run_root_main() void {
 const Activity = native.ANativeActivity;
 const Window = native.ANativeWindow;
 
+// AConfiguration (NDK) reads the device configuration, including the display density,
+// without a JNI round-trip.
+const AConfiguration = opaque {};
+extern fn AConfiguration_new() ?*AConfiguration;
+extern fn AConfiguration_delete(config: *AConfiguration) void;
+extern fn AConfiguration_fromAssetManager(config: *AConfiguration, am: *anyopaque) void;
+extern fn AConfiguration_getDensity(config: *AConfiguration) i32;
+
+// The display's integer density scale (points -> pixels): round(densityDpi / 160),
+// clamped to 1..4. Without it the surface renders at 1x (points == pixels), which looks
+// right only on a 160dpi screen and renders tiny on a real high-density phone.
+fn density_scale() i32 {
+    const act = g_activity orelse return 1;
+    const am = act.asset_manager orelse return 1;
+    const cfg = AConfiguration_new() orelse return 1;
+    defer AConfiguration_delete(cfg);
+    AConfiguration_fromAssetManager(cfg, am);
+    const dpi = AConfiguration_getDensity(cfg);
+    if (dpi <= 0 or dpi >= 0xfffe) return 1; // ACONFIGURATION_DENSITY none / any / unset
+    return std.math.clamp(@divTrunc(dpi + 80, 160), 1, 4); // +80 rounds to the nearest bucket
+}
+
 fn on_window_created(activity: *Activity, window: *Window) callconv(.c) void {
     _ = activity;
     std.debug.assert(@intFromPtr(window) != 0); // the framework owns this surface ptr
     // A resume can re-create the surface without a destroy in between; tear an
     // old renderer down first so it never leaks or samples a stale window.
     notify_lost();
-    g_window = .{ .in_use = true, .native = window };
+    g_window = .{ .in_use = true, .native = window, .scale = density_scale() };
     g_window.sync_extent();
     android_shell.set_window(&g_window);
     refresh_insets(); // best-effort; onContentRectChanged refreshes once laid out
