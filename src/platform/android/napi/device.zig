@@ -95,6 +95,26 @@ fn caps_has(env: JNIEnv, caps: jni.jobject, method: [*:0]const u8, code: jni.jin
     return t.CallBooleanMethodA(env, caps, m, &a) != 0;
 }
 
+// Context.getFilesDir().getAbsolutePath() copied into buf - the app's private internal
+// storage directory (persistent, app-owned, no permission needed). Empty on failure.
+// This is where an app keeps its own files; the framework creates it before onCreate.
+pub fn files_dir(buf: []u8) []const u8 {
+    const c = util.ctx() orelse return "";
+    const env = c.env;
+    const t = env.*;
+    const act_cls = t.GetObjectClass(env, c.activity) orelse return "";
+    defer t.DeleteLocalRef(env, act_cls);
+    const get_files = t.GetMethodID(env, act_cls, "getFilesDir", "()Ljava/io/File;") orelse return "";
+    const file = t.CallObjectMethodA(env, c.activity, get_files, null) orelse return "";
+    defer t.DeleteLocalRef(env, file);
+    const file_cls = t.GetObjectClass(env, file) orelse return "";
+    defer t.DeleteLocalRef(env, file_cls);
+    const get_path = t.GetMethodID(env, file_cls, "getAbsolutePath", "()Ljava/lang/String;") orelse return "";
+    const path = t.CallObjectMethodA(env, file, get_path, null) orelse return "";
+    defer t.DeleteLocalRef(env, path);
+    return util.read_jstr(env, path, buf);
+}
+
 // PackageManager.getPackageInfo(packageName, 0).versionName copied into buf - the app's
 // own manifest versionName; empty when it is null (a build without one). Reading the
 // own package never throws NameNotFoundException, so no exception check is needed.
