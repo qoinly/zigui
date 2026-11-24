@@ -269,6 +269,12 @@ pub const AndroidApkOptions = struct {
     // Compile the biometric bridge (native callback). The authenticate call lives on
     // the activity; this gates only the native result-callback code.
     include_biometric: bool = false,
+    // Extra module imports for the app's root source, built once per device ABI. The
+    // hook runs with the resolved per-ABI target and the zigui module (so a consumer
+    // resolves its own dependencies for that exact target), and returns the imports to
+    // add alongside "zigui". Lets an app import more than zigui without the packaging
+    // being tied to any one dependency.
+    extra: ?*const fn (b: *std.Build, target: std.Build.ResolvedTarget, zigui: *std.Build.Module) []const std.Build.Module.Import = null,
 };
 
 pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) ?*std.Build.Step {
@@ -447,6 +453,11 @@ fn android_lib(
         .android_biometric = opts.include_biometric,
     });
     const zigui = zigui_dep.module("zigui");
+    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
+    imports.append(b.allocator, .{ .name = "zigui", .module = zigui }) catch @panic("OOM");
+    if (opts.extra) |extra| {
+        for (extra(b, target, zigui)) |imp| imports.append(b.allocator, imp) catch @panic("OOM");
+    }
     const lib = b.addLibrary(.{
         .name = opts.name,
         .linkage = .dynamic,
@@ -454,7 +465,7 @@ fn android_lib(
             .root_source_file = opts.source,
             .target = target,
             .optimize = opts.optimize,
-            .imports = &.{.{ .name = "zigui", .module = zigui }},
+            .imports = imports.items,
         }),
     });
     lib.setLibCFile(libc);
