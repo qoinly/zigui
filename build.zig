@@ -42,7 +42,7 @@ fn add_cli(b: *std.Build) void {
     const cli_root = b.createModule(.{
         .root_source_file = b.path("tools/cli/main.zig"),
         .target = b.graph.host, // a host tool: it runs on the developer's machine
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     const cli_exe = b.addExecutable(.{ .name = "zigui", .root_module = cli_root });
     const cli_step = b.step("cli", "Build the zigui CLI -> zig-out/bin/zigui");
@@ -370,7 +370,8 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) ?*std.Build.Step {
     // the loader can mmap them (extractNativeLibs defaults false on modern targets).
     const pack_script =
         "set -e; cp \"$1\" \"$2\"; zip -X -q -j \"$2\" \"$4\"; " ++
-        "cd \"$3\"; zip -0 -X -q \"$2\" $(find lib -type f)";
+        "OUT=\"$(cd \"$(dirname \"$2\")\" && pwd)/$(basename \"$2\")\"; " ++
+        "cd \"$3\"; zip -0 -X -q \"$OUT\" $(find lib -type f)";
     const pack = b.addSystemCommand(&.{ "sh", "-c", pack_script, "package_apk" });
     pack.addFileArg(base_apk); // $1
     const unsigned_apk = pack.addOutputFileArg("unsigned.apk"); // $2
@@ -431,9 +432,10 @@ fn android_lib(
         \\crt_dir={s}
         \\msvc_lib_dir=
         \\kernel32_lib_dir=
-        \\gcc_dir=
+        \\gcc_dir={s}
+        \\darwin_sdk_dir=
         \\
-    , .{ sysroot, sysroot, lib_dir }));
+    , .{ sysroot, sysroot, lib_dir, lib_dir }));
 
     const target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .android });
     const zigui_dep = b.dependency("zigui", .{
@@ -623,7 +625,7 @@ pub fn app(b: *std.Build, opts: AppOptions) void {
     }
     if (opts.ios) |i| {
         // A Debug iOS build pulls a simulator-absent symbol; force at least ReleaseSmall.
-        const ios_optimize = if (optimize == .Debug) .ReleaseSmall else optimize;
+        const ios_optimize = if (optimize == .debug) .small else optimize;
         const run = iosApp(b, .{
             .name = i.name,
             .source = opts.source,
@@ -671,7 +673,7 @@ fn add_icongen(b: *std.Build) void {
     const icongen_root = b.createModule(.{
         .root_source_file = b.path("tools/icongen.zig"),
         .target = b.graph.host, // a host tool: it runs at build time, never ships
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const icongen_exe = b.addExecutable(.{ .name = "icongen", .root_module = icongen_root });
     const icongen_step = b.step(
