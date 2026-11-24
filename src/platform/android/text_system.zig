@@ -28,6 +28,7 @@ const Refs = struct {
     fm: jni.jobject, // a reused Paint.FontMetrics
     alpha8: jni.jobject, // Bitmap.Config.ALPHA_8
     set_size: jni.jmethodID,
+    set_typeface: jni.jmethodID,
     measure: jni.jmethodID,
     get_bounds: jni.jmethodID,
     get_fm: jni.jmethodID,
@@ -42,6 +43,70 @@ const Refs = struct {
     fm_descent: jni.jfieldID,
     fm_leading: jni.jfieldID,
 };
+
+// Bundled app fonts loaded as Android Typefaces, keyed by their file stem (e.g.
+// "Inter-SemiBold"). Process-global, like the other backends' register_app_font; the
+// text system selects one per family+weight in font_id_impl and binds it to the shared
+// Paint before measuring/drawing. Without this, every glyph renders in the one system
+// font (the app's Inter/Geist never take effect).
+const MAX_APP_FONTS = 8;
+const AppFont = struct { key: [48]u8 = undefined, key_len: usize = 0, typeface: jni.jobject };
+var g_fonts: [MAX_APP_FONTS]AppFont = undefined;
+var g_font_count: usize = 0;
+
+pub fn register_app_font(path: []const u8) bool {
+    if (g_font_count >= MAX_APP_FONTS) return false;
+    const e = jni.thread_env() orelse return false;
+    const t = e.*;
+    var stem = path; // strip the directory and the ".ttf" extension to get the key
+    if (std.mem.lastIndexOfScalar(u8, stem, '/')) |s| stem = stem[s + 1 ..];
+    if (std.mem.lastIndexOfScalar(u8, stem, '.')) |d| stem = stem[0..d];
+    if (stem.len == 0 or stem.len > 48) return false;
+
+    var pathz: [512]u8 = undefined;
+    if (path.len >= pathz.len) return false;
+    @memcpy(pathz[0..path.len], path);
+    pathz[path.len] = 0;
+    const jpath = t.NewStringUTF(e, @ptrCast(&pathz)) orelse return false;
+    defer t.DeleteLocalRef(e, jpath);
+
+    const tf_cls = t.FindClass(e, "android/graphics/Typeface") orelse return false;
+    defer t.DeleteLocalRef(e, tf_cls);
+    const create = t.GetStaticMethodID(e, tf_cls, "createFromFile", "(Ljava/lang/String;)Landroid/graphics/Typeface;") orelse return false;
+    var a = [_]jni.jvalue{.{ .l = jpath }};
+    const tf_local = t.CallStaticObjectMethodA(e, tf_cls, create, &a) orelse return false;
+    defer t.DeleteLocalRef(e, tf_local);
+    const tf_global = t.NewGlobalRef(e, tf_local) orelse return false;
+
+    const f = &g_fonts[g_font_count];
+    @memcpy(f.key[0..stem.len], stem);
+    f.key_len = stem.len;
+    f.typeface = tf_global;
+    g_font_count += 1;
+    return true;
+}
+
+// Map a family + weight to a registered Typeface index+1 (0 = the system default). The
+// key is the family with spaces removed plus a weight suffix, matching the file stems:
+// ("Inter", normal) -> "Inter-Regular", ("Geist Mono", semi_bold) -> "GeistMono-SemiBold".
+fn find_app_font(family: []const u8, semi_bold: bool) ts.FontId {
+    var kb: [64]u8 = undefined;
+    var kl: usize = 0;
+    for (family) |c| {
+        if (c == ' ') continue;
+        if (kl >= kb.len) return 0;
+        kb[kl] = c;
+        kl += 1;
+    }
+    const suffix = if (semi_bold) "-SemiBold" else "-Regular";
+    if (kl + suffix.len > kb.len) return 0;
+    @memcpy(kb[kl .. kl + suffix.len], suffix);
+    kl += suffix.len;
+    for (g_fonts[0..g_font_count], 0..) |rf, i| {
+        if (std.mem.eql(u8, rf.key[0..rf.key_len], kb[0..kl])) return @intCast(i + 1);
+    }
+    return 0;
+}
 
 pub const AndroidTextSystem = struct {
     allocator: Allocator,
@@ -102,6 +167,7 @@ pub const AndroidTextSystem = struct {
             .fm = t.NewGlobalRef(e, fm_local) orelse return error.Jni,
             .alpha8 = t.NewGlobalRef(e, a8_local) orelse return error.Jni,
             .set_size = t.GetMethodID(e, paint_cls, "setTextSize", "(F)V") orelse return error.Jni,
+            .set_typeface = t.GetMethodID(e, paint_cls, "setTypeface", "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;") orelse return error.Jni,
             .measure = t.GetMethodID(e, paint_cls, "measureText", "(Ljava/lang/String;)F") orelse
                 return error.Jni,
             .get_bounds = t.GetMethodID(
@@ -173,12 +239,21 @@ pub const AndroidTextSystem = struct {
         .glyph_raster_bounds = glyph_raster_bounds_impl,
     };
 
-    // One system font; family/weight (Typeface) is not selected here.
+    // Select a registered app Typeface by family + weight, or 0 (the system font).
     fn font_id_impl(ptr: *anyopaque, family: []const u8, weight: ts.FontWeight) ts.FontId {
         _ = ptr;
-        _ = family;
-        _ = weight;
-        return 0;
+        return find_app_font(family, @intFromEnum(weight) >= @intFromEnum(ts.FontWeight.semi_bold));
+    }
+
+    // Bind the Paint to the font_id's Typeface (or the system default for 0) so the
+    // measure/metrics/draw that follow render in the selected family.
+    fn set_font(self: *Self, font_id: ts.FontId) void {
+        const tf: jni.jobject = if (font_id > 0 and @as(usize, @intCast(font_id)) - 1 < g_font_count)
+            g_fonts[@as(usize, @intCast(font_id)) - 1].typeface
+        else
+            null;
+        var a = [_]jni.jvalue{.{ .l = tf }};
+        _ = self.env.*.CallObjectMethodA(self.env, self.refs.paint, self.refs.set_typeface, &a);
     }
 
     fn set_text_size(self: *Self, px: f32) void {
@@ -218,9 +293,9 @@ pub const AndroidTextSystem = struct {
 
     fn font_metrics_impl(ptr: *anyopaque, font_id: ts.FontId, font_size: f32) ts.FontMetrics {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = font_id;
         std.debug.assert(font_size > 0);
         if (!self.loaded) return std.mem.zeroes(ts.FontMetrics);
+        self.set_font(font_id);
         const m = self.read_metrics(font_size);
         return .{
             .units_per_em = 1000, // metrics are already in points; not divided downstream
@@ -258,6 +333,7 @@ pub const AndroidTextSystem = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         std.debug.assert(font_size > 0);
         if (!self.loaded) return empty_layout();
+        self.set_font(font_id);
         const m = self.read_metrics(font_size); // also sets the text size for measure/bounds
         const e = self.env;
         const t = e.*;
@@ -326,6 +402,7 @@ pub const AndroidTextSystem = struct {
         const e = self.env;
         const t = e.*;
         const px = params.font_size * params.scale_factor;
+        self.set_font(params.font_id);
         self.set_text_size(px);
 
         const str = self.jstring(@intCast(params.glyph_id)) orelse return null;
