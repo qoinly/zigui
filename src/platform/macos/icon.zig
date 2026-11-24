@@ -72,6 +72,7 @@ pub const MacIconSystem = struct {
             .align_center => "text.aligncenter",
             .align_right => "text.alignright",
             .share => "square.and.arrow.up",
+            .send => "paperplane.fill",
             .save => "square.and.arrow.down",
             .copy => "square.on.square",
             .grid => "square.grid.2x2",

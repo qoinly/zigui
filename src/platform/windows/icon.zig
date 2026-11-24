@@ -107,6 +107,7 @@ pub const WinIconSystem = struct {
             .align_center => "\u{E8E3}", // AlignCenter
             .align_right => "\u{E8E2}", // AlignRight
             .share => "\u{E72D}", // Share
+            .send => "", // bundled Lucide (paper plane)
             .save => "\u{E74E}", // Save
             .copy => "\u{E8C8}", // Copy
             .grid => "\u{F0E2}", // GridView

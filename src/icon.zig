@@ -70,6 +70,7 @@ pub const Icon = enum {
     align_center,
     align_right,
     share,
+    send,
     save,
     copy,
     grid,

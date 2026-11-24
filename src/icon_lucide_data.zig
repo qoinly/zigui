@@ -903,6 +903,19 @@ const settings = [_]Cmd{
     .{ .cubic = .{ 12.571796, 8.866025, 11.428203, 8.866025, 10.499999, 9.401924 } },
     .{ .cubic = .{ 9.571795, 9.937823, 9, 10.928204, 9, 12.000001 } },
 };
+// Hand-added from Lucide "send" (paper plane): M22 2 L11 13 (the fold) + the body
+// M22 2 l-7 20 -4 -9 -9 -4 20 -7 z. All straight lines, so no curve conversion.
+const send = [_]Cmd{
+    .{ .move = .{ 22, 2 } },
+    .{ .line = .{ 11, 13 } },
+    .{ .move = .{ 22, 2 } },
+    .{ .line = .{ 15, 22 } },
+    .{ .line = .{ 11, 13 } },
+    .{ .line = .{ 2, 9 } },
+    .{ .line = .{ 22, 2 } },
+    .close,
+};
+
 const share = [_]Cmd{
     .{ .move = .{ 12, 2 } },
     .{ .line = .{ 12, 15 } },
@@ -1233,6 +1246,7 @@ pub fn for_icon(ic: Icon) ?[]const Cmd {
         .align_center => &@"text-align-center",
         .align_right => &@"text-align-end",
         .share => &share,
+        .send => &send,
         .save => &save,
         .copy => &copy,
         .grid => &@"grid-3x3",
