@@ -116,13 +116,15 @@ pub const App = struct {
         std.debug.assert(self.win == null);
         std.debug.assert(window.in_use);
         const cb = self.paint_cb orelse return; // run() always sets it before any surface event
-        const theme = types.Theme.default_dark();
+        // Honor the theme + feel the app passed to App.init; fall back to the built-in
+        // dark theme only when none was given (previously this always ignored opts.theme).
+        const theme = self.opts.theme orelse types.Theme.default_dark();
         const handle = custom_shell.open(.{
             .title = self.opts.title,
             .width = @floatCast(self.opts.size[0]),
             .height = @floatCast(self.opts.size[1]),
             .chrome = .custom,
-            .feel = .liquid_glass,
+            .feel = self.opts.feel,
             .theme = theme,
         }) catch return;
         self.win = .{
