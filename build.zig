@@ -269,6 +269,8 @@ pub const AndroidApkOptions = struct {
     // Compile the biometric bridge (native callback). The authenticate call lives on
     // the activity; this gates only the native result-callback code.
     include_biometric: bool = false,
+    // Dex zigui's hardware-backed secret store (AndroidKeyStore), read via napi.secure.
+    include_secure_store: bool = false,
     // Extra module imports for the app's root source, built once per device ABI. The
     // hook runs with the resolved per-ABI target and the zigui module (so a consumer
     // resolves its own dependencies for that exact target), and returns the imports to
@@ -342,6 +344,12 @@ pub fn androidApk(b: *std.Build, opts: AndroidApkOptions) ?*std.Build.Step {
         _ = java_tree.addCopyFile(
             zigui_files.path(b.fmt("{s}/ZiguiBroadcastReceiver.java", .{java_dir})),
             "io/qoinly/zigui/ZiguiBroadcastReceiver.java",
+        );
+    }
+    if (opts.include_secure_store) {
+        _ = java_tree.addCopyFile(
+            zigui_files.path(b.fmt("{s}/ZiguiSecureStore.java", .{java_dir})),
+            "io/qoinly/zigui/ZiguiSecureStore.java",
         );
     }
 
@@ -590,6 +598,7 @@ pub const AndroidTarget = struct {
     include_notification_listener: bool = false,
     include_broadcast_receiver: bool = false,
     include_biometric: bool = false,
+    include_secure_store: bool = false,
 };
 pub const IOSTarget = struct {
     name: []const u8,
@@ -630,6 +639,7 @@ pub fn app(b: *std.Build, opts: AppOptions) void {
             .include_notification_listener = a.include_notification_listener,
             .include_broadcast_receiver = a.include_broadcast_receiver,
             .include_biometric = a.include_biometric,
+            .include_secure_store = a.include_secure_store,
         });
         targets[n] = .{ .name = "android", .step = run };
         n += 1;

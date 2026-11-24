@@ -64,6 +64,8 @@ const NewObjectArrayFn = *const fn (JNIEnv, jint, jclass, jobject) callconv(.c) 
 const SetObjectArrayElementFn = *const fn (JNIEnv, jobject, jint, jobject) callconv(.c) void;
 const GetArrayLengthFn = *const fn (JNIEnv, jobject) callconv(.c) jint;
 const GetObjectArrayElementFn = *const fn (JNIEnv, jobject, jint) callconv(.c) jobject;
+// Copies a span of a byte[] into a native buffer (start, len, dst).
+const GetByteArrayRegionFn = *const fn (JNIEnv, jobject, jint, jint, [*]u8) callconv(.c) void;
 
 // Slot offsets are from jni.h's JNINativeInterface_; the padding-run lengths are
 // the gaps (in pointer-sized slots) between the entries we use.
@@ -123,6 +125,8 @@ pub const JNINativeInterface = extern struct {
     NewObjectArray: NewObjectArrayFn, // 172
     GetObjectArrayElement: GetObjectArrayElementFn, // 173
     SetObjectArrayElement: SetObjectArrayElementFn, // 174
+    _r17: [25]?*const anyopaque, // 175..199
+    GetByteArrayRegion: GetByteArrayRegionFn, // 200
 };
 
 // The activity's JNIEnv + object, stored by app.zig on the main thread (where the

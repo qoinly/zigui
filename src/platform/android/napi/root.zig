@@ -12,3 +12,4 @@ pub const accessibility = @import("accessibility.zig");
 pub const notification_listener = @import("notification_listener.zig");
 pub const broadcast = @import("broadcast.zig");
 pub const sms = @import("sms.zig");
+pub const secure = @import("secure.zig");
