@@ -189,7 +189,10 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 .arena = w.arena.allocator(),
                 .time = pc.now_s,
                 .hovered_id = pc.hovered_id,
-                .fold = fold_mod.posture(),
+                .fold = blk: {
+                    fold_mod.poll();
+                    break :blk fold_mod.posture();
+                },
             };
             // non-null whenever State != void (the loop is started from a real pointer)
             const st: State = if (State == void) {} else @ptrCast(@alignCast(w.user_state.?));

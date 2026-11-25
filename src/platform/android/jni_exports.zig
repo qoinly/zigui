@@ -54,16 +54,16 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFile(
     picker.on_native_file(env, name, path);
 }
 
-// The hinge-angle sensor forwards each reading (degrees, 0 closed .. 180 flat) here, so
-// a view can adapt to the fold posture.
+// The window-layout extension forwards the fold state (FoldingFeature.STATE_*; 0 = none)
+// here, so a view can adapt to the fold posture.
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFold(
     env: *anyopaque,
     this: *anyopaque,
-    angle: f32,
+    state: i32,
 ) callconv(.c) void {
     _ = env;
     _ = this;
-    @import("../../fold.zig").on_angle(angle);
+    @import("../../fold.zig").on_state(state);
 }
 
 // A dismissed picker or a failed import: clear the in-flight flag.

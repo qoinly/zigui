@@ -9,10 +9,9 @@ import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
+import java.lang.reflect.Method;
+import java.util.List;
+import java.util.function.Consumer;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
@@ -43,15 +42,16 @@ import java.util.ArrayList;
 // names), so any app can declare it in its manifest and write zero Java.
 public class ZiguiActivity extends NativeActivity {
     private EditText edit;
-    private SensorManager sensorMgr;
-    private Sensor hingeSensor;
-    private SensorEventListener hingeListener;
+    private Object layoutComponent; // androidx.window.extensions.layout.WindowLayoutComponent
+    private Consumer<Object> layoutConsumer;
+    private Method addLayoutListener;
+    private Method removeLayoutListener;
 
     @Override
     protected void onCreate(Bundle state) {
         loadAppLibrary();
         super.onCreate(state);
-        setupHingeSensor();
+        setupFoldListener();
         edit = new EditText(this);
         edit.setFocusable(true);
         edit.setFocusableInTouchMode(true);
@@ -393,48 +393,67 @@ public class ZiguiActivity extends NativeActivity {
         requestPermissions(new String[] { name }, 0);
     }
 
-    // The hinge-angle sensor (API 30+) reports the fold angle on foldables; forward each
-    // reading to native so a view can adapt to the fold posture. Absent on non-foldables,
-    // where native stays flat. Registered only while the activity is resumed.
-    private void setupHingeSensor() {
-        if (Build.VERSION.SDK_INT < 30) {
-            return;
-        }
-        sensorMgr = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-        if (sensorMgr == null) {
-            return;
-        }
-        hingeSensor = sensorMgr.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE);
-        if (hingeSensor == null) {
-            return;
-        }
-        hingeListener = new SensorEventListener() {
-            public void onSensorChanged(SensorEvent e) {
-                if (e.values != null && e.values.length > 0) {
-                    nativeOnFold(e.values[0]);
-                }
+    // Fold posture from the OEM window-layout extension (androidx.window.extensions), the
+    // same source androidx.window reads - present on foldables and the foldable emulator,
+    // reached by reflection so no library is bundled. Each WindowLayoutInfo carries the
+    // FoldingFeature with its state; forward the state to native. Absent on non-foldables,
+    // where native stays flat. The listener is bound only while the activity is resumed.
+    private void setupFoldListener() {
+        try {
+            Class<?> provider = Class.forName("androidx.window.extensions.WindowExtensionsProvider");
+            Object ext = provider.getMethod("getWindowExtensions").invoke(null);
+            layoutComponent = ext.getClass().getMethod("getWindowLayoutComponent").invoke(ext);
+            if (layoutComponent == null) {
+                return;
             }
-            public void onAccuracyChanged(Sensor s, int accuracy) {}
-        };
+            addLayoutListener = layoutComponent.getClass().getMethod(
+                "addWindowLayoutInfoListener", android.app.Activity.class, Consumer.class);
+            removeLayoutListener = layoutComponent.getClass().getMethod(
+                "removeWindowLayoutInfoListener", Consumer.class);
+            final Class<?> folding = Class.forName("androidx.window.extensions.layout.FoldingFeature");
+            layoutConsumer = new Consumer<Object>() {
+                public void accept(Object info) {
+                    int state = 0; // no folding feature = flat
+                    try {
+                        List<?> feats = (List<?>) info.getClass()
+                            .getMethod("getDisplayFeatures").invoke(info);
+                        for (Object f : feats) {
+                            if (folding.isInstance(f)) {
+                                state = (Integer) folding.getMethod("getState").invoke(f);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        // leave state at flat
+                    }
+                    nativeOnFold(state);
+                }
+            };
+        } catch (Throwable t) {
+            layoutComponent = null; // extension unavailable: not a foldable
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (sensorMgr != null && hingeSensor != null && hingeListener != null) {
-            sensorMgr.registerListener(hingeListener, hingeSensor, SensorManager.SENSOR_DELAY_NORMAL);
+        if (layoutComponent != null && addLayoutListener != null && layoutConsumer != null) {
+            try {
+                addLayoutListener.invoke(layoutComponent, this, layoutConsumer);
+            } catch (Throwable t) {}
         }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        if (sensorMgr != null && hingeListener != null) {
-            sensorMgr.unregisterListener(hingeListener);
+        if (layoutComponent != null && removeLayoutListener != null && layoutConsumer != null) {
+            try {
+                removeLayoutListener.invoke(layoutComponent, layoutConsumer);
+            } catch (Throwable t) {}
         }
     }
 
-    private native void nativeOnFold(float angle);
+    private native void nativeOnFold(int state);
 
     private native void nativeOnText(String text, int caret);
 
