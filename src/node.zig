@@ -100,6 +100,8 @@ pub const Node = struct {
     // no movement happened (distinguish via a small threshold), the way the tabbar does.
     on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
     on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
+    // Touch long-press (held still ~0.45s), with click_ctx; the release then skips on_click.
+    on_long_press: ?callbacks.ClickFn = null,
     // A stable id recorded as "hovered" while the pointer is over this box; the
     // frame exposes the topmost one so a view can reveal-on-hover without a callback.
     hover_id: []const u8 = "",
@@ -179,6 +181,7 @@ pub const Cfg = struct {
     click_ctx: ?*anyopaque = null,
     on_drag: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
     on_drag_end: ?*const fn (ctx: ?*anyopaque) void = null,
+    on_long_press: ?callbacks.ClickFn = null,
     hover_id: []const u8 = "",
     rect_out: ?*[4]f32 = null,
     // Crisp custom overlay: mask body text-sprites behind this box (see Node).
@@ -249,6 +252,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .click_ctx = cfg.click_ctx,
         .on_drag = cfg.on_drag,
         .on_drag_end = cfg.on_drag_end,
+        .on_long_press = cfg.on_long_press,
         .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
         .backdrop_mask = cfg.backdrop_mask,
@@ -511,7 +515,7 @@ fn draw_tree(
     const mask_from: usize = if (n.backdrop_mask) b.sprites.items.len else 0;
     // Register the click target before recursing so a clickable child (added
     // later) wins over a clickable parent in the newest-first hit walk.
-    if (pc) |p| if (n.on_click != null or n.on_drag != null or n.hover_id.len > 0) {
+    if (pc) |p| if (n.on_click != null or n.on_drag != null or n.on_long_press != null or n.hover_id.len > 0) {
         try p.add_hitbox(.{
             .x = x,
             .y = y,
@@ -522,6 +526,7 @@ fn draw_tree(
             .on_click = if (n.on_drag == null) n.on_click else null,
             .on_point = n.on_drag,
             .on_drag_end = n.on_drag_end,
+            .on_long_press = n.on_long_press,
             .hover_id = n.hover_id,
             .ctx = n.click_ctx,
         });

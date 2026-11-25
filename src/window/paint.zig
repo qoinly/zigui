@@ -18,6 +18,12 @@ const background = @import("../background.zig");
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
 pub const HitBox = types.HitBox;
+
+// Android routes a finger through the pointer dispatch; it gets tap-on-release + long-press
+// semantics (PaintContext.touch_down). Desktop pointers keep press-to-click.
+const touch_input = builtin.abi.isAndroid();
+const TOUCH_SLOP: f32 = 8; // points a press may wander and still be a tap (Android touch slop)
+const LONG_PRESS_S: f64 = 0.45;
 const Quad = primitives.Quad;
 
 // Adaptive-poll signals for the desktop poll loop (platform/linux/app.zig reads
@@ -184,6 +190,14 @@ pub const PaintContext = struct {
     // animation (e.g. a caret blink).
     now_s: f64 = 0,
     base_s: f64 = 0, // clock value at init; now_s stays small for f64 precision
+    // Touch press in flight (see touch_down): where/when it began, whether the long-press
+    // delay was already evaluated, and whether it fired (then the release must not click).
+    touch_pending: bool = false,
+    touch_x0: f32 = 0,
+    touch_y0: f32 = 0,
+    touch_t0: f64 = 0,
+    touch_long_checked: bool = false,
+    touch_long_fired: bool = false,
     // A one-shot redraw deadline (in now_s seconds). Lets a view schedule a wakeup
     // far cheaper than animating() every vsync: the loop idles until now_s hits it,
     // fires one redraw, and clears it. Re-arm each frame for a periodic refresh.
@@ -558,6 +572,62 @@ pub const PaintContext = struct {
     }
 
     pub fn on_mouse_down(self: *PaintContext, x: f32, y: f32) void {
+        if (touch_input) return self.touch_down(x, y);
+        self.press_at(x, y);
+    }
+
+    // Touch semantics: a tap clicks on RELEASE and only if the finger stayed put, so a
+    // drag that starts on a row scrolls instead of opening it; a press held still for
+    // LONG_PRESS_S fires on_long_press instead. A drag-capturing control (on_point: a
+    // slider, a pane divider) still grabs the pointer on the press itself.
+    fn touch_down(self: *PaintContext, x: f32, y: f32) void {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        self.mouse_inside = true; // the press highlight (hover_bg) shows under the finger
+        if (self.top_hitbox(x, y)) |hb| if (hb.on_point != null) {
+            self.touch_pending = false;
+            return self.press_at(x, y);
+        };
+        self.touch_pending = true;
+        self.touch_x0 = x;
+        self.touch_y0 = y;
+        self.touch_t0 = monotonic_seconds() - self.base_s;
+        self.touch_long_checked = false;
+        self.touch_long_fired = false;
+        self.renderer.request_redraw();
+    }
+
+    fn touch_up(self: *PaintContext) void {
+        const tap = self.touch_pending and !self.touch_long_fired;
+        self.touch_pending = false;
+        if (tap) self.press_at(self.touch_x0, self.touch_y0);
+    }
+
+    fn top_hitbox(self: *const PaintContext, x: f32, y: f32) ?HitBox {
+        var i: usize = self.hitboxes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const hb = self.hitboxes.items[i];
+            if (x >= hb.x and x < hb.x + hb.w and y >= hb.y and y < hb.y + hb.h) return hb;
+        }
+        return null;
+    }
+
+    // Run once a frame: fire the long-press when a still press crosses the delay.
+    fn check_long_press(self: *PaintContext) void {
+        if (!self.touch_pending or self.touch_long_checked) return;
+        const held = self.now_s - self.touch_t0;
+        if (held < LONG_PRESS_S) return self.request_redraw_after(LONG_PRESS_S - held);
+        self.touch_long_checked = true; // no handler under the finger: the release still taps
+        const hb = self.top_hitbox(self.touch_x0, self.touch_y0) orelse return;
+        const cb = hb.on_long_press orelse return;
+        self.touch_long_fired = true;
+        cb(hb.ctx);
+        self.mouse_inside = false; // drop the press highlight once the action took over
+        self.renderer.request_redraw();
+    }
+
+    fn press_at(self: *PaintContext, x: f32, y: f32) void {
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true;
@@ -637,6 +707,7 @@ pub const PaintContext = struct {
     }
 
     pub fn on_mouse_up(self: *PaintContext) void {
+        if (touch_input) self.touch_up();
         if (self.drag_end_cb) |cb| cb(self.drag_ctx);
         self.drag_cb = null;
         self.drag_ctx = null;
@@ -653,6 +724,11 @@ pub const PaintContext = struct {
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true;
+        // Past the slop the press is a scroll, not a tap or long-press.
+        if (self.touch_pending and (@abs(x - self.touch_x0) > TOUCH_SLOP or @abs(y - self.touch_y0) > TOUCH_SLOP)) {
+            self.touch_pending = false;
+        }
+        if (!self.touch_pending and self.drag_cb == null) self.mouse_inside = false; // no press highlight while scrolling
         if (self.drag_cb) |cb| {
             cb(self.drag_ctx, x, y);
         } else {
@@ -697,6 +773,7 @@ pub const PaintContext = struct {
         // result. The edge is consumed here, on the loop's own thread.
         if (background.took_completion()) self.renderer.request_redraw();
         self.now_s = monotonic_seconds() - self.base_s;
+        if (touch_input) self.check_long_press();
         if (self.redraw_at) |deadline| {
             if (self.now_s >= deadline) {
                 self.redraw_at = null;

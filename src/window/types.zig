@@ -240,6 +240,9 @@ pub const HitBox = struct {
     on_context: ?*const fn (ctx: ?*anyopaque, x: f32, y: f32) void = null,
     // Middle-button press (e.g. middle-click a tab to close it).
     on_middle: ?*const fn (ctx: ?*anyopaque) void = null,
+    // Touch: a press held still past the long-press delay. When it fires, the release
+    // does not also click.
+    on_long_press: ?*const fn (ctx: ?*anyopaque) void = null,
     // A stable id recorded as hovered while the pointer is over this box (a view
     // reads the topmost via the frame to reveal-on-hover, no callback / stale ctx).
     hover_id: []const u8 = "",
