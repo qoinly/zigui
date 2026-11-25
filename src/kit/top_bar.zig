@@ -166,17 +166,7 @@ fn render_search(
 }
 
 fn add_frost(p: *custom_paint.PaintContext, b: *RenderBuilder, rect: [6]f32) void {
-    // The frame's first frost rect marks the backdrop split (everything so far blurs
-    // under the bars); the rest append.
-    if (p.frost_count == 0) {
-        p.backdrop_prims = @intCast(b.prims.items.len);
-        p.backdrop_sprites = @intCast(b.sprites.items.len);
-        p.backdrop_color = @intCast(b.color_sprites.items.len);
-    }
-    if (p.frost_count < p.frost_rects.len) {
-        p.frost_rects[p.frost_count] = rect;
-        p.frost_count += 1;
-    }
+    p.add_frost(b, rect);
 }
 
 // A circle Liquid-Glass button (the modern iOS nav idiom): a frosted disc + a glyph,

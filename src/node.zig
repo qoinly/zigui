@@ -115,6 +115,9 @@ pub const Node = struct {
     // (the quads-then-sprites renderer otherwise lets body text bleed over an
     // overlay's fill). The same mask the menu/select overlays apply internally.
     backdrop_mask: bool = false,
+    // Blur what was drawn behind this box, inside its (rounded) rect: a translucent fill
+    // then reads as frosted glass. Renderers without a blur draw it as a plain box.
+    frost: bool = false,
     // Clip children to this node's box at draw time, WITHOUT the scroll viewport's layout override
     // (min-size 0 / natural-height child). Layout (incl. flex_grow) is unchanged, so a grow child
     // still fills the box; only what overflows the box is clipped. Use for a fixed/flex region whose
@@ -186,6 +189,8 @@ pub const Cfg = struct {
     rect_out: ?*[4]f32 = null,
     // Crisp custom overlay: mask body text-sprites behind this box (see Node).
     backdrop_mask: bool = false,
+    // Frosted glass behind this box; see Node.frost.
+    frost: bool = false,
     // Clip children to this box at draw time (layout/grow unchanged); see Node.clip.
     clip: bool = false,
 };
@@ -256,6 +261,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .hover_id = cfg.hover_id,
         .rect_out = cfg.rect_out,
         .backdrop_mask = cfg.backdrop_mask,
+        .frost = cfg.frost,
         .clip = cfg.clip,
         .children = own_kids(a, kids),
     });
@@ -532,6 +538,7 @@ fn draw_tree(
         });
     };
     if (n.rect_out) |ro| ro.* = .{ x, y, r.size.width, r.size.height };
+    if (n.frost) if (pc) |p| p.add_frost(b, .{ x, y, r.size.width, r.size.height, n.radius, 1 });
     if (comptime builtin.mode == .debug) {
         if (debug.any_on() and dbg_n < dbg_buf.len) {
             dbg_buf[dbg_n] = .{ .x = x, .y = y, .w = r.size.width, .h = r.size.height, .depth = @intCast(@min(depth, 65535)), .kind = @intFromEnum(n.kind), .text = n.text };

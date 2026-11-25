@@ -242,19 +242,7 @@ fn render_ios(
     const bar_y = y - IOS_BAR_H - IOS_GAP;
     // Mark the frosted capsule + the backdrop split: everything drawn so far blurs
     // under it; the items below draw crisp on top. The renderer paints the capsule.
-    if (opts.paint) |p| {
-        // The first frosted bar in the frame marks the split (everything so far blurs
-        // under the bars); this capsule appends its own frost rect.
-        if (p.frost_count == 0) {
-            p.backdrop_prims = @intCast(b.prims.items.len);
-            p.backdrop_sprites = @intCast(b.sprites.items.len);
-            p.backdrop_color = @intCast(b.color_sprites.items.len);
-        }
-        if (p.frost_count < p.frost_rects.len) {
-            p.frost_rects[p.frost_count] = .{ bx, bar_y, bw, IOS_BAR_H, IOS_BAR_H / 2, 1.0 };
-            p.frost_count += 1;
-        }
-    }
+    if (opts.paint) |p| p.add_frost(b, .{ bx, bar_y, bw, IOS_BAR_H, IOS_BAR_H / 2, 1.0 });
     state.shim_len = 0;
     const seg = bw / @as(f32, @floatFromInt(opts.items.len));
     std.debug.assert(seg > 0);

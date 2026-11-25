@@ -415,6 +415,21 @@ pub const PaintContext = struct {
     // Whether a back-navigation was requested this frame: Esc on desktop (through
     // the key queue) or the platform Back button (the back_pressed flag, cleared
     // here). The navigator calls it once per frame to pop the route stack.
+    // Mark a frosted region (x, y, w, h, corner, strength in points). The frame's first one
+    // sets the backdrop split: everything drawn so far blurs under every region, and what
+    // draws after stays crisp on top.
+    pub fn add_frost(self: *PaintContext, b: *const RenderBuilder, rect: [6]f32) void {
+        if (self.frost_count == 0) {
+            self.backdrop_prims = @intCast(b.prims.items.len);
+            self.backdrop_sprites = @intCast(b.sprites.items.len);
+            self.backdrop_color = @intCast(b.color_sprites.items.len);
+        }
+        if (self.frost_count < self.frost_rects.len) {
+            self.frost_rects[self.frost_count] = rect;
+            self.frost_count += 1;
+        }
+    }
+
     pub fn take_back(self: *PaintContext) bool {
         var requested = self.back_pressed;
         self.back_pressed = false;

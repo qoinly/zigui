@@ -1906,8 +1906,8 @@ pub const Renderer = struct {
         });
     }
 
-    // No frost machinery on this backend (the frosted bars are iOS/Metal-only); render
-    // the frame as usual so the shared paint seam stays uniform across renderers.
+    // The backdrop (up to the split) renders crisp, then each frost region is overwritten
+    // with the blurred backdrop; the rest draws crisp on top.
     pub fn draw_frame_frost(
         self: *Renderer,
         clear: ClearColor,
@@ -1921,8 +1921,13 @@ pub const Renderer = struct {
         split_color: usize,
         frosts: []const [6]f32,
     ) void {
-        _ = .{ split_prims, split_sprites, split_color, frosts };
-        self.draw_frame(clear, prims, sprites, mono_atlas, color_sprites, color_atlas);
+        self.draw_frame_with(clear, prims, sprites, mono_atlas, color_sprites, color_atlas, .{
+            .split_prims = split_prims,
+            .split_sprites = split_sprites,
+            .split_color = split_color,
+            .crisp_top = 0,
+            .frosts = frosts,
+        });
     }
 
     // The blur split: everything before the indices is the backdrop (frosted),
@@ -1933,6 +1938,8 @@ pub const Renderer = struct {
         split_sprites: usize,
         split_color: usize,
         crisp_top: f32,
+        // Non-empty: blur only inside these regions (x, y, w, h, corner in points).
+        frosts: []const [6]f32 = &.{},
     };
 
     fn draw_frame_impl(
@@ -2050,7 +2057,12 @@ pub const Renderer = struct {
         // Backbuffer: vertical blur aux -> full frame, the crisp strip re-blit,
         // then the modal layer crisp on top.
         self.begin_pass(cmd, self.render_pass, self.framebuffers[image_index], clear);
-        self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
+        if (m.frosts.len > 0) {
+            self.fullscreen_pass(cmd, self.blit_pipeline, self.scene_dset, push);
+            for (m.frosts) |fr| self.frost_region(cmd, fr, push);
+            const full = vk.Rect2D{ .extent = self.extent };
+            self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&full));
+        } else self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
         const top_px = m.crisp_top * scale;
         if (top_px >= 1) {
             const strip = vk.Rect2D{ .extent = .{
@@ -2072,6 +2084,63 @@ pub const Renderer = struct {
         self.dfns.vkCmdEndRenderPass(cmd);
         _ = self.dfns.vkEndCommandBuffer(cmd);
         return true;
+    }
+
+    // Scissors are rectangles, so a rounded region is covered by horizontal bands, each
+    // inset to where the corner arc is at its outer edge: the blur never leaks past the
+    // curve, and the sliver it misses inside the curve is under the box's own fill.
+    const FROST_BANDS = 6;
+
+    fn frost_region(self: *Renderer, cmd: *vk.CommandBuffer, fr: [6]f32, push: BlurPush) void {
+        const s = self.applied_scale;
+        const x = fr[0] * s;
+        const y = fr[1] * s;
+        const w = fr[2] * s;
+        const h = fr[3] * s;
+        if (w < 1 or h < 1) return;
+        const r = @min(fr[4] * s, @min(w, h) / 2);
+        if (r < 1) return self.frost_band(cmd, x, y, w, h, push);
+        const bh = r / FROST_BANDS;
+        for (0..FROST_BANDS) |i| {
+            const fi: f32 = @floatFromInt(i);
+            const dy = r - fi * bh;
+            const inset = r - @sqrt(@max(r * r - dy * dy, 0));
+            self.frost_band(cmd, x + inset, y + fi * bh, w - 2 * inset, bh, push);
+            self.frost_band(cmd, x + inset, y + h - (fi + 1) * bh, w - 2 * inset, bh, push);
+        }
+        self.frost_band(cmd, x, y + r, w, h - 2 * r, push);
+    }
+
+    // One blurred band, given in logical pixels: mapped through the same display rotation
+    // the scene shaders apply, since the scissor works in the native framebuffer.
+    fn frost_band(self: *Renderer, cmd: *vk.CommandBuffer, x: f32, y: f32, w: f32, h: f32, push: BlurPush) void {
+        if (w <= 0 or h <= 0) return;
+        const lw: f32 = @floatFromInt(self.logical_extent.width);
+        const lh: f32 = @floatFromInt(self.logical_extent.height);
+        const nw: f32 = @floatFromInt(self.extent.width);
+        const nh: f32 = @floatFromInt(self.extent.height);
+        const rot = scene_rot(self.transform);
+        var lo = [2]f32{ nw, nh };
+        var hi = [2]f32{ 0, 0 };
+        for ([2]f32{ x, x + w }) |px| for ([2]f32{ y, y + h }) |py| {
+            const ax = px / lw * 2 - 1;
+            const ay = py / lh * 2 - 1;
+            const qx = ((ax * rot[0] - ay * rot[1]) + 1) / 2 * nw;
+            const qy = ((ax * rot[1] + ay * rot[0]) + 1) / 2 * nh;
+            lo = .{ @min(lo[0], qx), @min(lo[1], qy) };
+            hi = .{ @max(hi[0], qx), @max(hi[1], qy) };
+        };
+        const x0 = std.math.clamp(@ceil(lo[0]), 0, nw);
+        const y0 = std.math.clamp(@ceil(lo[1]), 0, nh);
+        const x1 = std.math.clamp(@floor(hi[0]), 0, nw);
+        const y1 = std.math.clamp(@floor(hi[1]), 0, nh);
+        if (x1 <= x0 or y1 <= y0) return;
+        const rect = vk.Rect2D{
+            .offset = .{ .x = @intFromFloat(x0), .y = @intFromFloat(y0) },
+            .extent = .{ .width = @intFromFloat(x1 - x0), .height = @intFromFloat(y1 - y0) },
+        };
+        self.dfns.vkCmdSetScissor(cmd, 0, 1, @ptrCast(&rect));
+        self.fullscreen_pass(cmd, self.blur_v_pipeline, self.aux_dset, push);
     }
 
     const BlurPush = extern struct {
