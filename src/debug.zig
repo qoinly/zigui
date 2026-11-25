@@ -65,7 +65,11 @@ fn has(hay: []const u8, needle: []const u8) bool {
 
 fn read(buf: []u8) []const u8 {
     if (comptime is_android) return read_prop(buf);
-    return std.posix.getenv("ZIGUI_DEBUG") orelse "";
+    if (comptime builtin.link_libc) {
+        const v = std.c.getenv("ZIGUI_DEBUG") orelse return "";
+        return std.mem.span(v);
+    }
+    return "";
 }
 
 extern fn __system_property_get(name: [*:0]const u8, value: [*:0]u8) c_int;

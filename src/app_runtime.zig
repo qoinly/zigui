@@ -14,6 +14,13 @@ const custom_shell = @import("custom_shell.zig");
 
 // What `render` receives each frame. Read it for layout; do not retain it - the
 // arena is reset on the next frame.
+// Material-style window width buckets (in logical points), for responsive layout: a phone
+// (or a folded/narrow window) is compact; an unfolded foldable / small tablet is medium; a
+// tablet / desktop / unfolded-landscape is expanded. A view switches layout on these
+// (single-pane nav on compact, a list-detail two-pane on expanded) and re-flows for free
+// when the window resizes, since the tree is rebuilt every frame.
+pub const SizeClass = enum { compact, medium, expanded };
+
 pub const Frame = struct {
     size: geometry.SizeF,
     body: geometry.BoundsF, // content rect below the title band
@@ -22,6 +29,16 @@ pub const Frame = struct {
     arena: std.mem.Allocator,
     time: f64, // monotonic seconds, for time-based animation (with zigui.animate)
     hovered_id: []const u8 = "", // topmost hover-id box under the pointer (reveal-on-hover)
+
+    pub fn size_class(self: Frame) SizeClass {
+        const w = self.size.width;
+        return if (w < 600) .compact else if (w < 840) .medium else .expanded;
+    }
+
+    // True when there is room for a side-by-side two-pane layout.
+    pub fn is_expanded(self: Frame) bool {
+        return self.size.width >= 840;
+    }
 };
 
 // The window's region views. titlebar/overlay/hud are optional. The lib always
