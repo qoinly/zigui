@@ -1068,6 +1068,7 @@ pub const App = app_runtime_impl.App;
 pub const WindowOptions = app_runtime_impl.App.WindowOptions;
 pub const Frame = app_runtime.Frame;
 pub const SizeClass = app_runtime.SizeClass;
+pub const FoldPosture = app_runtime.FoldPosture;
 pub const Theme = window.Theme;
 pub const ActivationPolicy = app.ActivationPolicy;
 

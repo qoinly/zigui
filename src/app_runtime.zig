@@ -11,6 +11,7 @@ const display_link = @import("display_link.zig");
 const frame_ctx = @import("frame_ctx.zig");
 const background = @import("background.zig");
 const custom_shell = @import("custom_shell.zig");
+const fold_mod = @import("fold.zig");
 
 // What `render` receives each frame. Read it for layout; do not retain it - the
 // arena is reset on the next frame.
@@ -20,6 +21,7 @@ const custom_shell = @import("custom_shell.zig");
 // (single-pane nav on compact, a list-detail two-pane on expanded) and re-flows for free
 // when the window resizes, since the tree is rebuilt every frame.
 pub const SizeClass = enum { compact, medium, expanded };
+pub const FoldPosture = fold_mod.Posture;
 
 pub const Frame = struct {
     size: geometry.SizeF,
@@ -29,6 +31,7 @@ pub const Frame = struct {
     arena: std.mem.Allocator,
     time: f64, // monotonic seconds, for time-based animation (with zigui.animate)
     hovered_id: []const u8 = "", // topmost hover-id box under the pointer (reveal-on-hover)
+    fold: FoldPosture = .flat, // foldable posture from the hinge sensor; flat on non-foldables
 
     pub fn size_class(self: Frame) SizeClass {
         const w = self.size.width;
@@ -186,6 +189,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 .arena = w.arena.allocator(),
                 .time = pc.now_s,
                 .hovered_id = pc.hovered_id,
+                .fold = fold_mod.posture(),
             };
             // non-null whenever State != void (the loop is started from a real pointer)
             const st: State = if (State == void) {} else @ptrCast(@alignCast(w.user_state.?));

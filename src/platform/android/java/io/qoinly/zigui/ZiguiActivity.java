@@ -9,6 +9,10 @@ import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.net.Uri;
 import android.os.Build;
@@ -39,11 +43,15 @@ import java.util.ArrayList;
 // names), so any app can declare it in its manifest and write zero Java.
 public class ZiguiActivity extends NativeActivity {
     private EditText edit;
+    private SensorManager sensorMgr;
+    private Sensor hingeSensor;
+    private SensorEventListener hingeListener;
 
     @Override
     protected void onCreate(Bundle state) {
         loadAppLibrary();
         super.onCreate(state);
+        setupHingeSensor();
         edit = new EditText(this);
         edit.setFocusable(true);
         edit.setFocusableInTouchMode(true);
@@ -384,6 +392,49 @@ public class ZiguiActivity extends NativeActivity {
             .edit().putBoolean(name, true).apply();
         requestPermissions(new String[] { name }, 0);
     }
+
+    // The hinge-angle sensor (API 30+) reports the fold angle on foldables; forward each
+    // reading to native so a view can adapt to the fold posture. Absent on non-foldables,
+    // where native stays flat. Registered only while the activity is resumed.
+    private void setupHingeSensor() {
+        if (Build.VERSION.SDK_INT < 30) {
+            return;
+        }
+        sensorMgr = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        if (sensorMgr == null) {
+            return;
+        }
+        hingeSensor = sensorMgr.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE);
+        if (hingeSensor == null) {
+            return;
+        }
+        hingeListener = new SensorEventListener() {
+            public void onSensorChanged(SensorEvent e) {
+                if (e.values != null && e.values.length > 0) {
+                    nativeOnFold(e.values[0]);
+                }
+            }
+            public void onAccuracyChanged(Sensor s, int accuracy) {}
+        };
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (sensorMgr != null && hingeSensor != null && hingeListener != null) {
+            sensorMgr.registerListener(hingeListener, hingeSensor, SensorManager.SENSOR_DELAY_NORMAL);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (sensorMgr != null && hingeListener != null) {
+            sensorMgr.unregisterListener(hingeListener);
+        }
+    }
+
+    private native void nativeOnFold(float angle);
 
     private native void nativeOnText(String text, int caret);
 
