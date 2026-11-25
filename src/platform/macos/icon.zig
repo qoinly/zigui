@@ -113,6 +113,7 @@ pub const MacIconSystem = struct {
             .package => "shippingbox",
             .wrench => "wrench.and.screwdriver",
             .ellipsis => "ellipsis",
+            .grip_vertical => "line.3.horizontal", // the native reorder handle
             .pencil => "pencil",
             .star => "star",
             .corner_down_left => "arrow.turn.down.left",

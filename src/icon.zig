@@ -111,6 +111,7 @@ pub const Icon = enum {
     package,
     wrench,
     ellipsis,
+    grip_vertical,
     pencil,
     star,
     corner_down_left,
