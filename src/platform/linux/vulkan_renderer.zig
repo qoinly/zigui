@@ -27,6 +27,7 @@ const LineSegment = primitives.LineSegment;
 const RingChart = primitives.RingChart;
 
 pub const max_frames_in_flight: u32 = 3;
+const FENCE_WAIT_NS: u64 = 250 * std.time.ns_per_ms;
 
 const MAX_QUADS: u32 = 1024;
 const MAX_SPRITES: u32 = 4096;
@@ -1048,6 +1049,28 @@ pub const Renderer = struct {
         try self.create_swapchain();
     }
 
+    // After a failed submit the fence is reset but never signals, and image_available was
+    // signaled by the acquire but never waited on. Reusing either would hang the next frame
+    // or break the next acquire, so swap in fresh ones (the fence starts signaled).
+    fn reset_frame_sync(self: *Renderer) void {
+        const device = self.device orelse return;
+        _ = self.dfns.vkDeviceWaitIdle(device);
+        var sem: vk.Semaphore = vk.NULL_HANDLE;
+        var fence: vk.Fence = vk.NULL_HANDLE;
+        const sem_info = vk.SemaphoreCreateInfo{};
+        if (self.dfns.vkCreateSemaphore(device, &sem_info, null, &sem) != vk.SUCCESS) return;
+        const fence_info = vk.FenceCreateInfo{};
+        if (self.dfns.vkCreateFence(device, &fence_info, null, &fence) != vk.SUCCESS) {
+            self.dfns.vkDestroySemaphore(device, sem, null);
+            return;
+        }
+        self.dfns.vkDestroySemaphore(device, self.image_available, null);
+        self.dfns.vkDestroyFence(device, self.in_flight, null);
+        self.image_available = sem;
+        self.in_flight = fence;
+        self.dirty = true;
+    }
+
     fn create_commands_and_sync(self: *Renderer) Error!void {
         std.debug.assert(self.device != null);
         const pool_info = vk.CommandPoolCreateInfo{ .queue_family_index = self.queue_family };
@@ -1934,7 +1957,11 @@ pub const Renderer = struct {
         }
         if (!self.dirty) return;
 
-        _ = self.dfns.vkWaitForFences(device, 1, @ptrCast(&self.in_flight), 1, ~@as(u64, 0));
+        // Bounded: a stalled GPU (seen on the Android emulator across a config change) would
+        // otherwise hold the main thread until the OS kills the app. A miss skips the frame;
+        // dirty stays set, so the next tick tries again.
+        if (self.dfns.vkWaitForFences(device, 1, @ptrCast(&self.in_flight), 1, FENCE_WAIT_NS) !=
+            vk.SUCCESS) return;
         const image_index = self.acquire_image() orelse return;
         std.debug.assert(image_index < self.image_count);
         _ = self.dfns.vkResetFences(device, 1, @ptrCast(&self.in_flight));
@@ -2601,7 +2628,10 @@ pub const Renderer = struct {
         const queue = self.queue.?;
         const submit_rc = self.dfns.vkQueueSubmit(queue, 1, @ptrCast(&submit), self.in_flight);
         std.debug.assert(submit_rc == vk.SUCCESS or submit_rc < 0);
-        if (submit_rc != vk.SUCCESS) return;
+        if (submit_rc != vk.SUCCESS) {
+            self.reset_frame_sync();
+            return;
+        }
 
         var indices = [_]u32{image_index};
         const present = vk.PresentInfoKHR{
