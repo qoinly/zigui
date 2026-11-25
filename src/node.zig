@@ -756,7 +756,7 @@ fn scroll_step_ios(
     st.t_prev_s = now;
     std.debug.assert(dt > 0);
 
-    if (p.is_hovered(view[0], view[1], view[2], view[3])) {
+    if (p.pointer_over(view[0], view[1], view[2], view[3])) {
         const delta = -p.wheel_dy;
         const over = scroll_overscroll(st.y, max_y);
         // Past an edge the finger meets rising resistance (the rubber band).
@@ -824,7 +824,7 @@ fn draw_scroll(
     if (builtin.os.tag == .ios) {
         if (pc) |p| scroll_step_ios(p, st, eff_max_y, vh, view);
     } else {
-        if (pc) |p| if (p.is_hovered(view[0], view[1], vw, vh)) {
+        if (pc) |p| if (p.pointer_over(view[0], view[1], vw, vh)) {
             st.y -= p.wheel_dy;
         };
         st.y = std.math.clamp(st.y, 0, eff_max_y);

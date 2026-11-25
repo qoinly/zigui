@@ -198,6 +198,9 @@ pub const PaintContext = struct {
     touch_t0: f64 = 0,
     touch_long_checked: bool = false,
     touch_long_fired: bool = false,
+    // A touch that turned into a scroll (or a long-press that took over) hides the press
+    // highlight; the pointer itself stays inside so the scroll region keeps tracking it.
+    hover_suppressed: bool = false,
     // A one-shot redraw deadline (in now_s seconds). Lets a view schedule a wakeup
     // far cheaper than animating() every vsync: the loop idles until now_s hits it,
     // fires one redraw, and clears it. Re-arm each frame for a periodic refresh.
@@ -346,6 +349,13 @@ pub const PaintContext = struct {
     }
 
     pub fn is_hovered(self: *const PaintContext, x: f32, y: f32, w: f32, h: f32) bool {
+        if (self.hover_suppressed) return false;
+        return self.pointer_over(x, y, w, h);
+    }
+
+    // The pointer is over the box, ignoring a touch's suppressed press highlight: a scroll
+    // region keeps receiving the finger's drag after the press stopped being a tap.
+    pub fn pointer_over(self: *const PaintContext, x: f32, y: f32, w: f32, h: f32) bool {
         if (!self.mouse_inside or self.block_hover) return false;
         return self.mouse_x >= x and self.mouse_x < x + w and
             self.mouse_y >= y and self.mouse_y < y + h;
@@ -584,6 +594,7 @@ pub const PaintContext = struct {
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true; // the press highlight (hover_bg) shows under the finger
+        self.hover_suppressed = false;
         if (self.top_hitbox(x, y)) |hb| if (hb.on_point != null) {
             self.touch_pending = false;
             return self.press_at(x, y);
@@ -623,7 +634,7 @@ pub const PaintContext = struct {
         const cb = hb.on_long_press orelse return;
         self.touch_long_fired = true;
         cb(hb.ctx);
-        self.mouse_inside = false; // drop the press highlight once the action took over
+        self.hover_suppressed = true; // drop the press highlight once the action took over
         self.renderer.request_redraw();
     }
 
@@ -728,7 +739,7 @@ pub const PaintContext = struct {
         if (self.touch_pending and (@abs(x - self.touch_x0) > TOUCH_SLOP or @abs(y - self.touch_y0) > TOUCH_SLOP)) {
             self.touch_pending = false;
         }
-        if (!self.touch_pending and self.drag_cb == null) self.mouse_inside = false; // no press highlight while scrolling
+        if (!self.touch_pending and self.drag_cb == null) self.hover_suppressed = true; // no press highlight while scrolling
         if (self.drag_cb) |cb| {
             cb(self.drag_ctx, x, y);
         } else {
