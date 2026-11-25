@@ -2276,6 +2276,10 @@ pub const Toasts = struct {
     // above a footer/status bar the hud draws over (the hud fills the whole window).
     // The bottom margin is then measured from the top of that reserved band.
     bottom_inset: f32 = 0,
+    // Phone layout: a bottom-centered stack of the given width instead of the desktop
+    // fixed-width bottom-right corner.
+    center: bool = false,
+    width: ?f32 = null,
 };
 
 const ToastsSpec = struct {
@@ -2324,9 +2328,10 @@ const ToastsSpec = struct {
                 continue;
             }
             any = true;
-            const tx = r.size.width - TOAST_W - TOAST_MARGIN;
+            const w = @min(self.o.width orelse TOAST_W, r.size.width);
+            const tx = if (self.o.center) (r.size.width - w) / 2 else r.size.width - w - TOAST_MARGIN;
             const ty = r.size.height - self.o.bottom_inset - TOAST_MARGIN - th - stack * (th + TOAST_GAP) + off;
-            const sz = try toast_kit.render(b, tx, ty, TOAST_W, .{
+            const sz = try toast_kit.render(b, tx, ty, w, .{
                 .title = t.text,
                 .variant = t.variant,
                 .icon = toast_icon(t.variant),
