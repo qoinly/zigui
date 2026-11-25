@@ -44,11 +44,14 @@ pub fn window_in_use(target: *anyopaque) bool {
     };
 }
 
-pub fn window_size_pt(target: *anyopaque) [2]i32 {
-    return switch (active) {
+// The buffer's pixel size: the configured points times the output's integer scale.
+pub fn window_size_px(target: *anyopaque) [2]u32 {
+    const pt: [2]i32 = switch (active) {
         .wayland => .{ wl_win(target).width_pt, wl_win(target).height_pt },
         .x11 => .{ x11_win(target).width_pt, x11_win(target).height_pt },
     };
+    const scale: u32 = @intCast(@max(window_scale(target), 1));
+    return .{ @as(u32, @intCast(@max(pt[0], 1))) * scale, @as(u32, @intCast(@max(pt[1], 1))) * scale };
 }
 
 pub fn window_scale(target: *anyopaque) i32 {

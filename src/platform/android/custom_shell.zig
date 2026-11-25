@@ -95,7 +95,7 @@ pub fn touch_move() ?TouchMove {
     return g_touch;
 }
 
-pub fn surface_scale() i32 {
+pub fn surface_scale() f32 {
     const w = g_window orelse return 1;
     std.debug.assert(w.scale >= 1);
     return w.scale;
@@ -112,12 +112,11 @@ pub fn set_ime_inset(px: i32) void {
 }
 // The keyboard inset in points (0 when hidden), for keyboard-aware scrolling.
 pub fn keyboard_inset() f32 {
-    const scale: f32 = @floatFromInt(surface_scale());
-    return @as(f32, @floatFromInt(g_ime_px)) / scale;
+    return @as(f32, @floatFromInt(g_ime_px)) / surface_scale();
 }
 
 pub fn safe_area_insets() geometry.Insets {
-    const scale: f32 = @floatFromInt(surface_scale());
+    const scale = surface_scale();
     std.debug.assert(scale >= 1);
     return .{
         .left = @as(f32, @floatFromInt(g_insets_px.left)) / scale,
@@ -158,7 +157,7 @@ pub const CustomShellHandle = struct {
     pub fn backing_scale_factor(self: CustomShellHandle) f32 {
         const s = self.win().scale;
         std.debug.assert(s >= 1);
-        return @floatFromInt(s);
+        return s;
     }
 
     pub fn is_maximized(self: CustomShellHandle) bool {
@@ -182,10 +181,7 @@ pub const CustomShellHandle = struct {
     pub fn sync_drawable_size(self: CustomShellHandle) ContentSize {
         const w = self.win();
         w.sync_extent();
-        return .{
-            .width = @floatFromInt(w.width_pt),
-            .height = @floatFromInt(w.height_pt),
-        };
+        return .{ .width = w.width_pt, .height = w.height_pt };
     }
 
     pub fn deinit(self: CustomShellHandle) void {
@@ -372,8 +368,8 @@ pub fn display_bounds(index: u32) geometry.BoundsF {
     return .{
         .origin = .{ .x = 0, .y = 0 },
         .size = .{
-            .width = @floatFromInt(window.width_pt),
-            .height = @floatFromInt(window.height_pt),
+            .width = window.width_pt,
+            .height = window.height_pt,
         },
     };
 }

@@ -443,7 +443,7 @@ pub const Renderer = struct {
     ahb_external_format: u64 = 0,
 
     // The buffer scale the current swapchain + surface state were built for.
-    applied_scale: i32 = 1,
+    applied_scale: f32 = 1,
 
     upload_cmd: ?*vk.CommandBuffer = null,
     mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
@@ -857,16 +857,16 @@ pub const Renderer = struct {
         if (rc != vk.SUCCESS) return error.SwapchainCreateFailed;
     }
 
-    // The shell's configured points times the output's integer scale: the
-    // unit relationship every encoder's point-space viewport relies on.
     fn pixel_extent(self: *const Renderer) vk.Extent2D {
-        const size = backend.window_size_pt(self.win);
-        const win_scale = backend.window_scale(self.win);
-        std.debug.assert(win_scale >= 1);
-        const scale: u32 = @intCast(win_scale);
-        return .{
-            .width = @as(u32, @intCast(@max(size[0], 1))) * scale,
-            .height = @as(u32, @intCast(@max(size[1], 1))) * scale,
+        const px = backend.window_size_px(self.win);
+        return .{ .width = px[0], .height = px[1] };
+    }
+
+    // Desktop outputs report an integer scale, Android a fractional density (dp).
+    fn scale_f32(v: anytype) f32 {
+        return switch (@typeInfo(@TypeOf(v))) {
+            .int, .comptime_int => @floatFromInt(v),
+            else => v,
         };
     }
 
@@ -885,10 +885,27 @@ pub const Renderer = struct {
         };
     }
 
+    // After a fold/unfold resize the emulator's caps still report the old surface size while
+    // the window already has the new one, and a swapchain at the stale size gets squeezed into
+    // the window. Android accepts any extent within min..max (the compositor scales), so build
+    // at the window's real size. A swap of width and height is a rotation, which the caps
+    // already report correctly; keep them then.
+    fn android_extent(caps: vk.SurfaceCapabilitiesKHR, px: [2]u32) vk.Extent2D {
+        const c = caps.current_extent;
+        if (px[0] == c.width and px[1] == c.height) return c;
+        if (px[0] == c.height and px[1] == c.width) return c;
+        if (px[0] < caps.min_image_extent.width or px[0] > caps.max_image_extent.width) return c;
+        if (px[1] < caps.min_image_extent.height or px[1] > caps.max_image_extent.height) return c;
+        return .{ .width = px[0], .height = px[1] };
+    }
+
     fn surface_extent(self: *Renderer, caps: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
         // 0xFFFFFFFF means the surface size is whatever the client picks; the
         // shell's configured size (scaled to buffer pixels) is the truth.
-        if (caps.current_extent.width != 0xFFFFFFFF) return caps.current_extent;
+        if (caps.current_extent.width != 0xFFFFFFFF) {
+            if (comptime builtin.abi.isAndroid()) return android_extent(caps, backend.window_size_px(self.win));
+            return caps.current_extent;
+        }
         const want = self.pixel_extent();
         return .{
             .width = std.math.clamp(
@@ -1947,11 +1964,12 @@ pub const Renderer = struct {
             self.recreate_swapchain() catch return;
             self.dirty = true;
         }
-        const scale = @max(backend.window_scale(self.win), 1);
+        const raw_scale = backend.window_scale(self.win);
+        const scale = @max(scale_f32(raw_scale), 1);
         if (scale != self.applied_scale) {
             // On Wayland this is double-buffered surface state, applied by
             // the present's commit with the first buffer at the new scale.
-            backend.apply_buffer_scale(self.win, scale);
+            backend.apply_buffer_scale(self.win, raw_scale);
             self.applied_scale = scale;
             self.dirty = true;
         }
@@ -1997,7 +2015,7 @@ pub const Renderer = struct {
             m.split_color > color_sprites.len) return false;
         if (self.blit_pipeline == vk.NULL_HANDLE) return false;
         if (!self.ensure_offscreen()) return false;
-        const scale: f32 = @floatFromInt(self.applied_scale);
+        const scale = self.applied_scale;
         const push = BlurPush{
             .texel = .{
                 1.0 / @as(f32, @floatFromInt(self.extent.width)),
@@ -2248,7 +2266,7 @@ pub const Renderer = struct {
     // points while the extent is buffer pixels (points * buffer scale).
     fn viewport_points(self: *const Renderer) [2]f32 {
         std.debug.assert(self.applied_scale >= 1);
-        const scale: f32 = @floatFromInt(self.applied_scale);
+        const scale = self.applied_scale;
         return .{
             @as(f32, @floatFromInt(self.logical_extent.width)) / scale,
             @as(f32, @floatFromInt(self.logical_extent.height)) / scale,

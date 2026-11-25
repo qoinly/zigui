@@ -62,7 +62,7 @@ fn dispatch(event: *native.AInputEvent) bool {
     }
     if (etype != native.AINPUT_EVENT_TYPE_MOTION) return false;
     const d = custom_shell.mouse_dispatch() orelse return false;
-    const scale: f32 = @floatFromInt(custom_shell.surface_scale());
+    const scale = custom_shell.surface_scale();
     std.debug.assert(scale >= 1);
     const x = native.AMotionEvent_getX(event, 0) / scale;
     const y = native.AMotionEvent_getY(event, 0) / scale;

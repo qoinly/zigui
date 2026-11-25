@@ -134,10 +134,10 @@ extern fn AConfiguration_delete(config: *AConfiguration) void;
 extern fn AConfiguration_fromAssetManager(config: *AConfiguration, am: *anyopaque) void;
 extern fn AConfiguration_getDensity(config: *AConfiguration) i32;
 
-// The display's integer density scale (points -> pixels): round(densityDpi / 160),
-// clamped to 1..4. Without it the surface renders at 1x (points == pixels), which looks
-// right only on a 160dpi screen and renders tiny on a real high-density phone.
-fn density_scale() i32 {
+// The display's density scale (points -> pixels): densityDpi / 160, so a point is exactly
+// an Android dp. Rounding it to an integer (420dpi -> 3 instead of 2.625) shrank the
+// logical width by up to 12%, enough to drop an unfolded foldable into the compact class.
+fn density_scale() f32 {
     const act = g_activity orelse return 1;
     const am = act.asset_manager orelse return 1;
     const cfg = AConfiguration_new() orelse return 1;
@@ -145,7 +145,7 @@ fn density_scale() i32 {
     AConfiguration_fromAssetManager(cfg, am);
     const dpi = AConfiguration_getDensity(cfg);
     if (dpi <= 0 or dpi >= 0xfffe) return 1; // ACONFIGURATION_DENSITY none / any / unset
-    return std.math.clamp(@divTrunc(dpi + 80, 160), 1, 4); // +80 rounds to the nearest bucket
+    return std.math.clamp(@as(f32, @floatFromInt(dpi)) / 160.0, 1.0, 4.0);
 }
 
 fn on_window_created(activity: *Activity, window: *Window) callconv(.c) void {
@@ -176,7 +176,18 @@ fn notify_lost() void {
 fn on_window_resized(activity: *Activity, window: *Window) callconv(.c) void {
     _ = activity;
     _ = window;
+    forget_display_extent();
+    display_link.wake(); // an idle vsync chain would otherwise leave the old frame stretched
     notify_resized();
+}
+
+// The renderer caches the extent of the swapchain it built and compares against it, so
+// the cache alone can never see a resize. Rotation still recovered (present reports the
+// swapchain suboptimal), but folding or unfolding a foldable did not: drop the cache so
+// the live window size is read, differs, and the swapchain is rebuilt at the new size.
+fn forget_display_extent() void {
+    g_window.disp_w = 0;
+    g_window.disp_h = 0;
 }
 
 // Regaining focus (e.g. returning from a document picker or another app) re-arms the
@@ -198,6 +209,7 @@ fn on_content_rect_changed(activity: *Activity, rect: *const native.ARect) callc
     _ = activity;
     _ = rect;
     refresh_insets();
+    forget_display_extent();
     notify_resized();
 }
 

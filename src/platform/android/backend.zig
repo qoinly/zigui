@@ -18,12 +18,17 @@ pub fn window_in_use(target: *anyopaque) bool {
     return win(target).in_use;
 }
 
-pub fn window_size_pt(target: *anyopaque) [2]i32 {
+// The surface's pixel size. Taken as-is, never rebuilt from points * scale: with a
+// fractional scale that product rounds off the real size and would read as a resize.
+pub fn window_size_px(target: *anyopaque) [2]u32 {
     const w = win(target);
-    return .{ w.width_pt, w.height_pt };
+    const nw = w.native orelse return .{ 1, 1 };
+    const px_w = if (w.disp_w != 0) w.disp_w else native.ANativeWindow_getWidth(nw);
+    const px_h = if (w.disp_h != 0) w.disp_h else native.ANativeWindow_getHeight(nw);
+    return .{ @intCast(@max(px_w, 1)), @intCast(@max(px_h, 1)) };
 }
 
-pub fn window_scale(target: *anyopaque) i32 {
+pub fn window_scale(target: *anyopaque) f32 {
     return win(target).scale;
 }
 
@@ -43,7 +48,7 @@ pub fn renderer_takeover(target: *anyopaque) void {
 
 // No double-buffered surface scale on Android (the surface is its pixel size),
 // so this is the no-op arm the wayland path is not.
-pub fn apply_buffer_scale(target: *anyopaque, scale: i32) void {
+pub fn apply_buffer_scale(target: *anyopaque, scale: f32) void {
     std.debug.assert(scale >= 1);
     _ = target;
 }

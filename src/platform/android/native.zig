@@ -108,9 +108,9 @@ pub const MAX_WINDOWS: u32 = 1; // one fullscreen surface per Activity
 pub const AndroidWindow = struct {
     in_use: bool = false,
     native: ?*ANativeWindow = null,
-    width_pt: i32 = 0,
-    height_pt: i32 = 0,
-    scale: i32 = 1,
+    width_pt: f32 = 0,
+    height_pt: f32 = 0,
+    scale: f32 = 1,
     renderer_owned: bool = false,
     surface_ctx: ?*anyopaque = null,
     // The renderer's caps-derived display extent, preferred over ANativeWindow
@@ -126,7 +126,7 @@ pub const AndroidWindow = struct {
         std.debug.assert(self.scale >= 1);
         const w = if (self.disp_w != 0) self.disp_w else ANativeWindow_getWidth(native);
         const h = if (self.disp_h != 0) self.disp_h else ANativeWindow_getHeight(native);
-        self.width_pt = @max(@divTrunc(w, self.scale), 1);
-        self.height_pt = @max(@divTrunc(h, self.scale), 1);
+        self.width_pt = @max(@as(f32, @floatFromInt(w)) / self.scale, 1);
+        self.height_pt = @max(@as(f32, @floatFromInt(h)) / self.scale, 1);
     }
 };
