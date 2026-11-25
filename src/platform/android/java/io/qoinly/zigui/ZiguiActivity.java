@@ -236,10 +236,15 @@ public class ZiguiActivity extends NativeActivity {
     }
 
     // Copy the picked content into a readable cacheDir file; returns its absolute path,
-    // or null on failure. The display name may carry separators, so the leaf is
-    // sanitized for the filesystem.
+    // or null on failure. The leaf keeps the user's file name (callers derive names from
+    // the basename, e.g. a multipart filename), so uniqueness comes from a per-pick
+    // directory instead of a prefix. The name may carry separators, so it is sanitized.
     private String importToCache(Uri uri, String name) {
-        File out = new File(getCacheDir(), "picked-" + name.replaceAll("[^A-Za-z0-9._-]", "_"));
+        File dir = new File(getCacheDir(), "picked/" + System.nanoTime());
+        if (!dir.mkdirs()) {
+            return null;
+        }
+        File out = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_"));
         try (InputStream is = getContentResolver().openInputStream(uri);
              FileOutputStream os = new FileOutputStream(out)) {
             if (is == null) {
