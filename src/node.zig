@@ -30,6 +30,13 @@ const label = @import("render/label.zig");
 const builder = @import("render/builder.zig");
 const callbacks = @import("callbacks.zig");
 const paint = @import("window/paint.zig");
+const debug = @import("debug.zig");
+
+// Development-only (see debug.zig): one record per laid-out node, captured in draw_tree at
+// its resolved absolute rect, then drawn as an overlay / dumped to the log after the tree.
+const DbgRec = struct { x: f32, y: f32, w: f32, h: f32, depth: u16, kind: u8, text: []const u8 };
+var dbg_buf: [8192]DbgRec = undefined;
+var dbg_n: usize = 0;
 
 const Style = styles.Style;
 const Length = styles.Length;
@@ -520,6 +527,12 @@ fn draw_tree(
         });
     };
     if (n.rect_out) |ro| ro.* = .{ x, y, r.size.width, r.size.height };
+    if (comptime builtin.mode == .debug) {
+        if (debug.any_on() and dbg_n < dbg_buf.len) {
+            dbg_buf[dbg_n] = .{ .x = x, .y = y, .w = r.size.width, .h = r.size.height, .depth = @intCast(@min(depth, 65535)), .kind = @intFromEnum(n.kind), .text = n.text };
+            dbg_n += 1;
+        }
+    }
     const hover_fill: ?Rgba = if (n.hover_bg) |hb| blk: {
         const on = if (pc) |p| p.is_hovered(x, y, r.size.width, r.size.height) else false;
         break :blk if (on) hb else null;
@@ -871,9 +884,88 @@ pub fn render_at(
     const prev_measure_b = measure_b;
     measure_b = b;
     defer measure_b = prev_measure_b;
+    debug.poll();
+    if (comptime builtin.mode == .debug) {
+        if (debug.any_on()) dbg_n = 0;
+    }
     shape_text(b, root, 0);
     try register_tree(eng, root, 0);
     eng.set_root(root.id);
     eng.compute(body.size);
     try draw_tree(b, eng, theme, root, 0, body.origin.x, body.origin.y, pc);
+    if (comptime builtin.mode == .debug) {
+        if (debug.any_on()) try debug_flush(b);
+    }
+}
+
+// Development-only: after the whole tree has drawn (so the overlay sits on top), emit the
+// box outlines + self-describing labels and/or dump the layout to the log.
+fn debug_flush(b: *RenderBuilder) RenderError!void {
+    const recs = dbg_buf[0..dbg_n];
+    if (debug.mode.dump) dump_layout(recs);
+    if (debug.mode.boxes) {
+        for (recs) |rc| {
+            var q = Quad.init(rc.x, rc.y, rc.w, rc.h);
+            _ = q.set_border_color(overlay_color(rc.depth)).set_border_width(1);
+            try b.append_quad(q);
+        }
+    }
+    if (debug.mode.labels) {
+        const sty = label.Style{ .font_size = 9, .weight = .medium, .color = Rgba.from_hex(0xffef5a) };
+        for (recs) |rc| {
+            if (rc.w < 22 or rc.h < 11) continue; // skip nodes too small to annotate legibly
+            var buf: [48]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d:.0},{d:.0} {d:.0}x{d:.0}", .{ rc.x, rc.y, rc.w, rc.h }) catch continue;
+            const m = label.measure(b, s, sty);
+            var bg = Quad.init(rc.x, rc.y, m.width + 4, sty.font_size + 4);
+            _ = bg.set_background(.{ .r = 0, .g = 0, .b = 0, .a = 0.72 });
+            b.append_quad(bg) catch {};
+            _ = label.render(b, rc.x + 2, rc.y + 1, s, sty) catch {};
+        }
+    }
+    dbg_n = 0;
+}
+
+fn overlay_color(depth: u16) Rgba {
+    return switch (depth % 5) {
+        0 => Rgba.from_hex(0xff3b30),
+        1 => Rgba.from_hex(0x34c759),
+        2 => Rgba.from_hex(0x0a84ff),
+        3 => Rgba.from_hex(0xff9f0a),
+        else => Rgba.from_hex(0xbf5af2),
+    };
+}
+
+fn dump_layout(recs: []const DbgRec) void {
+    const log = std.log.scoped(.zigui_dbg);
+    log.info("layout dump begin: {d} nodes", .{recs.len});
+    for (recs) |rc| {
+        var tb: [48]u8 = undefined;
+        const t = json_text(&tb, rc.text);
+        log.info("{{\"d\":{d},\"k\":\"{s}\",\"x\":{d:.0},\"y\":{d:.0},\"w\":{d:.0},\"h\":{d:.0},\"t\":\"{s}\"}}", .{
+            rc.depth, kind_name(rc.kind), rc.x, rc.y, rc.w, rc.h, t,
+        });
+    }
+    log.info("layout dump end", .{});
+}
+
+fn kind_name(k: u8) []const u8 {
+    return switch (@as(Kind, @enumFromInt(k))) {
+        .box => "box",
+        .text => "text",
+        .leaf => "leaf",
+    };
+}
+
+// Copy text into buf, capped and with JSON-breaking bytes neutralised, for the dump.
+fn json_text(buf: []u8, s: []const u8) []const u8 {
+    const n = @min(s.len, buf.len);
+    for (s[0..n], 0..) |c, i| {
+        buf[i] = switch (c) {
+            '"', '\\' => '\'',
+            '\n', '\r', '\t' => ' ',
+            else => c,
+        };
+    }
+    return buf[0..n];
 }
