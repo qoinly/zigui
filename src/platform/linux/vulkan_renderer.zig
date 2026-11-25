@@ -2023,10 +2023,13 @@ pub const Renderer = struct {
         if (self.blit_pipeline == vk.NULL_HANDLE) return false;
         if (!self.ensure_offscreen()) return false;
         const scale = self.applied_scale;
+        // Frosted glass blurs harder than a modal backdrop. The shader's tap radius is fixed,
+        // so the taps spread wider apart instead (linear filtering fills between them).
+        const spread: f32 = if (m.frosts.len > 0) FROST_SPREAD else 1;
         const push = BlurPush{
             .texel = .{
-                1.0 / @as(f32, @floatFromInt(self.extent.width)),
-                1.0 / @as(f32, @floatFromInt(self.extent.height)),
+                spread / @as(f32, @floatFromInt(self.extent.width)),
+                spread / @as(f32, @floatFromInt(self.extent.height)),
             },
             .sigma = @max(BLUR_SIGMA_PT * scale, 0.5),
         };
@@ -2090,6 +2093,7 @@ pub const Renderer = struct {
     // inset to where the corner arc is at its outer edge: the blur never leaks past the
     // curve, and the sliver it misses inside the curve is under the box's own fill.
     const FROST_BANDS = 6;
+    const FROST_SPREAD: f32 = 2;
 
     fn frost_region(self: *Renderer, cmd: *vk.CommandBuffer, fr: [6]f32, push: BlurPush) void {
         const s = self.applied_scale;
