@@ -88,6 +88,17 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFileCancel(
     picker.on_native_cancel();
 }
 
+// The create-document picker's onActivityResult forwards the save outcome here.
+export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnSave(
+    env: *anyopaque,
+    this: *anyopaque,
+    ok: u8,
+) callconv(.c) void {
+    _ = env;
+    _ = this;
+    picker.on_native_save(ok != 0);
+}
+
 // The BiometricPrompt callback forwards the terminal outcome (1 ok, 2 failed) here.
 fn on_biometric(env: *anyopaque, this: *anyopaque, result: i32) callconv(.c) void {
     _ = env;

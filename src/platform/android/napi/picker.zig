@@ -111,3 +111,55 @@ pub fn on_native_cancel() void {
     display_link.wake();
     background.nudge();
 }
+
+// --- save (ACTION_CREATE_DOCUMENT) ---------------------------------------------------
+// The app writes the bytes to its own temp file and hands the path here; ZiguiActivity
+// copies that file to the user-chosen location (a content:// the native side can't open),
+// then reports the outcome through on_native_save.
+var g_save_pending: bool = false;
+var g_save_done: bool = false;
+var g_save_ok: bool = false;
+
+// Launch the system create-document picker to save `src_path`'s contents under `name`.
+pub fn save_file(name: []const u8, src_path: []const u8) void {
+    const c = util.ctx() orelse return;
+    const env = c.env;
+    const t = env.*;
+    const jname = util.jstr(env, name) orelse return;
+    defer t.DeleteLocalRef(env, jname);
+    const jsrc = util.jstr(env, src_path) orelse return;
+    defer t.DeleteLocalRef(env, jsrc);
+    const act_cls = t.GetObjectClass(env, c.activity) orelse return;
+    defer t.DeleteLocalRef(env, act_cls);
+    const mid = t.GetMethodID(
+        env,
+        act_cls,
+        "startSaveDocument",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+    ) orelse return;
+    var args = [_]jni.jvalue{ .{ .l = jname }, .{ .l = jsrc } };
+    t.CallVoidMethodA(env, c.activity, mid, &args);
+    g_save_done = false;
+    g_save_ok = false;
+    g_save_pending = true;
+}
+
+pub fn save_pending() bool {
+    return g_save_pending;
+}
+
+// The outcome of the last save once it lands (null until then; true = written).
+pub fn save_result() ?bool {
+    if (!g_save_done) return null;
+    g_save_done = false;
+    return g_save_ok;
+}
+
+// onActivityResult forwards the save outcome here (written / cancelled / failed).
+pub fn on_native_save(ok: bool) void {
+    g_save_ok = ok;
+    g_save_done = true;
+    g_save_pending = false;
+    display_link.wake();
+    background.nudge();
+}

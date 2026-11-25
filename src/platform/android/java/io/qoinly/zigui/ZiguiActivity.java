@@ -29,8 +29,10 @@ import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 
 // zigui's shipped activity shell. A thin shim over NativeActivity: the superclass
@@ -148,10 +150,19 @@ public class ZiguiActivity extends NativeActivity {
     // native side can open, so import a private copy into cacheDir and hand native the
     // display name + that copy's absolute path. A dismiss or failure cancels the pick.
     private static final int FILE_REQUEST_CODE = 0x5A16;
+    private static final int SAVE_REQUEST_CODE = 0x5A17;
+    private String pendingSavePath;
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == SAVE_REQUEST_CODE) {
+            String src = pendingSavePath;
+            pendingSavePath = null;
+            Uri target = (res == RESULT_OK && data != null) ? data.getData() : null;
+            nativeOnSave(target != null && src != null && copyFileToUri(src, target));
+            return;
+        }
         if (req != FILE_REQUEST_CODE) {
             return;
         }
@@ -187,6 +198,41 @@ public class ZiguiActivity extends NativeActivity {
             // keep the fallback name
         }
         return name;
+    }
+
+    // native save_file calls here: stash the source file and launch the system
+    // create-document picker seeded with the suggested name. onActivityResult copies the
+    // file to the chosen location. Runs on the UI thread (the JNI call already is).
+    public void startSaveDocument(String name, String srcPath) {
+        pendingSavePath = srcPath;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/octet-stream");
+        i.putExtra(Intent.EXTRA_TITLE, name);
+        try {
+            startActivityForResult(i, SAVE_REQUEST_CODE);
+        } catch (Exception e) {
+            pendingSavePath = null;
+            nativeOnSave(false);
+        }
+    }
+
+    // Copy the app's temp export file to the chosen content URI; true on success.
+    private boolean copyFileToUri(String srcPath, Uri uri) {
+        try (InputStream is = new FileInputStream(srcPath);
+             OutputStream os = getContentResolver().openOutputStream(uri)) {
+            if (os == null) {
+                return false;
+            }
+            byte[] tmp = new byte[8192];
+            int n;
+            while ((n = is.read(tmp)) != -1) {
+                os.write(tmp, 0, n);
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // Copy the picked content into a readable cacheDir file; returns its absolute path,
@@ -484,6 +530,8 @@ public class ZiguiActivity extends NativeActivity {
     private native void nativeOnFile(String name, String path);
 
     private native void nativeOnFileCancel();
+
+    private native void nativeOnSave(boolean ok);
 
     private native void nativeOnBiometric(int result);
 
