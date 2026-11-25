@@ -547,6 +547,11 @@ pub fn dialog(o: kit_nodes.Dialog) *node.Node {
 // layer (crisp, over a frosted backdrop). Place it as the first child of a
 // facade-composed modal's root — right after the scrim — so an arbitrary card
 // renders above the body instead of being z-ordered behind deep body nodes.
+// Crossfade the region under it toward `color` (see kit_nodes.fade_veil). Put it last in a
+// `layers` stack over the content to fade.
+pub fn fade_veil(c: Rgba, amount: f32) *node.Node {
+    return kit_nodes.fade_veil(frame_ctx.get().arena, c, amount);
+}
 pub fn modal_backdrop() *node.Node {
     const fc = frame_ctx.get();
     return kit_nodes.modal_backdrop(fc.arena, fc.paint);

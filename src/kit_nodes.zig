@@ -1569,6 +1569,52 @@ const ModalBackdropSpec = struct {
     }
 };
 
+// Fades everything already drawn under its box toward `color` by `amount` (0 = untouched,
+// 1 = a solid fill). A plain translucent fill can't do this: quads draw before all glyphs,
+// so text would show through at full strength. This scales the earlier glyphs' alpha by
+// (1 - amount) and lays the fill over the earlier quads, so the whole region crossfades.
+// Color-emoji sprites carry no alpha, so they hide past the midpoint instead.
+const FadeVeilSpec = struct {
+    color: color.Rgba,
+    amount: f32,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        _ = ctx;
+        return SizeF.init(0, 0); // fills its slot
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *FadeVeilSpec = @ptrCast(@alignCast(ctx));
+        std.debug.assert(self.amount >= 0 and self.amount <= 1);
+        if (self.amount <= 0) return;
+        const keep = 1 - self.amount;
+        const x0 = r.origin.x;
+        const y0 = r.origin.y;
+        const x1 = x0 + r.size.width;
+        const y1 = y0 + r.size.height;
+        for (b.sprites.items) |*s| {
+            if (s.position[0] + s.size[0] > x0 and s.position[0] < x1 and
+                s.position[1] + s.size[1] > y0 and s.position[1] < y1) s.sprite_color[3] *= keep;
+        }
+        if (self.amount > 0.5) for (b.color_sprites.items) |*s| {
+            if (s.position[0] + s.size[0] > x0 and s.position[0] < x1 and
+                s.position[1] + s.size[1] > y0 and s.position[1] < y1) s.clip_bounds = .{ 0, 0, 0, 0 };
+        };
+        var c = self.color;
+        c.a *= self.amount;
+        var q = primitives.Quad.init(x0, y0, r.size.width, r.size.height);
+        _ = q.set_background(c);
+        try b.append_quad(q);
+    }
+};
+
+pub fn fade_veil(a: A, c: color.Rgba, amount: f32) *Node {
+    const spec = a.create(FadeVeilSpec) catch @panic("node arena oom");
+    spec.* = .{ .color = c, .amount = std.math.clamp(amount, 0, 1) };
+    const n = node.leaf(a, FadeVeilSpec.measure, FadeVeilSpec.draw, spec);
+    n.style.flex_grow = 1;
+    return n;
+}
+
 pub fn modal_backdrop(a: A, pc: ?*custom_paint.PaintContext) *Node {
     const spec = a.create(ModalBackdropSpec) catch @panic("node arena oom");
     spec.* = .{ .paint = pc };
