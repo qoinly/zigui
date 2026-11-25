@@ -173,6 +173,7 @@ pub const WinIconSystem = struct {
             .git_branch => "", // bundled Lucide
             .cloud => "\u{E753}", // Cloud
             .clock => "\u{E823}", // Recent (clock)
+            .menu => "\u{E700}", // GlobalNavigationButton
             .arrow_up_to_line => "\u{E898}", // Upload
         };
     }

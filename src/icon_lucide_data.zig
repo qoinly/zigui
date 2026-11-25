@@ -1261,6 +1261,15 @@ const clock = [_]Cmd{
     .{ .cubic = .{ 3.9059868, 5.1260767, 1.9999988, 8.427346, 2, 12.000003 } },
 };
 
+const menu = [_]Cmd{
+    .{ .move = .{ 4, 6 } },
+    .{ .line = .{ 20, 6 } },
+    .{ .move = .{ 4, 12 } },
+    .{ .line = .{ 20, 12 } },
+    .{ .move = .{ 4, 18 } },
+    .{ .line = .{ 20, 18 } },
+};
+
 pub fn for_icon(ic: Icon) ?[]const Cmd {
     return switch (ic) {
         .close => &x,
@@ -1355,6 +1364,7 @@ pub fn for_icon(ic: Icon) ?[]const Cmd {
         .git_branch => &@"git-branch",
         .cloud => &@"cloud",
         .clock => &clock,
+        .menu => &menu,
         .arrow_up_to_line => &@"arrow-up-to-line",
         else => null,
     };

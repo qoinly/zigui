@@ -138,6 +138,7 @@ pub const MacIconSystem = struct {
             .git_branch => "arrow.triangle.branch",
             .cloud => "cloud",
             .clock => "clock",
+            .menu => "line.3.horizontal",
             .arrow_up_to_line => "arrow.up.to.line",
         };
     }

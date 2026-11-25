@@ -136,6 +136,7 @@ pub const Icon = enum {
     git_branch,
     cloud,
     clock,
+    menu,
 };
 
 pub const IconParams = struct {
