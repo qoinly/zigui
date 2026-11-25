@@ -23,6 +23,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
@@ -52,6 +53,7 @@ public class ZiguiActivity extends NativeActivity {
         loadAppLibrary();
         super.onCreate(state);
         setupFoldListener();
+        setupImeInsetListener();
         edit = new EditText(this);
         edit.setFocusable(true);
         edit.setFocusableInTouchMode(true);
@@ -452,6 +454,26 @@ public class ZiguiActivity extends NativeActivity {
             } catch (Throwable t) {}
         }
     }
+
+    // Forward the soft-keyboard (IME) bottom inset to native whenever window insets change,
+    // so a scroll can keep the focused field above the keyboard. API 30+ (the ime() type);
+    // older devices simply never report it. The default inset handling is preserved.
+    private void setupImeInsetListener() {
+        if (Build.VERSION.SDK_INT < 30) {
+            return;
+        }
+        getWindow().getDecorView().setOnApplyWindowInsetsListener(
+            new View.OnApplyWindowInsetsListener() {
+                public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                    try {
+                        nativeOnImeInset(insets.getInsets(WindowInsets.Type.ime()).bottom);
+                    } catch (Throwable t) {}
+                    return v.onApplyWindowInsets(insets);
+                }
+            });
+    }
+
+    private native void nativeOnImeInset(int px);
 
     private native void nativeOnFold(int state);
 

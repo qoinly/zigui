@@ -172,6 +172,13 @@ pub fn safe_area_insets() @import("geometry.zig").Insets {
     return .{};
 }
 
+// The soft-keyboard inset in points (0 when hidden / not applicable), for keyboard-aware
+// scrolling. Only Android reports it today.
+pub fn keyboard_inset() f32 {
+    if (comptime builtin.abi.isAndroid()) return impl.keyboard_inset();
+    return 0;
+}
+
 // Caption slots indexed from the right edge (slot 0 = rightmost). Linux
 // follows the desktop's button-layout; Windows keeps its fixed trio.
 pub const CaptionSlots = struct { kinds: [3]CaptionButton, count: u8 };

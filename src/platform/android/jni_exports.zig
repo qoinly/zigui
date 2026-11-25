@@ -54,6 +54,18 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFile(
     picker.on_native_file(env, name, path);
 }
 
+// The window-insets listener forwards the soft-keyboard (IME) bottom inset in pixels here,
+// so a scroll can keep a focused field above the keyboard.
+export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnImeInset(
+    env: *anyopaque,
+    this: *anyopaque,
+    px: i32,
+) callconv(.c) void {
+    _ = env;
+    _ = this;
+    custom_shell.set_ime_inset(px);
+}
+
 // The window-layout extension forwards the fold state (FoldingFeature.STATE_*; 0 = none)
 // here, so a view can adapt to the fold posture.
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnFold(

@@ -173,6 +173,9 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             // frames (animate(), a focused editor) re-arms it during the build, so
             // an idle window stops driving its loop instead of spinning forever.
             pc.animating = false;
+            // The keyboard line (absolute Y) for keyboard-aware scrolling; huge when hidden.
+            const kbd = custom_shell.keyboard_inset();
+            pc.kbd_top_y = if (kbd > 0) raw.height - kbd else 1e9;
             var fc = frame_ctx.FrameCtx{
                 .arena = w.arena.allocator(),
                 .theme = &w.theme,

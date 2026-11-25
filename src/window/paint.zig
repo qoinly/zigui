@@ -215,6 +215,17 @@ pub const PaintContext = struct {
     // click outside the editor drops focus. Reset per frame like text_field_active.
     text_focus_ctx: ?*anyopaque = null,
     text_focus_blur: ?*const fn (*anyopaque) void = null,
+    // The focused native text field's laid-out rect + id + the time it was last shown,
+    // recorded by show_text_field, so a scroll can keep the focused field visible above the
+    // soft keyboard. kbd_scrolled_id marks the last field a scroll auto-adjusted for, so it
+    // nudges once per focus (not every frame, which would fight the user's own scrolling).
+    focused_field_rect: ?[4]f32 = null,
+    focused_field_id: u32 = 0,
+    focused_field_t: f64 = -1,
+    kbd_scrolled_id: u32 = 0,
+    // Absolute Y (points) where the soft keyboard starts; a huge value means no keyboard.
+    // A keyboard-aware scroll keeps the focused field above this line.
+    kbd_top_y: f32 = 1e9,
     // Back navigation: the navigator publishes its stack depth each frame so the
     // Android backend knows whether a Back press should pop (consume it) or
     // background the app (depth 1). back_pressed is set by that backend on a Back
@@ -499,7 +510,12 @@ pub const PaintContext = struct {
             numeric,
             id,
         );
-        if (shown) self.text_field_active = true;
+        if (shown) {
+            self.text_field_active = true;
+            self.focused_field_rect = .{ x, y, w, h };
+            self.focused_field_id = id;
+            self.focused_field_t = self.now_s;
+        }
         return shown;
     }
     pub fn text_field_value(self: *PaintContext, buf: []u8) []const u8 {

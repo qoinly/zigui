@@ -105,6 +105,17 @@ pub fn set_insets(insets: jni.Insets) void {
     g_insets_px = insets;
 }
 
+// The soft-keyboard (IME) bottom inset in pixels, pushed from Java's window-insets listener.
+var g_ime_px: i32 = 0;
+pub fn set_ime_inset(px: i32) void {
+    g_ime_px = px;
+}
+// The keyboard inset in points (0 when hidden), for keyboard-aware scrolling.
+pub fn keyboard_inset() f32 {
+    const scale: f32 = @floatFromInt(surface_scale());
+    return @as(f32, @floatFromInt(g_ime_px)) / scale;
+}
+
 pub fn safe_area_insets() geometry.Insets {
     const scale: f32 = @floatFromInt(surface_scale());
     std.debug.assert(scale >= 1);

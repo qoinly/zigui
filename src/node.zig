@@ -804,15 +804,43 @@ fn draw_scroll(
     std.debug.assert(vh >= 0);
     const content_h = eng.get_bounds(n.children[0].id).size.height;
     const max_y = @max(0, content_h - vh);
+    // When the soft keyboard covers the bottom of this viewport, allow scrolling the content
+    // up past it, so a focused field down there can be revealed (otherwise content that fits
+    // the full height but not the keyboard-reduced height would be unscrollable).
+    var eff_max_y = max_y;
+    if (pc) |p| {
+        const vb = view[1] + vh;
+        if (p.kbd_top_y < vb) {
+            const usable = @max(1, vh - (vb - p.kbd_top_y));
+            eff_max_y = @max(0, content_h - usable);
+        }
+    }
     st.viewport_h = vh;
     if (builtin.os.tag == .ios) {
-        if (pc) |p| scroll_step_ios(p, st, max_y, vh, view);
+        if (pc) |p| scroll_step_ios(p, st, eff_max_y, vh, view);
     } else {
         if (pc) |p| if (p.is_hovered(view[0], view[1], vw, vh)) {
             st.y -= p.wheel_dy;
         };
-        st.y = std.math.clamp(st.y, 0, max_y);
+        st.y = std.math.clamp(st.y, 0, eff_max_y);
     }
+    // Keyboard-aware scroll: when a text field is focused and the soft keyboard would cover
+    // it (its bottom is below the keyboard line), nudge this scroll so the field sits just
+    // above the keyboard - once per focus, so it never fights the user's own scrolling. The
+    // field rect is from the prior frame (show_text_field runs as a child), so it converges
+    // in a frame.
+    if (pc) |p| if (p.focused_field_rect) |fr| {
+        if (p.now_s - p.focused_field_t < 0.1 and p.focused_field_id != p.kbd_scrolled_id) {
+            const fcx = fr[0] + fr[2] * 0.5;
+            const field_bottom = fr[1] + fr[3];
+            const inside = fcx >= view[0] and fcx <= view[0] + vw and fr[1] >= view[1] - 1 and fr[1] <= view[1] + vh;
+            const margin: f32 = 14;
+            if (inside and field_bottom > p.kbd_top_y - margin and eff_max_y > 0) {
+                st.y = std.math.clamp(st.y + (field_bottom - (p.kbd_top_y - margin)), 0, eff_max_y);
+                p.kbd_scrolled_id = p.focused_field_id;
+            }
+        }
+    };
 
     const prim0 = b.prims.items.len;
     const spr0 = b.sprites.items.len;
