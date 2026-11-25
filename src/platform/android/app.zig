@@ -12,6 +12,7 @@ const native = @import("native.zig");
 const android_shell = @import("custom_shell.zig");
 const input = @import("input.zig");
 const jni = @import("jni.zig");
+const display_link = @import("display_link.zig");
 
 // The JNI symbols the shipped ZiguiActivity's native methods resolve against. They
 // live in the library; this reference (reached whenever an app pulls in App) keeps
@@ -95,6 +96,7 @@ pub export fn ANativeActivity_onCreate(
     activity.callbacks.onInputQueueDestroyed = on_input_queue_destroyed;
     activity.callbacks.onNativeWindowResized = on_window_resized;
     activity.callbacks.onContentRectChanged = on_content_rect_changed;
+    activity.callbacks.onWindowFocusChanged = on_window_focus_changed;
     g_activity = activity;
     jni.set_thread(activity.env, activity.clazz); // text/IME use JNI on this thread
     // Run the app's main() now: it calls App.init/run, which register the
@@ -175,6 +177,16 @@ fn on_window_resized(activity: *Activity, window: *Window) callconv(.c) void {
     _ = activity;
     _ = window;
     notify_resized();
+}
+
+// Regaining focus (e.g. returning from a document picker or another app) re-arms the
+// vsync chain: a frame posted before backgrounding is dropped while hidden, so without
+// this the loop stays stalled until the next input. Runs on the UI/render thread.
+fn on_window_focus_changed(activity: *Activity, has_focus: c_int) callconv(.c) void {
+    _ = activity;
+    if (has_focus == 0) return;
+    display_link.wake(); // re-arm the vsync chain if it stalled while hidden
+    notify_resized(); // mark the renderer dirty so the next tick actually redraws (not just ticks)
 }
 
 fn notify_resized() void {

@@ -72,6 +72,16 @@ pub const DisplayLink = struct {
     }
 };
 
+// Force one more frame callback. Main-thread only (the Choreographer runs on the same
+// thread as the JNI callbacks). A native result that lands app state off the render path
+// (e.g. a document-picker result on resume) calls this so the loop draws even if a frame
+// posted before backgrounding never fired, leaving the vsync chain stalled (posted stuck).
+pub fn wake() void {
+    if (!g_slot.running) return;
+    g_slot.posted = false;
+    post();
+}
+
 fn post() void {
     if (!g_slot.running or g_slot.posted) return;
     const chor = g_slot.chor orelse return;

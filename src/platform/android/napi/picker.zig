@@ -8,6 +8,7 @@
 const jni = @import("../jni.zig");
 const util = @import("util.zig");
 const background = @import("../../../background.zig");
+const display_link = @import("../display_link.zig");
 const PickedFile = @import("../../../napi/picker_types.zig").PickedFile;
 
 const JNIEnv = util.JNIEnv;
@@ -99,6 +100,7 @@ pub fn on_native_file(env_ptr: *anyopaque, name: ?*anyopaque, path: ?*anyopaque)
     g_path_len = util.read_jstr(env, path, &g_path).len;
     g_valid = true;
     g_pending = false;
+    display_link.wake(); // un-stall the vsync chain so a frame lands this result on resume
     background.nudge();
 }
 
@@ -106,5 +108,6 @@ pub fn on_native_file(env_ptr: *anyopaque, name: ?*anyopaque, path: ?*anyopaque)
 // so the spinner stops, and wake the loop so the change shows.
 pub fn on_native_cancel() void {
     g_pending = false;
+    display_link.wake();
     background.nudge();
 }
