@@ -88,6 +88,10 @@ pub fn render(
                 .on_click = opts.on_click,
                 .ctx = opts.ctx,
             });
+        } else {
+            // A disabled button still owns its area: the click stops here instead of
+            // falling through to a clickable box behind it.
+            try p.add_hitbox(.{ .x = x, .y = y, .w = w, .h = h });
         }
     }
     if (inert) {

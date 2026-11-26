@@ -56,6 +56,9 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, opts: CheckboxOptions) RenderEr
             .on_click = opts.on_toggle,
             .ctx = opts.ctx,
         });
+    } else if (opts.paint) |p| {
+        // Disabled still owns its area, so the click does not reach a box behind it.
+        try p.add_hitbox(.{ .x = x, .y = y, .w = sz.width, .h = BOX });
     }
 
     const a: f32 = if (opts.disabled) tr.DISABLED_ALPHA else 1;

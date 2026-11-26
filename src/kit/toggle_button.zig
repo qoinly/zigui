@@ -90,6 +90,9 @@ pub fn render(
                 .on_click = opts.on_toggle,
                 .ctx = opts.ctx,
             });
+        } else {
+            // Disabled still owns its area, so the click does not reach a box behind it.
+            try p.add_hitbox(.{ .x = x, .y = y, .w = w, .h = h });
         }
     }
     const a: f32 = if (opts.disabled) tr.DISABLED_ALPHA else 1;
