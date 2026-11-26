@@ -180,6 +180,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             // frames (animate(), a focused editor) re-arms it during the build, so
             // an idle window stops driving its loop instead of spinning forever.
             pc.animating = false;
+            pc.body_to_bottom = false;
             // The keyboard line (absolute Y) for keyboard-aware scrolling; huge when hidden.
             const kbd = custom_shell.keyboard_inset();
             pc.kbd_top_y = if (kbd > 0) raw.height - kbd else 1e9;
@@ -228,6 +229,8 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             // other platforms keep the body carved to the safe area.
             const body_bounds = if (builtin.os.tag == .ios)
                 geometry.BoundsF{ .origin = .{ .x = 0, .y = 0 }, .size = f.size }
+            else if (pc.body_to_bottom)
+                geometry.BoundsF{ .origin = raw.body.origin, .size = .{ .width = raw.body.size.width, .height = f.size.height - raw.body.origin.y } }
             else
                 raw.body;
             try node.render_at(&w.eng, &builder, &w.theme, body_root, body_bounds, pc);

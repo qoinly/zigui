@@ -85,6 +85,11 @@ pub const ScrollBar = node.ScrollBar;
 pub fn animate() void {
     frame_ctx.get().paint.animating = true;
 }
+// Edge-to-edge at the bottom for this frame: the body runs under the navigation bar while
+// f.body stays the safe rect, so the view pads its controls by the difference itself.
+pub fn extend_body_to_bottom() void {
+    frame_ctx.get().paint.body_to_bottom = true;
+}
 // Schedule a single redraw ~seconds from now instead of animating every vsync.
 // Re-arm each frame for a slow periodic refresh (a clock, a resource meter) at a
 // fraction of the CPU a continuous animate() costs.

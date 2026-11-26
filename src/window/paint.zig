@@ -186,6 +186,9 @@ pub const PaintContext = struct {
     // (drives time-based animation; drawFrame otherwise clears dirty and the
     // loop idles until the next input event).
     animating: bool = false,
+    // Set by the consumer each frame: lay the body out to the surface's bottom edge, under
+    // the system navigation bar, instead of stopping at the safe area.
+    body_to_bottom: bool = false,
     // Monotonic seconds since init, for frame-rate-independent time-based
     // animation (e.g. a caret blink).
     now_s: f64 = 0,
