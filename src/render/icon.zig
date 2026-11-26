@@ -17,6 +17,7 @@ pub const Style = struct {
     scale: IconScale = .medium,
     color: color.Rgba = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
     source: ?IconSource = null, // null = the engine default source (see set_source)
+    filled: bool = false,
 };
 
 pub const Size = struct { width: f32, height: f32 };
@@ -33,6 +34,7 @@ pub fn render_icon(b: *RenderBuilder, x: f32, y: f32, ic: Icon, style: Style) Re
         .weight = style.weight,
         .scale = style.scale,
         .scale_factor = b.scale_factor,
+        .filled = style.filled,
     };
     const sprite = icons.sprite_icon(ic, source, params, x, y, style.color) orelse return null;
     try b.sprites.append(b.allocator, sprite);

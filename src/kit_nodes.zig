@@ -383,6 +383,7 @@ pub const IconOpts = struct {
     size: f32 = 16,
     color: Rgba = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
     source: ?icon_render.IconSource = null,
+    filled: bool = false, // a solid mark, e.g. the selected tab (bundled set)
 };
 
 const IconSpec = struct {
@@ -404,6 +405,7 @@ const IconSpec = struct {
             .point_size = self.opts.size,
             .color = self.opts.color,
             .source = self.opts.source,
+            .filled = self.opts.filled,
         };
         const o = r.origin;
         const s = r.size;

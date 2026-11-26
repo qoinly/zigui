@@ -24,7 +24,7 @@ pub const Cmd = union(enum) {
     close,
 };
 
-const Seg = struct { ax: f32, ay: f32, bx: f32, by: f32 };
+const Seg = struct { ax: f32, ay: f32, bx: f32, by: f32, closed: bool = false };
 
 const SegList = std.ArrayListUnmanaged(Seg);
 
@@ -48,8 +48,11 @@ fn flatten(cmds: []const Cmd, alloc: Allocator, segs: *SegList) !void {
     var start_y: f32 = 0;
     var cur_x: f32 = 0;
     var cur_y: f32 = 0;
+    var sub: usize = 0; // first segment of the current subpath
     for (cmds) |cmd| switch (cmd) {
         .move => |p| {
+            try mark_closed(alloc, segs, sub, cur_x, cur_y, start_x, start_y);
+            sub = segs.items.len;
             start_x = p[0];
             start_y = p[1];
             cur_x = p[0];
@@ -88,6 +91,30 @@ fn flatten(cmds: []const Cmd, alloc: Allocator, segs: *SegList) !void {
             cur_y = start_y;
         },
     };
+    try mark_closed(alloc, segs, sub, cur_x, cur_y, start_x, start_y);
+}
+
+// A subpath that ends where it began encloses an area (Lucide draws circles that way, with
+// no explicit close); only those take part in a fill. Such an end lands a hair off its
+// start, so a closing chord seals the gap the fill's crossing test would leak through.
+fn mark_closed(alloc: Allocator, segs: *SegList, sub: usize, end_x: f32, end_y: f32, start_x: f32, start_y: f32) !void {
+    if (segs.items.len - sub < 2) return;
+    if (@abs(end_x - start_x) > 0.05 or @abs(end_y - start_y) > 0.05) return;
+    if (end_x != start_x or end_y != start_y)
+        try segs.append(alloc, .{ .ax = end_x, .ay = end_y, .bx = start_x, .by = start_y });
+    for (segs.items[sub..]) |*s| s.closed = true;
+}
+
+// Even-odd: a hole drawn inside a shape (the gear's hub) stays open.
+fn inside(px: f32, py: f32, segs: []const Seg) bool {
+    var in = false;
+    for (segs) |s| {
+        if (!s.closed) continue;
+        if ((s.ay > py) == (s.by > py)) continue;
+        const x = s.ax + (py - s.ay) * (s.bx - s.ax) / (s.by - s.ay);
+        if (px < x) in = !in;
+    }
+    return in;
 }
 
 // Coords are in the 24-unit viewBox; everything scales by px/24. The buffer is
@@ -98,6 +125,7 @@ fn raster(
     allocator: Allocator,
     cmds: []const Cmd,
     px: u32,
+    filled: bool,
 ) ?GlyphBitmap {
     std.debug.assert(px > 0);
     std.debug.assert(px <= 1024); // caller clamps point_size * scale
@@ -120,13 +148,21 @@ fn raster(
         while (x < px) : (x += 1) {
             const fx = (@as(f32, @floatFromInt(x)) + 0.5) / scale;
             const fy = (@as(f32, @floatFromInt(y)) + 0.5) / scale;
-            var d: f32 = 1e9;
+            var d_closed: f32 = 1e9;
+            var d_open: f32 = 1e9;
             for (segs.items) |s| {
                 const dd = dist_to_seg(fx, fy, s) * scale; // distance in pixels
-                if (dd < d) d = dd;
+                if (s.closed) d_closed = @min(d_closed, dd) else d_open = @min(d_open, dd);
             }
             // coverage: 1 inside the stroke, smooth to 0 across the AA band.
-            const cov = std.math.clamp((half + aa - d) / (2 * aa), 0, 1);
+            const c_closed = std.math.clamp((half + aa - d_closed) / (2 * aa), 0, 1);
+            const c_open = std.math.clamp((half + aa - d_open) / (2 * aa), 0, 1);
+            // Filled: the enclosed area is solid and open strokes inside it (a clock's hands)
+            // are cut out of it, so the mark still reads.
+            const cov = if (filled and inside(fx, fy, segs.items))
+                1 - c_open
+            else
+                @max(c_closed, c_open);
             buf.items[@as(usize, y) * px + x] = @intFromFloat(cov * 255.0 + 0.5);
         }
     }
@@ -156,7 +192,7 @@ pub const BundledIcons = struct {
     fn rasterize_cmds(self: *BundledIcons, cmds: []const Cmd, params: IconParams) ?GlyphBitmap {
         const px_f = @ceil(params.point_size * params.scale_factor);
         if (px_f <= 0 or px_f > 1024) return null;
-        return raster(&self.buf, &self.segs, self.allocator, cmds, @intFromFloat(px_f));
+        return raster(&self.buf, &self.segs, self.allocator, cmds, @intFromFloat(px_f), params.filled);
     }
 };
 

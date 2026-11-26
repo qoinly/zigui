@@ -145,6 +145,7 @@ pub const IconParams = struct {
     weight: IconWeight = .regular,
     scale: IconScale = .medium,
     scale_factor: f32 = 2.0,
+    filled: bool = false, // bundled only: the enclosed shape solid (native sets have *_fill members)
 };
 
 const IconKey = struct {
@@ -279,6 +280,7 @@ pub const IconSystem = struct {
         var h = std.hash.Wyhash.init(2);
         h.update(std.mem.asBytes(&e));
         h.update(std.mem.asBytes(&px));
+        h.update(std.mem.asBytes(&params.filled));
         const key = h.final();
         if (self.atlas.get(key)) |t| return t;
         const bmp = self.bundled.rasterize_icon(ic, params);
