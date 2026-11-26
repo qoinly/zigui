@@ -690,7 +690,9 @@ fn draw_tree(
         const prim0 = b.prims.items.len;
         const spr0 = b.sprites.items.len;
         const cspr0 = b.color_sprites.items.len;
+        const prev_clip = if (pc) |p| p.push_hit_clip(view) else null;
         for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy, pc);
+        if (pc) |p| p.pop_hit_clip(prev_clip);
         for (b.prims.items[prim0..]) |*p| switch (p.*) {
             inline else => |*v| {
                 v.clip_bounds = clip_isect(v.clip_bounds, view);
@@ -937,7 +939,9 @@ fn draw_scroll(
     const prim0 = b.prims.items.len;
     const spr0 = b.sprites.items.len;
     const cspr0 = b.color_sprites.items.len;
+    const prev_clip = if (pc) |p| p.push_hit_clip(view) else null;
     for (n.children) |child| try draw_tree(b, eng, theme, child, depth + 1, ox, oy - st.y, pc);
+    if (pc) |p| p.pop_hit_clip(prev_clip);
     for (b.prims.items[prim0..]) |*p| switch (p.*) {
         inline else => |*v| {
             v.clip_bounds = clip_isect(v.clip_bounds, view);

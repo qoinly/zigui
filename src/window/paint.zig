@@ -146,6 +146,8 @@ pub const PaintContext = struct {
     // The topmost hovered box's stable id, refreshed each frame from the hitboxes.
     // A view reads it (via the frame) to reveal-on-hover.
     hovered_id: []const u8 = "",
+    // The visible rect of the scroll or clip box being drawn; hitboxes are cut to it.
+    hit_clip: ?[4]f32 = null,
     // hovered_id is read by the next frame, after the arena that held the node's
     // hover_id has been reset, so it points into this copy instead.
     hovered_buf: [128]u8 = undefined,
@@ -354,7 +356,40 @@ pub const PaintContext = struct {
     }
 
     pub fn add_hitbox(self: *PaintContext, hb: HitBox) !void {
-        try self.hitboxes.append(self.allocator, hb);
+        var h = hb;
+        // Inside a scroll viewport or a clip box, only the visible part takes input.
+        if (self.hit_clip) |c| {
+            const x0 = @max(h.x, c[0]);
+            const y0 = @max(h.y, c[1]);
+            const x1 = @min(h.x + h.w, c[0] + c[2]);
+            const y1 = @min(h.y + h.h, c[1] + c[3]);
+            if (x1 <= x0 or y1 <= y0) return;
+            h.x = x0;
+            h.y = y0;
+            h.w = x1 - x0;
+            h.h = y1 - y0;
+        }
+        try self.hitboxes.append(self.allocator, h);
+    }
+
+    // Narrow the clip that add_hitbox applies, for the children of a scroll or clip box.
+    // Returns the previous clip, to hand back to pop_hit_clip once the children are drawn.
+    pub fn push_hit_clip(self: *PaintContext, r: [4]f32) ?[4]f32 {
+        const prev = self.hit_clip;
+        var c = r;
+        if (prev) |p| {
+            const x0 = @max(c[0], p[0]);
+            const y0 = @max(c[1], p[1]);
+            const x1 = @min(c[0] + c[2], p[0] + p[2]);
+            const y1 = @min(c[1] + c[3], p[1] + p[3]);
+            c = .{ x0, y0, @max(0, x1 - x0), @max(0, y1 - y0) };
+        }
+        self.hit_clip = c;
+        return prev;
+    }
+
+    pub fn pop_hit_clip(self: *PaintContext, prev: ?[4]f32) void {
+        self.hit_clip = prev;
     }
 
     pub fn is_hovered(self: *const PaintContext, x: f32, y: f32, w: f32, h: f32) bool {
@@ -824,6 +859,7 @@ pub const PaintContext = struct {
         self.sprites.clearRetainingCapacity();
         self.color_sprites.clearRetainingCapacity();
         self.hitboxes.clearRetainingCapacity();
+        self.hit_clip = null;
 
         const tbar = self.handle.titlebar;
         // Fullscreen hides the window chrome, so drop our custom band too and let the
