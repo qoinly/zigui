@@ -389,6 +389,11 @@ zigui.menu_overlay(.{ .trigger = &app.rect, ... })
 
 `dialog` and `sheet` cover the whole region (modal), so they take no `trigger`.
 
+The overlay region is the whole window, title band included, so its top left is
+the window's top left. `rect_out` is written in the same window coordinates, so
+pass it to an overlay as it is. A box you center yourself in the overlay is
+centered in the whole window, not in the body below the band.
+
 ### Dismiss
 
 Overlays close on an outside click via `on_dismiss` (`dialog`, `menu`,
@@ -580,12 +585,58 @@ zigui.popover_overlay(.{
 
 ### modal_backdrop
 
-`zigui.modal_backdrop()` is a zero-size marker node. Drop it as the first child of
-a modal you compose yourself - a `col` card in the overlay region, placed after
-your own scrim - to lift every sibling drawn after it onto the modal top layer,
-crisp over a frosted backdrop (the same layer the built-in `dialog` / `sheet`
-use). You only need it when hand-composing a modal; the facade overlays lift
-themselves.
+`zigui.modal_backdrop()` is a zero-size marker node. Everything drawn after it
+goes onto the modal top layer, crisp over a frosted copy of the page (the same
+layer the built-in `dialog` and `sheet` use). You only need it when you build a
+modal yourself; the built-in overlays do this for you.
+
+Put it right before your card, not inside it. Inside the card, the card's own
+fill is drawn first and stays below the frost, so the page shows through it.
+
+### A modal of your own
+
+`dialog` takes a title, a message, and buttons, with no room for an input. For a
+form in a modal, build it in the overlay view:
+
+```zig
+fn overlay(f: *zigui.Frame, app: *App) ?*zigui.Node {
+    if (!app.open) return null;
+    const t = f.theme;
+    var scrim = zigui.Rgba.from_hex(0x000000);
+    scrim.a = 0.55;
+    return zigui.layers(&.{
+        // The scrim fills the window and takes every click outside the card.
+        zigui.col(.{ .grow = 1, .bg = scrim, .on_click = zigui.on(App, close) }, &.{}),
+        zigui.col(.{ .grow = 1, .justify = .center, .cross = .center }, &.{
+            zigui.modal_backdrop(),
+            zigui.col(.{
+                .width = 420,
+                .pad = .lg,
+                .gap = .md,
+                .radius = 12,
+                .bg = zigui.mix(t.background, t.foreground, 0.04),
+                .border = t.border,
+                // A click inside the card must not count as a click on the scrim.
+                .on_click = zigui.on(App, keep_open),
+            }, &.{
+                zigui.text("New ticket", .{ .size = 18, .weight = .semi_bold }),
+                zigui.text_input(&app.title, .{ .id = 1, .focused = app.title_focused, .on_focus = zigui.on(App, focus_title) }),
+                zigui.button("Create", .{ .fill = true, .on_click = zigui.on(App, create) }),
+            }),
+        }),
+    });
+}
+
+fn keep_open(_: *App) void {}
+```
+
+While the overlay returns a node, the body does not take clicks, scrolling, or
+hover, so nothing behind the modal reacts. Close it on Escape by checking
+`zigui.text_field_special()` (when the input has focus) or `zigui.key_presses()`
+(when it does not) in a view.
+
+The card uses a mixed shade rather than `t.card`, because the default themes make
+`card` the same color as the page. See [Theming](../theming.md#defaults).
 
 ## See also
 
