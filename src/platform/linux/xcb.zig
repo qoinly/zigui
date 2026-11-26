@@ -235,6 +235,7 @@ pub const MAPPING_NOTIFY: u8 = 34;
 pub const GE_GENERIC: u8 = 35;
 
 pub const ATOM_ATOM: u32 = 4;
+pub const ATOM_CARDINAL: u32 = 6;
 pub const ATOM_STRING: u32 = 31;
 pub const ATOM_WM_NAME: u32 = 39;
 pub const ATOM_WM_NORMAL_HINTS: u32 = 40; // predefined; carries WM_SIZE_HINTS

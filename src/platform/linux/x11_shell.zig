@@ -103,6 +103,8 @@ var g_cursor_window: u32 = 0;
 var g_atom_protocols: u32 = 0;
 var g_atom_delete_window: u32 = 0;
 var g_atom_net_wm_name: u32 = 0;
+var g_atom_net_wm_pid: u32 = 0;
+var g_atom_client_machine: u32 = 0;
 var g_atom_utf8_string: u32 = 0;
 var g_atom_motif_hints: u32 = 0;
 var g_atom_moveresize: u32 = 0;
@@ -276,6 +278,7 @@ pub fn open(opts: types.NativeShellOptions) Error!CustomShellHandle {
     apply_motif_undecorated(win.window);
     apply_title(win.window, opts.title);
     apply_delete_protocol(win.window);
+    apply_owner(win.window);
     apply_xdnd_aware(win.window);
     apply_size_hints(
         win.window,
@@ -338,6 +341,8 @@ fn intern_atoms() void {
     g_atom_protocols = xcb.intern_atom("WM_PROTOCOLS");
     g_atom_delete_window = xcb.intern_atom("WM_DELETE_WINDOW");
     g_atom_net_wm_name = xcb.intern_atom("_NET_WM_NAME");
+    g_atom_net_wm_pid = xcb.intern_atom("_NET_WM_PID");
+    g_atom_client_machine = xcb.intern_atom("WM_CLIENT_MACHINE");
     g_atom_utf8_string = xcb.intern_atom("UTF8_STRING");
     g_atom_motif_hints = xcb.intern_atom("_MOTIF_WM_HINTS");
     g_atom_moveresize = xcb.intern_atom("_NET_WM_MOVERESIZE");
@@ -398,6 +403,18 @@ fn apply_title(window: u32, title: []const u8) void {
     if (g_atom_net_wm_name != 0 and g_atom_utf8_string != 0) {
         xcb.change_property(window, g_atom_net_wm_name, g_atom_utf8_string, 8, len, title.ptr);
     }
+}
+
+// _NET_WM_PID with WM_CLIENT_MACHINE, as EWMH asks, so tools and the window manager can
+// tell which process owns the window.
+fn apply_owner(window: u32) void {
+    if (g_atom_net_wm_pid == 0 or g_atom_client_machine == 0) return;
+    var host: [256]u8 = undefined;
+    if (std.c.gethostname(&host, host.len) != 0) return;
+    const host_len: u32 = @intCast(std.mem.indexOfScalar(u8, &host, 0) orelse host.len);
+    const pid: u32 = @intCast(std.c.getpid());
+    xcb.change_property(window, g_atom_client_machine, xcb.ATOM_STRING, 8, host_len, &host);
+    xcb.change_property(window, g_atom_net_wm_pid, xcb.ATOM_CARDINAL, 32, 1, &pid);
 }
 
 fn apply_delete_protocol(window: u32) void {
