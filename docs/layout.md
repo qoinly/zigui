@@ -141,6 +141,22 @@ zigui.col(.{ .width = 34, .height = 34, .shrink = 0 }, &.{zigui.layers(&.{
 })})
 ```
 
+There is no absolute positioning, and no negative margin. To let something hang
+over an edge, such as a badge on the rim of a round button, make the layers box
+larger than the thing it decorates and pad that thing back to its size. The badge
+then sits in the outer box's corner, partly outside the button:
+
+```zig
+const out = 4; // how far the badge may reach past the button
+zigui.col(.{ .width = 34 + 2 * out, .height = 34 + 2 * out, .shrink = 0 }, &.{zigui.layers(&.{
+    zigui.col(.{ .pad = .{ .px = out } }, &.{button_disc}), // the 34x34 button
+    zigui.row(.{ .justify = .flex_end }, &.{badge}),           // top right of the outer box
+})})
+```
+
+Keep the outer box centered where the button should be, so the extra room is
+spread evenly around it.
+
 ```zig
 zigui.layers(&.{ base, floating_overlay })
 ```
@@ -190,6 +206,9 @@ The engine follows CSS flexbox, including the parts of it that surprise people.
   content width. For an exact split, give both `basis = 0`.
 - **A fixed header shrinks above a long list.** In a column, set `shrink = 0`
   on the header so the list takes the overflow instead.
+- **A kit component does not fill its cell.** `button`, `badge`, and the other
+  components keep their natural size, so `grow` and `basis = 0` on the cell around
+  them change the cell, not the component. See [Kit](kit/overview.md#size).
 
 ## Grids
 

@@ -16,9 +16,9 @@ A file for [guiding coding agents](https://agents.md/).
   `zigui create`, checks the Android + iOS toolchains with `zigui doctor`; see
   `docs/cli.md`)
 - **Regenerate icons:** `zig build icongen -Dlucide-dir=<path to the Lucide icons>`
-  — only when changing the icon set; it rewrites `src/icon_lucide_data.zig`.
+  Only needed when changing the icon set; it rewrites `src/icon_lucide_data.zig`.
 - **Recompile Linux shaders:** `zig build shadergen` (needs `glslang` on PATH)
-  — only when changing `src/platform/linux/shaders/*`; it rewrites the `.spv`.
+  Only needed when changing `src/platform/linux/shaders/*`; it rewrites the `.spv`.
 
 ## Writing UI with zigui
 
@@ -34,7 +34,8 @@ are covered there:
 
 To check a layout, use the debug overlay and the layout dump in
 `docs/debugging.md`. A dump gives every node's position and size in points, which
-is more reliable than measuring a screenshot.
+is more reliable than measuring a screenshot. To keep a layout from regressing,
+write a unit test with `zigui.testing.Layout`, described on the same page.
 
 ## Directory Structure
 

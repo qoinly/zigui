@@ -123,3 +123,22 @@ test "a layers box is as wide as its widest child" {
     try expectEqual(@as(f32, 34), disc.w);
     try expectEqual(@as(f32, 5), disc.x);
 }
+
+test "a badge hangs over the rim when the layers box is padded out (docs/layout.md)" {
+    var t = Layout.init(std.testing.allocator, 200, 200);
+    defer t.deinit();
+    t.begin(null);
+    const out = 4;
+    const root = zigui.col(.{ .width = 34 + 2 * out, .height = 34 + 2 * out, .shrink = 0 }, &.{zigui.layers(&.{
+        zigui.col(.{ .pad = .{ .px = out } }, &.{zigui.col(.{ .name = "disc", .width = 34, .height = 34 }, &.{})}),
+        zigui.row(.{ .justify = .flex_end }, &.{zigui.col(.{ .name = "badge", .width = 14, .height = 14 }, &.{})}),
+    })});
+    try t.layout(root);
+    const disc = try t.get("disc");
+    const badge = try t.get("badge");
+    try expectEqual(@as(f32, 4), disc.x);
+    try expectEqual(@as(f32, 4), disc.y);
+    // The badge's right edge is 4 past the disc's, and its top is 4 above it.
+    try expectEqual(disc.x + disc.w + out, badge.x + badge.w);
+    try expectEqual(disc.y - out, badge.y);
+}

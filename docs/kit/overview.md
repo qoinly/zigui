@@ -15,6 +15,15 @@ zigui.checkbox(app.agreed, "Agree", .{ .on_change = zigui.on(App, toggle_agree) 
 
 No allocator, no theme, no context to pass - the frame supplies them.
 
+## Size
+
+A component is as big as its content: a badge fits its text, a button fits its
+label. Flex settings on the parent do not change that. A component in a column
+does not stretch with `cross = .stretch`, and a component in a `grow` cell stays
+at its natural width while the cell grows around it. To make one wider, use its
+own option where it has one (`button` takes `fill = true`), or build the shape
+from a `col` with a `bg`, `radius`, and `on_click`.
+
 ## Callbacks
 
 Interactive options take a callback that receives your app state - the same value

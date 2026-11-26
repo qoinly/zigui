@@ -27,8 +27,20 @@ fn button(label: []const u8, o: ButtonOpts) *Node
 | `icon` | `?Icon` | `null` | Leading glyph. Sole content under `.size = .icon`. |
 | `loading` | `bool` | `false` | Swaps a spinner in for the glyph and goes inert (no click). |
 | `spin_phase` | `f32` | `0` | Caller-owned spinner rotation in cycles. The widget reads it, never advances it - see Loading. |
-| `on_click` | `?ClickFn` | `null` | Fires on release. Wrap with `zigui.on`. |
+| `on_click` | `?ClickFn` | `null` | Fires on press with a mouse, on release for a touch tap. Wrap with `zigui.on`. |
+| `ctx` | `?*anyopaque` | `null` | Passed to `on_click`. Null means your run state. See [A context per item](../app-window.md#a-context-per-item). |
 | `rect_out` | `?*[4]f32` | `null` | Laid-out `{x, y, w, h}` written at draw, to anchor an overlay to the button. |
+| `fill` | `bool` | `false` | Take the width the parent gives instead of the label's width. The label stays centered. |
+
+A button is as wide as its label unless you set `fill`. With `fill`, it stretches
+across a column, or fills a cell you size yourself. Two equal buttons in a row:
+
+```zig
+zigui.row(.{ .gap = .md }, &.{
+    zigui.col(.{ .grow = 1, .basis = 0 }, &.{zigui.button("Cancel", .{ .fill = true, .variant = .outline })}),
+    zigui.col(.{ .grow = 1, .basis = 0 }, &.{zigui.button("Save", .{ .fill = true })}),
+})
+```
 
 ### Variant
 

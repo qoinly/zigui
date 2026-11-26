@@ -29,7 +29,8 @@ The value is a list of words:
 | `boxes` | outline every node, colored by depth |
 | `labels` | print each node's `x,y wxh` on it, and its name if it has one |
 | `dump` | write the layout of the next frame to the log, once |
-| `all` | all three |
+| `input` | write it again after every click and key press |
+| `all` | `boxes`, `labels`, and `dump` |
 | `off` | turn everything off |
 
 On Android the property is read every frame, so the overlay appears on the next
@@ -80,6 +81,15 @@ grep zigui_dbg layout.txt
 A dump fires once each time the value changes. To take another one, set the
 value to something else first, as the `off` line above does.
 
+On desktop the value comes from the environment, so it never changes while the
+app runs. Add `input` to get a fresh dump after each click or key press. That
+lets you click a control, for example with a synthetic click, and then read the
+layout it led to:
+
+```sh
+ZIGUI_DEBUG="dump input" ./zig-out/bin/app 2> layout.txt
+```
+
 ## Naming nodes
 
 Most boxes in a dump look alike. Give the ones you care about a `name` so you
@@ -105,6 +115,39 @@ Questions like these are faster to answer from a dump than from a screenshot:
 A dump shows where a box is, not what it looks like. Colors, corner radius, and
 whether text is clipped still need a screenshot, and so does the ink of a glyph,
 which sits slightly inside its text box.
+
+## Testing layout without a window
+
+`zigui.testing.Layout` lays out a tree inside a unit test, with no window, GPU,
+or fonts. Build the tree with the normal builders between `begin` and `layout`,
+then look the boxes up by name:
+
+```zig
+const zigui = @import("zigui");
+
+test "the two actions split the row" {
+    var t = zigui.testing.Layout.init(std.testing.allocator, 400, 100);
+    defer t.deinit();
+    t.begin(null); // or a pointer to your state, if the view needs it
+    const root = zigui.row(.{ .gap = .{ .px = 10 } }, &.{
+        zigui.col(.{ .name = "cancel", .grow = 1, .basis = 0 }, &.{}),
+        zigui.col(.{ .name = "save", .grow = 1, .basis = 0 }, &.{}),
+    });
+    try t.layout(root);
+    try std.testing.expectEqual((try t.get("cancel")).w, (try t.get("save")).w);
+}
+```
+
+`get` fails the test with the missing name when no node has it. `find` returns
+null instead. Every node is also in `t.rects`, in draw order.
+
+What it does not do:
+
+- Text is measured with a fixed width per character, not a real font. Boxes
+  around text get a plausible size, so test the boxes, not the exact text width.
+- Kit components are not measured. They only take the size the layout gives
+  them, so put your assertions on the boxes around them.
+- Scroll offsets are ignored. Positions are where nodes sit before scrolling.
 
 ## Limits
 
