@@ -128,7 +128,7 @@ pub fn button(label: []const u8, o: kit_nodes.Btn) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.button(fc.arena, fc.theme, label, oo);
 }
 
@@ -316,21 +316,21 @@ pub fn checkbox(checked: bool, label: []const u8, w: kit_nodes.Wire) *node.Node 
     const fc = frame_ctx.get();
     var ww = w;
     ww.paint = fc.paint;
-    ww.ctx = fc.state;
+    ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.checkbox(fc.arena, fc.theme, checked, label, ww);
 }
 pub fn radio(selected: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;
     ww.paint = fc.paint;
-    ww.ctx = fc.state;
+    ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.radio(fc.arena, fc.theme, selected, label, ww);
 }
 pub fn toggle(on_: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     const fc = frame_ctx.get();
     var ww = w;
     ww.paint = fc.paint;
-    ww.ctx = fc.state;
+    ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.toggle(fc.arena, fc.theme, on_, label, ww);
 }
 pub fn kbd(keys: []const []const u8) *node.Node {
@@ -346,7 +346,7 @@ pub fn toggle_button(label: []const u8, o: kit_nodes.ToggleBtn) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.toggle_button(fc.arena, fc.theme, label, oo);
 }
 pub fn icon(ic: @import("icon.zig").Icon, opts: kit_nodes.IconOpts) *node.Node {
@@ -384,7 +384,7 @@ pub fn input(
     const fc = frame_ctx.get();
     var ww = w;
     ww.paint = fc.paint;
-    ww.ctx = fc.state;
+    ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.input(fc.arena, fc.theme, value, placeholder, size, ww);
 }
 pub const TextField = kit_nodes.TextField;
@@ -404,7 +404,7 @@ pub fn text_editable(field: *kit_nodes.TextField, o: kit_nodes.EditableOpts) *no
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.text_editable(fc.arena, fc.theme, field, oo);
 }
 pub fn editable_text(
@@ -415,14 +415,14 @@ pub fn editable_text(
     const fc = frame_ctx.get();
     var ww = w;
     ww.paint = fc.paint;
-    ww.ctx = fc.state;
+    ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.editable_text(fc.arena, fc.theme, value, placeholder, ww);
 }
 pub fn textarea(state: *kit.textarea.TextAreaState, o: kit_nodes.Ta) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.textarea(fc.arena, fc.theme, state, oo);
 }
 pub fn alert(title: []const u8, o: kit_nodes.AlertOpt) *node.Node {
@@ -437,7 +437,7 @@ pub fn tabs(
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.tabs(fc.arena, fc.theme, labels, state, oo);
 }
 // A bottom navigation bar: a persistent icon+label row that switches top-level
@@ -451,7 +451,7 @@ pub fn bottom_bar(
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.bottom_bar(fc.arena, fc.theme, items, state, oo);
 }
 pub const BottomBarState = kit.bottom_bar.State;
@@ -463,7 +463,7 @@ pub fn top_bar(title: []const u8, o: kit_nodes.TopBar) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.top_bar(fc.arena, fc.theme, title, oo);
 }
 pub const TopBarOpts = kit_nodes.TopBar;
@@ -485,14 +485,14 @@ pub fn slider(
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.slider(fc.arena, fc.theme, values, state, oo);
 }
 pub fn select(label: []const u8, o: kit_nodes.Sel) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.select(fc.arena, fc.theme, label, oo);
 }
 
@@ -502,7 +502,7 @@ pub fn select_overlay(o: kit_nodes.SelectOverlay) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.select_overlay(fc.arena, fc.theme, oo);
 }
 // Charts take paint for the hover tooltip; the facade injects it (the caller sets
@@ -544,7 +544,7 @@ pub fn dialog(o: kit_nodes.Dialog) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.dialog(fc.arena, fc.theme, oo);
 }
 
@@ -565,7 +565,7 @@ pub fn sidebar(o: kit_nodes.Sidebar) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.sidebar(fc.arena, fc.theme, oo);
 }
 pub const SidebarOpts = kit_nodes.Sidebar;
@@ -577,7 +577,7 @@ pub fn tabbar(o: kit_nodes.Tabbar) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.tabbar(fc.arena, fc.theme, oo);
 }
 pub const TabbarOpts = kit_nodes.Tabbar;
@@ -874,7 +874,7 @@ pub fn menu_overlay(o: kit_nodes.MenuOverlay) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.menu_overlay(fc.arena, fc.theme, oo);
 }
 pub const MenuOverlayOpts = kit_nodes.MenuOverlay;
@@ -886,7 +886,7 @@ pub fn resizable_demo(o: kit_nodes.ResizableDemo) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.resizable_demo(fc.arena, fc.theme, oo);
 }
 pub const ResizableDemoOpts = kit_nodes.ResizableDemo;
@@ -980,7 +980,7 @@ pub fn popover_overlay(o: kit_nodes.PopoverOverlay) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.popover_overlay(fc.arena, fc.theme, oo);
 }
 pub const PopoverOverlayOpts = kit_nodes.PopoverOverlay;
@@ -990,7 +990,7 @@ pub fn sheet(o: kit_nodes.Sheet) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    oo.ctx = fc.state;
+    oo.ctx = oo.ctx orelse fc.state;
     return kit_nodes.sheet(fc.arena, fc.theme, oo);
 }
 pub const SheetOpts = kit_nodes.Sheet;
