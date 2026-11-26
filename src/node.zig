@@ -713,9 +713,27 @@ fn draw_tree(
 // same mask the menu/select overlays apply to their own panels.
 fn mask_backdrop(b: *RenderBuilder, count: usize, rect: [4]f32) void {
     for (b.sprites.items[0..count]) |*s| {
-        const hit = s.position[0] + s.size[0] > rect[0] and s.position[0] < rect[0] + rect[2] and
-            s.position[1] + s.size[1] > rect[1] and s.position[1] < rect[1] + rect[3];
-        if (hit) s.clip_bounds = .{ 0, 0, 0, 0 };
+        const sx0 = s.position[0];
+        const sy0 = s.position[1];
+        const sx1 = sx0 + s.size[0];
+        const sy1 = sy0 + s.size[1];
+        const rx1 = rect[0] + rect[2];
+        const ry1 = rect[1] + rect[3];
+        if (sx1 <= rect[0] or sx0 >= rx1 or sy1 <= rect[1] or sy0 >= ry1) continue;
+        // A glyph only partly under the box keeps the part outside it, else a letter
+        // whose top touches a panel's edge vanishes whole. Keep the largest strip that
+        // lies outside the box; a glyph covered on every side is hidden.
+        const strips = [4][4]f32{
+            .{ sx0, sy0, s.size[0], @max(0, rect[1] - sy0) }, // above the box
+            .{ sx0, ry1, s.size[0], @max(0, sy1 - ry1) }, // below it
+            .{ sx0, sy0, @max(0, rect[0] - sx0), s.size[1] }, // left of it
+            .{ rx1, sy0, @max(0, sx1 - rx1), s.size[1] }, // right of it
+        };
+        var best: [4]f32 = .{ 0, 0, 0, 0 };
+        for (strips) |st| {
+            if (st[2] * st[3] > best[2] * best[3]) best = st;
+        }
+        s.clip_bounds = clip_isect(s.clip_bounds, best);
     }
 }
 
