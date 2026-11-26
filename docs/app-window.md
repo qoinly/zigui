@@ -162,13 +162,15 @@ fn pick(ctx: ?*anyopaque) void {
 zigui.row(.{ .on_click = pick, .click_ctx = &app.picks[i] }, &.{ ... })
 ```
 
-Keep that context in memory that outlives the frame: a slot in your state or a
-module-level array. Do not allocate it from `f.arena`. A click is recorded on
-press and fired on release, and frames can render in between (an animation, an
-idle redraw). Each frame resets the arena, so a context taken from it can point
-at a different object by the time the handler runs. It often appears to work,
-because an unchanged tree rebuilds the same context at the same address, which is
-exactly what makes the bug hard to see.
+For `on_click` and `on_long_press`, a context allocated from `f.arena` is fine.
+The handler runs against the frame that was last drawn, before the arena resets.
+
+A drag is different. `on_drag` and `on_drag_end` keep the context from the press
+until the release, and many frames render in between, each one resetting the
+arena. Give a drag handler a context that outlives the frame: your state, a slot
+in it, or a module-level array. A drag context taken from the arena often appears
+to work, because an unchanged tree rebuilds it at the same address, and then
+fails when the tree changes during the drag.
 
 ## Spacing
 
