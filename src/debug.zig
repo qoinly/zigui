@@ -8,8 +8,9 @@
 // live, no rebuild:
 //   Android:  adb shell setprop debug.zigui "boxes labels"   // or "dump", "all", "off"
 //   desktop:  ZIGUI_DEBUG="boxes labels" ./app
-// `dump` is a one-shot: it fires once each time the toggle string changes, so re-arm it by
-// setting a different value first (e.g. "off" then "dump").
+// `dump` is a one-shot: it covers every region of the next frame (body, overlay, hud) once
+// each time the toggle string changes, so re-arm it by setting a different value first
+// (e.g. "off" then "dump").
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -25,6 +26,8 @@ pub var mode: Mode = .{};
 
 var prev: [96]u8 = undefined;
 var prev_len: usize = 0;
+// The frame clock when a dump was armed; the regions of that same frame all dump.
+var dump_at: f64 = -1;
 
 pub inline fn overlay_on() bool {
     if (comptime builtin.mode != .debug) return false;
@@ -36,13 +39,21 @@ pub inline fn any_on() bool {
     return mode.boxes or mode.labels or mode.dump;
 }
 
-// Read the platform toggle (cheap) and apply it. Call once per render.
-pub fn poll() void {
+// Read the platform toggle (cheap) and apply it. Call once per region render, with the
+// frame clock (null outside a running window).
+pub fn poll(now: ?f64) void {
     if (comptime builtin.mode != .debug) return;
     var buf: [96]u8 = undefined;
     const raw = read(&buf);
     const changed = !std.mem.eql(u8, raw, prev[0..prev_len]);
     apply(raw, changed);
+    if (now) |t| {
+        if (mode.dump) {
+            dump_at = t;
+        } else if (t == dump_at and (has(raw, "dump") or has(raw, "all"))) {
+            mode.dump = true;
+        }
+    }
     prev_len = @min(raw.len, prev.len);
     @memcpy(prev[0..prev_len], raw[0..prev_len]);
 }

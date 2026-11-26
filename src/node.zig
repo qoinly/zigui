@@ -34,7 +34,7 @@ const debug = @import("debug.zig");
 
 // Development-only (see debug.zig): one record per laid-out node, captured in draw_tree at
 // its resolved absolute rect, then drawn as an overlay / dumped to the log after the tree.
-const DbgRec = struct { x: f32, y: f32, w: f32, h: f32, depth: u16, kind: u8, text: []const u8 };
+const DbgRec = struct { x: f32, y: f32, w: f32, h: f32, depth: u16, kind: u8, text: []const u8, name: []const u8 };
 var dbg_buf: [8192]DbgRec = undefined;
 var dbg_n: usize = 0;
 
@@ -105,6 +105,9 @@ pub const Node = struct {
     // A stable id recorded as "hovered" while the pointer is over this box; the
     // frame exposes the topmost one so a view can reveal-on-hover without a callback.
     hover_id: []const u8 = "",
+    // A label for the debug layout dump and overlay, so a node can be found by name.
+    // Layout and drawing ignore it.
+    name: []const u8 = "",
     // A text node clamps to one line with a trailing ellipsis instead of wrapping.
     truncate: bool = false,
     // Laid-out absolute rect written at draw; lets a container anchor an overlay
@@ -193,6 +196,8 @@ pub const Cfg = struct {
     frost: bool = false,
     // Clip children to this box at draw time (layout/grow unchanged); see Node.clip.
     clip: bool = false,
+    // Shows up in the debug layout dump and overlay; see docs/debugging.md.
+    name: []const u8 = "",
 };
 
 pub const Txt = struct {
@@ -263,6 +268,7 @@ fn box(a: A, dir: FlexDirection, cfg: Cfg, kids: []const *Node) *Node {
         .backdrop_mask = cfg.backdrop_mask,
         .frost = cfg.frost,
         .clip = cfg.clip,
+        .name = cfg.name,
         .children = own_kids(a, kids),
     });
 }
@@ -547,7 +553,7 @@ fn draw_tree(
     if (n.frost) if (pc) |p| p.add_frost(b, .{ x, y, r.size.width, r.size.height, n.radius, 1 });
     if (comptime builtin.mode == .debug) {
         if (debug.any_on() and dbg_n < dbg_buf.len) {
-            dbg_buf[dbg_n] = .{ .x = x, .y = y, .w = r.size.width, .h = r.size.height, .depth = @intCast(@min(depth, 65535)), .kind = @intFromEnum(n.kind), .text = n.text };
+            dbg_buf[dbg_n] = .{ .x = x, .y = y, .w = r.size.width, .h = r.size.height, .depth = @intCast(@min(depth, 65535)), .kind = @intFromEnum(n.kind), .text = n.text, .name = n.name };
             dbg_n += 1;
         }
     }
@@ -930,7 +936,7 @@ pub fn render_at(
     const prev_measure_b = measure_b;
     measure_b = b;
     defer measure_b = prev_measure_b;
-    debug.poll();
+    debug.poll(if (pc) |p| p.now_s else null);
     if (comptime builtin.mode == .debug) {
         if (debug.any_on()) dbg_n = 0;
     }
@@ -940,15 +946,15 @@ pub fn render_at(
     eng.compute(body.size);
     try draw_tree(b, eng, theme, root, 0, body.origin.x, body.origin.y, pc);
     if (comptime builtin.mode == .debug) {
-        if (debug.any_on()) try debug_flush(b);
+        if (debug.any_on()) try debug_flush(b, body);
     }
 }
 
 // Development-only: after the whole tree has drawn (so the overlay sits on top), emit the
 // box outlines + self-describing labels and/or dump the layout to the log.
-fn debug_flush(b: *RenderBuilder) RenderError!void {
+fn debug_flush(b: *RenderBuilder, region: BoundsF) RenderError!void {
     const recs = dbg_buf[0..dbg_n];
-    if (debug.mode.dump) dump_layout(recs);
+    if (debug.mode.dump) dump_layout(recs, region);
     if (debug.mode.boxes) {
         for (recs) |rc| {
             var q = Quad.init(rc.x, rc.y, rc.w, rc.h);
@@ -960,8 +966,11 @@ fn debug_flush(b: *RenderBuilder) RenderError!void {
         const sty = label.Style{ .font_size = 9, .weight = .medium, .color = Rgba.from_hex(0xffef5a) };
         for (recs) |rc| {
             if (rc.w < 22 or rc.h < 11) continue; // skip nodes too small to annotate legibly
-            var buf: [48]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.0},{d:.0} {d:.0}x{d:.0}", .{ rc.x, rc.y, rc.w, rc.h }) catch continue;
+            var buf: [96]u8 = undefined;
+            const s = if (rc.name.len > 0)
+                std.fmt.bufPrint(&buf, "{s} {d:.1},{d:.1} {d:.1}x{d:.1}", .{ rc.name[0..@min(rc.name.len, 32)], rc.x, rc.y, rc.w, rc.h }) catch continue
+            else
+                std.fmt.bufPrint(&buf, "{d:.1},{d:.1} {d:.1}x{d:.1}", .{ rc.x, rc.y, rc.w, rc.h }) catch continue;
             const m = label.measure(b, s, sty);
             var bg = Quad.init(rc.x, rc.y, m.width + 4, sty.font_size + 4);
             _ = bg.set_background(.{ .r = 0, .g = 0, .b = 0, .a = 0.72 });
@@ -982,14 +991,18 @@ fn overlay_color(depth: u16) Rgba {
     };
 }
 
-fn dump_layout(recs: []const DbgRec) void {
+fn dump_layout(recs: []const DbgRec, region: BoundsF) void {
     const log = std.log.scoped(.zigui_dbg);
-    log.info("layout dump begin: {d} nodes", .{recs.len});
+    log.info("layout dump begin: {d} nodes in the region at {d:.1},{d:.1} {d:.1}x{d:.1}", .{
+        recs.len, region.origin.x, region.origin.y, region.size.width, region.size.height,
+    });
     for (recs) |rc| {
         var tb: [48]u8 = undefined;
+        var nb: [48]u8 = undefined;
         const t = json_text(&tb, rc.text);
-        log.info("{{\"d\":{d},\"k\":\"{s}\",\"x\":{d:.0},\"y\":{d:.0},\"w\":{d:.0},\"h\":{d:.0},\"t\":\"{s}\"}}", .{
-            rc.depth, kind_name(rc.kind), rc.x, rc.y, rc.w, rc.h, t,
+        const nm = json_text(&nb, rc.name);
+        log.info("{{\"d\":{d},\"k\":\"{s}\",\"n\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"t\":\"{s}\"}}", .{
+            rc.depth, kind_name(rc.kind), nm, rc.x, rc.y, rc.w, rc.h, t,
         });
     }
     log.info("layout dump end", .{});
