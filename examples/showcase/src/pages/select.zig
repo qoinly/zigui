@@ -69,7 +69,7 @@ fn filtered_groups(app: *App) []const sel.SelectGroup {
     for (SELECT_GROUPS) |grp| {
         const start = ii;
         for (grp.items) |it| {
-            if (std.ascii.indexOfIgnoreCase(it.label, q) != null and ii < s.fg_items.len) {
+            if (std.ascii.findIgnoreCase(it.label, q) != null and ii < s.fg_items.len) {
                 s.fg_items[ii] = it;
                 ii += 1;
             }

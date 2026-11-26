@@ -47,7 +47,7 @@ pub const App = struct {
     // outlive the per-frame tree.
     pub const Select = struct {
         open: ?SelKind = null,
-        rects: [4][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** 4,
+        rects: [4][4]f32 = @splat(.{ 0, 0, 0, 0 }),
         vals: [4][]const u8 = .{ "apple", "tyo", "carrot", "" },
         scroll: f32 = 0,
         state: zigui.kit.select.SelectState = .{},
