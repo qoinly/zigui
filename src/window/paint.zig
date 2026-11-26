@@ -146,6 +146,9 @@ pub const PaintContext = struct {
     // The topmost hovered box's stable id, refreshed each frame from the hitboxes.
     // A view reads it (via the frame) to reveal-on-hover.
     hovered_id: []const u8 = "",
+    // hovered_id is read by the next frame, after the arena that held the node's
+    // hover_id has been reset, so it points into this copy instead.
+    hovered_buf: [128]u8 = undefined,
     mouse_x: f32 = -1,
     mouse_y: f32 = -1,
     mouse_inside: bool = false,
@@ -344,7 +347,9 @@ pub const PaintContext = struct {
             }
         }
         if (std.mem.eql(u8, id, self.hovered_id)) return;
-        self.hovered_id = id;
+        const n = @min(id.len, self.hovered_buf.len);
+        @memcpy(self.hovered_buf[0..n], id[0..n]);
+        self.hovered_id = self.hovered_buf[0..n];
         self.renderer.request_redraw();
     }
 
