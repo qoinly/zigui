@@ -478,7 +478,11 @@ pub fn toggle_group(
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
-    return kit_nodes.toggle_group(fc.arena, fc.theme, items, oo);
+    // Each item carries its own handler context; default the empty ones to the run
+    // state like every other widget, on an arena copy since `items` is the caller's.
+    const owned = fc.arena.dupe(kit.toggle_group.ToggleGroupItem, items) catch @panic("node arena oom");
+    for (owned) |*it| it.ctx = it.ctx orelse fc.state;
+    return kit_nodes.toggle_group(fc.arena, fc.theme, owned, oo);
 }
 pub fn slider(
     values: []const f32,
