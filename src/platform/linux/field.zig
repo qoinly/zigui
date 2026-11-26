@@ -27,6 +27,10 @@ var g_buf: [FIELD_BUF_MAX]u8 = undefined;
 var g_len: usize = 0;
 var g_caret: usize = 0; // byte offset, always a codepoint boundary
 var g_anchor: usize = 0; // selection anchor; == caret means no selection
+// The text the app last read through value(). show() compares against it to tell the
+// app's own edits from the user's typing.
+var g_reported: [FIELD_BUF_MAX]u8 = undefined;
+var g_reported_len: usize = 0;
 var g_special: ?shell_types.FieldKey = null; // Enter/Shift+Enter/Escape (and, under intercept, up/down/tab)
 var g_intercept: bool = false; // an open completion popup: forward up/down/tab instead of ignoring them
 
@@ -61,6 +65,14 @@ pub fn show(win: *anyopaque, initial: []const u8, is_secure: bool, numeric: bool
         // Select-all on seed, the windows EM_SETSEL behavior: typing replaces.
         g_anchor = 0;
         g_caret = g_len;
+    } else if (!std.mem.eql(u8, initial, g_reported[0..g_reported_len])) {
+        // The app changed the text itself since the last value it read (a Clear button,
+        // a reset on Escape). Take the new text, caret at the end, or the next poll
+        // would hand the old text straight back.
+        g_len = @min(initial.len, FIELD_BUF_MAX);
+        @memcpy(g_buf[0..g_len], initial[0..g_len]);
+        g_anchor = g_len;
+        g_caret = g_len;
     }
     g_visible = true;
     g_win = win;
@@ -92,6 +104,8 @@ pub fn value(buf: []u8) []const u8 {
     std.debug.assert(g_len <= FIELD_BUF_MAX);
     const n = @min(g_len, buf.len);
     @memcpy(buf[0..n], g_buf[0..n]);
+    @memcpy(g_reported[0..n], g_buf[0..n]);
+    g_reported_len = n;
     return buf[0..n];
 }
 
