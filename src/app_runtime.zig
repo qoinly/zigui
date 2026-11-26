@@ -32,6 +32,13 @@ pub const Frame = struct {
     time: f64, // monotonic seconds, for time-based animation (with zigui.animate)
     hovered_id: []const u8 = "", // topmost hover-id box under the pointer (reveal-on-hover)
     fold: FoldPosture = .flat, // foldable posture from the hinge sensor; flat on non-foldables
+    measurer: ?*anyopaque = null,
+
+    // A label's single-line width, for views that size around their text at build time.
+    pub fn text_width(self: Frame, s: []const u8, o: node.Txt) f32 {
+        const b = self.measurer orelse return 0;
+        return node.text_width(@ptrCast(@alignCast(b)), s, o);
+    }
 
     pub fn size_class(self: Frame) SizeClass {
         const w = self.size.width;
@@ -202,6 +209,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
             frame_ctx.enter(&fc);
             defer frame_ctx.leave();
             var builder = raw.builder;
+            f.measurer = &builder;
             // Build the overlay first: a non-null tree means a modal is up, so
             // the body behind it must be inert (no hover) as well as covered.
             const ov_root: ?*node.Node = if (views.overlay) |overlay_view|

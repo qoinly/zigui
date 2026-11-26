@@ -450,6 +450,12 @@ fn shape_text(b: *RenderBuilder, n: *Node, depth: u32) void {
 // the hot path allocates nothing per text node.
 var measure_b: ?*RenderBuilder = null;
 
+pub fn text_width(b: *RenderBuilder, s: []const u8, o: Txt) f32 {
+    var sty = label.Style{ .font_size = o.size, .weight = o.weight };
+    if (o.font_family.len > 0) sty.font_family = o.font_family;
+    return label.measure(b, s, sty).width;
+}
+
 fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(f32) {
     const n: *Node = @ptrCast(@alignCast(ctx));
     std.debug.assert(n.kind == .text);
