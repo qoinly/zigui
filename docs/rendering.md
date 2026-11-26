@@ -101,6 +101,28 @@ zigui.button("Open menu", .{ .on_click = zigui.on(App, on_open), .rect_out = &ap
 zigui.menu_overlay(.{ .items = &items, .state = &app.menu.state, .trigger = &app.menu.rect, ... });
 ```
 
+## Where builders can run
+
+Builders (`col`, `text`, `button`, ...), `zigui.animate()`, and
+`zigui.request_redraw_after()` read the frame that is currently being built. They
+only work inside a view function, while zigui is calling it. A callback such as
+`on_click` or `on_drag` runs between frames, so calling any of them there panics
+with `a builder was called outside render()`.
+
+In a callback, change your state and return. The next frame's view reads that
+state, and if something needs to keep moving, the view calls `animate()`:
+
+```zig
+fn on_release(app: *App) void {
+    app.sheet_target = .open; // not zigui.animate()
+}
+
+fn view(f: *zigui.Frame, app: *App) *zigui.Node {
+    if (app.sheet_pos != app.sheet_target) zigui.animate();
+    ...
+}
+```
+
 ## Keeping the loop ticking
 
 The paint loop idles after a frame with no input. Anything that animates from

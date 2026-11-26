@@ -20,6 +20,38 @@ A file for [guiding coding agents](https://agents.md/).
 - **Recompile Linux shaders:** `zig build shadergen` (needs `glslang` on PATH)
   — only when changing `src/platform/linux/shaders/*`; it rewrites the `.spv`.
 
+## Writing UI with zigui
+
+The code needs Zig 0.17.1. Read these before building views, since most surprises
+are covered there:
+
+- `docs/layout.md`: containers, flex, and the sizing mistakes to avoid
+  (`shrink = 0`, `min_width = 0`, `basis = 0`, how `layers` sizes itself).
+- `docs/rendering.md`: the frame model, and why builders and `zigui.animate()`
+  only work inside a view, never in a callback.
+- `docs/app-window.md`: callbacks, and how to give each row its own context
+  without allocating it from the frame arena.
+
+To check a layout, use the debug overlay and the layout dump in
+`docs/debugging.md`. A dump gives every node's position and size in points, which
+is more reliable than measuring a screenshot.
+
+## Writing UI with zigui
+
+The code needs Zig 0.17.1. Read these before building views, since most surprises
+are covered there:
+
+- `docs/layout.md`: containers, flex, and the sizing mistakes to avoid
+  (`shrink = 0`, `min_width = 0`, `basis = 0`, how `layers` sizes itself).
+- `docs/rendering.md`: the frame model, and why builders and `zigui.animate()`
+  only work inside a view, never in a callback.
+- `docs/app-window.md`: callbacks, and how to give each row its own context
+  without allocating it from the frame arena.
+
+To check a layout, use the debug overlay and the layout dump in
+`docs/debugging.md`. A dump gives every node's position and size in points, which
+is more reliable than measuring a screenshot.
+
 ## Directory Structure
 
 - Library core: `src/`

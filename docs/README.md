@@ -72,6 +72,7 @@ Variants exist for callbacks that carry an argument: `zigui.on_id` (an id),
 - [Theming](theming.md)
 - [Kit](kit/overview.md)
 - [Rendering](rendering.md)
+- [Debugging layout](debugging.md): see where every node landed, drawn on screen or as numbers
 - [External frames](frames.md) - draw a decoded video / remote screen, or a static image
 - [Input](input.md) - raw grab, keyboard shortcuts, file drop, field completion
 - [System integration](system.md) - clipboard, fullscreen, displays, the `napi` platform surface

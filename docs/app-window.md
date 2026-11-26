@@ -89,6 +89,14 @@ next frame.
 | `time` | `f64` | monotonic seconds, for time-based animation with `zigui.animate` |
 | `hovered_id` | `[]const u8` | the topmost `hover_id` box under the pointer, for reveal-on-hover (see [Layout](layout.md)) |
 
+`f.text_width(s, opts)` returns the single-line width of `s` in the given text
+style (the same `Txt` options `zigui.text` takes). Use it when a box has to size
+around its label at build time, for example a tab that hugs its title:
+
+```zig
+const w = f.text_width("Settings", .{ .size = 12, .weight = .semi_bold }) + 2 * pad;
+```
+
 ### No state
 
 Pass `{}` and take `_: void`. `state` must be `void` or a pointer.
@@ -135,6 +143,32 @@ zigui.menu_overlay(.{
     .on_dismiss = zigui.on(App, on_close),
 })
 ```
+
+### A context per item
+
+By default a callback gets the state pointer you passed to `run`. When one
+handler serves many rows and needs to know which row was hit, pass your own
+context: `click_ctx` on a container, or `ctx` on a widget. A context you set is
+always passed through. The run state is only the fallback when you leave it null.
+
+```zig
+const Pick = struct { app: *App, index: usize };
+
+fn pick(ctx: ?*anyopaque) void {
+    const p: *Pick = @ptrCast(@alignCast(ctx.?));
+    p.app.selected = p.index;
+}
+
+zigui.row(.{ .on_click = pick, .click_ctx = &app.picks[i] }, &.{ ... })
+```
+
+Keep that context in memory that outlives the frame: a slot in your state or a
+module-level array. Do not allocate it from `f.arena`. A click is recorded on
+press and fired on release, and frames can render in between (an animation, an
+idle redraw). Each frame resets the arena, so a context taken from it can point
+at a different object by the time the handler runs. It often appears to work,
+because an unchanged tree rebuilds the same context at the same address, which is
+exactly what makes the bug hard to see.
 
 ## Spacing
 

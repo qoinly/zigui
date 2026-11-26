@@ -49,6 +49,10 @@ takes a `Config` and a slice of children.
 | `hover_id` | `[]const u8` | `""` | id recorded as hovered; the frame exposes the topmost one for reveal-on-hover without a callback |
 | `rect_out` | `?*[4]f32` | `null` | laid-out abs rect, written at draw; anchor an overlay to this box |
 | `backdrop_mask` | `bool` | `false` | mask body sprites behind this box so a custom overlay fill draws crisp |
+| `on_long_press` | `?ClickFn` | `null` | touch hold of about 0.45s; the release then skips `on_click` |
+| `frost` | `bool` | `false` | blur what is behind the box; pair it with a translucent `bg` for frosted glass |
+| `clip` | `bool` | `false` | clip children to the box when drawing; layout is unchanged |
+| `name` | `[]const u8` | `""` | a label for the debug layout dump and overlay; see [Debugging](debugging.md) |
 
 `Spacing` is a token (`.none`, `.xs`, `.sm`, `.md`, ...) or `.{ .px = N }` for an
 exact value. Use the token, not a bare number: `.pad = .lg`, not `.pad = 16`. See
@@ -77,10 +81,13 @@ zigui.text("Hello", .{ .size = 16, .weight = .semi_bold })
 | `truncate` | `bool` | `false` | clamp to one line with a trailing ellipsis instead of wrapping |
 | `font_family` | `[]const u8` | `""` | override the font family (e.g. a mono family for code/URLs); empty inherits the theme's |
 
-Text color resolves at draw time from the theme - leave `color` null to track
-light/dark. Text wraps to the width it is handed by layout; set `truncate` for a
+Text color resolves at draw time from the theme. Leave `color` null to track
+light and dark. Text wraps to the width it is handed by layout; set `truncate` for a
 single ellipsized line. Register a bundled or custom family with
-`zigui.register_font_file` before naming it here - see [Theming](theming.md).
+`zigui.register_font_file` before naming it here. See [Theming](theming.md).
+
+To size a box around a label while building the tree, measure it with
+`f.text_width(s, opts)`. See [App & window](app-window.md).
 
 ## Spacer
 
@@ -118,9 +125,21 @@ layout children cap.
 
 ## Layers
 
-`layers` stacks its children on the same box - they overlap instead of flowing,
-and later children draw on top. It grows to fill its cell; each child sizes
-against the full box.
+`layers` stacks its children on the same box. They overlap instead of flowing,
+and later children draw on top. Each child is laid out against the full box.
+
+How big the box is: `layers` has `grow = 1`, so along its parent's main axis it
+fills the space it is given. Across the other axis it stretches when the parent
+uses the default `cross = .stretch`, and otherwise is as big as its largest
+child. To pin a layers box to an exact size, put it in a box with `width`,
+`height`, and `shrink = 0`:
+
+```zig
+zigui.col(.{ .width = 34, .height = 34, .shrink = 0 }, &.{zigui.layers(&.{
+    disc,
+    badge,
+})})
+```
 
 ```zig
 zigui.layers(&.{ base, floating_overlay })
@@ -155,6 +174,22 @@ zigui.row(.{ .cross = .center, .justify = .space_between }, &.{ left, right })
 Sizing: `width` / `height` pin a size; `min_width` / `max_width` clamp it. A
 fluid track is `width = null` with `min_width` / `max_width` to bound it between
 two widths.
+
+### Common sizing mistakes
+
+The engine follows CSS flexbox, including the parts of it that surprise people.
+
+- **A fixed box next to a growing one gets squeezed.** `shrink` defaults to `1`,
+  so when the row runs out of room even a box with a `width` gives some up. Add
+  `shrink = 0` to icons, badges, and buttons that must keep their size.
+- **A long label pushes its siblings off the row.** A box's minimum size is its
+  content's minimum size, so a cell holding a long `truncate` text or URL refuses
+  to get narrower than the text. Give that cell `min_width = 0` and the text
+  can ellipsize.
+- **Two `grow` cells come out uneven.** Growth is added on top of each cell's
+  content width. For an exact split, give both `basis = 0`.
+- **A fixed header shrinks above a long list.** In a column, set `shrink = 0`
+  on the header so the list takes the overflow instead.
 
 ## Grids
 
