@@ -407,10 +407,11 @@ pub const AndroidTextSystem = struct {
 
         const str = self.jstring(@intCast(params.glyph_id)) orelse return null;
         defer t.DeleteLocalRef(e, str);
-        const b = self.text_bounds(str);
-        const w: u32 = @intCast(@max(0, b[2] - b[0]));
-        const h: u32 = @intCast(@max(0, b[3] - b[1]));
-        if (w == 0 or h == 0) return null; // whitespace has no ink
+        const tight = self.text_bounds(str);
+        if (tight[2] <= tight[0] or tight[3] <= tight[1]) return null; // whitespace has no ink
+        const b = pad_bounds(tight);
+        const w: u32 = @intCast(b[2] - b[0]);
+        const h: u32 = @intCast(b[3] - b[1]);
         std.debug.assert(@as(u64, w) * @as(u64, h) <= MAX_GLYPH_PIXELS);
 
         var cb = [_]jni.jvalue{
@@ -469,12 +470,22 @@ pub const AndroidTextSystem = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (!self.loaded) return geometry.Bounds(i32).init(0, 0, 0, 0);
         const px = params.font_size * params.scale_factor;
+        self.set_font(params.font_id);
         self.set_text_size(px);
         const str = self.jstring(@intCast(params.glyph_id)) orelse
             return geometry.Bounds(i32).init(0, 0, 0, 0);
         defer self.env.*.DeleteLocalRef(self.env, str);
-        const b = self.text_bounds(str);
+        const tight = self.text_bounds(str);
+        if (tight[2] <= tight[0] or tight[3] <= tight[1]) return geometry.Bounds(i32).init(0, 0, 0, 0);
+        const b = pad_bounds(tight);
         // top is already negative-above-baseline (the y-down sprite origin).
         return geometry.Bounds(i32).init(b[0], b[1], b[2] - b[0], b[3] - b[1]);
     }
 };
+
+// getTextBounds under-reports the ink drawText lays down (a pixel or more past its top at
+// 45px, plus antialiasing), so a bitmap sized to it shears off the edge rows: flat glyph tops.
+const GLYPH_MARGIN: i32 = 3;
+fn pad_bounds(b: [4]i32) [4]i32 {
+    return .{ b[0] - GLYPH_MARGIN, b[1] - GLYPH_MARGIN, b[2] + GLYPH_MARGIN, b[3] + GLYPH_MARGIN };
+}
