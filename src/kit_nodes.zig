@@ -82,6 +82,9 @@ pub const Btn = struct {
     // Laid-out box rect, only known post-layout; lets a caller anchor an overlay
     // (popover, menu, tooltip) to the trigger.
     rect_out: ?*[4]f32 = null,
+    // Take the width the parent gives instead of the label's width, so the button
+    // stretches across a column or fills a grow cell. The label stays centered.
+    fill: bool = false,
 };
 
 const ButtonSpec = struct {
@@ -104,7 +107,9 @@ const ButtonSpec = struct {
     }
     fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
         const self: *ButtonSpec = @ptrCast(@alignCast(ctx));
-        return button_kit.measure(b, .{}, self.text, self.opts());
+        const m = button_kit.measure(b, .{}, self.text, self.opts());
+        // A measured 0 leaves the width auto, so layout stretches or grows it.
+        return if (self.o.fill) SizeF.init(0, m.height) else m;
     }
     fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
         const self: *ButtonSpec = @ptrCast(@alignCast(ctx));
