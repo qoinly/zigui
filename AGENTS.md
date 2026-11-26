@@ -29,24 +29,8 @@ are covered there:
   (`shrink = 0`, `min_width = 0`, `basis = 0`, how `layers` sizes itself).
 - `docs/rendering.md`: the frame model, and why builders and `zigui.animate()`
   only work inside a view, never in a callback.
-- `docs/app-window.md`: callbacks, and how to give each row its own context
-  without allocating it from the frame arena.
-
-To check a layout, use the debug overlay and the layout dump in
-`docs/debugging.md`. A dump gives every node's position and size in points, which
-is more reliable than measuring a screenshot.
-
-## Writing UI with zigui
-
-The code needs Zig 0.17.1. Read these before building views, since most surprises
-are covered there:
-
-- `docs/layout.md`: containers, flex, and the sizing mistakes to avoid
-  (`shrink = 0`, `min_width = 0`, `basis = 0`, how `layers` sizes itself).
-- `docs/rendering.md`: the frame model, and why builders and `zigui.animate()`
-  only work inside a view, never in a callback.
-- `docs/app-window.md`: callbacks, and how to give each row its own context
-  without allocating it from the frame arena.
+- `docs/app-window.md`: callbacks, how to give each row its own context, and
+  why a drag handler's context must outlive the frame.
 
 To check a layout, use the debug overlay and the layout dump in
 `docs/debugging.md`. A dump gives every node's position and size in points, which
