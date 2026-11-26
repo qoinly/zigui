@@ -998,6 +998,32 @@ pub const LayoutEngine = struct {
         const content_width = @max(explicit_w orelse (available_width - padding_h), 0);
         const content_height = @max(explicit_h orelse (available_height - padding_v), 0);
 
+        // A layers box overlaps its children, so it is as big as the biggest one on each
+        // axis. Measuring it like a row would add their widths together.
+        if (style.layers) {
+            var w: f32 = 0;
+            var h: f32 = 0;
+            for (node.children.items) |child_id| {
+                const child = &self.nodes.items[child_id.index];
+                const cs: Size(f32) = if (child.measure_fn) |measure_fn|
+                    finite_size(measure_fn(child.measure_ctx.?, .{ .width = content_width, .height = content_height }))
+                else if (child.children.items.len > 0)
+                    self.measure_intrinsic_size(child_id, content_width, content_height, depth + 1)
+                else
+                    .{
+                        .width = self.resolve_length(child.style.width, content_width) orelse 0,
+                        .height = self.resolve_length(child.style.height, content_height) orelse 0,
+                    };
+                child.content_size = cs;
+                w = @max(w, cs.width);
+                h = @max(h, cs.height);
+            }
+            return .{
+                .width = explicit_w orelse (w + padding_h),
+                .height = explicit_h orelse (h + padding_v),
+            };
+        }
+
         // Height-for-width: a wrap row fills the width and stacks lines, so its
         // intrinsic HEIGHT depends on how many lines the children break into at
         // this width. The single-line sum below would under-report it and a parent
@@ -1213,7 +1239,7 @@ pub const LayoutEngine = struct {
 
         const style = child.style;
         const same_axis = style.flex_direction.is_row() == is_row;
-        const sums = same_axis and style.flex_wrap == .no_wrap;
+        const sums = same_axis and style.flex_wrap == .no_wrap and !style.layers;
         const pad_main = if (is_row)
             self.resolve_px(style.padding.left) + self.resolve_px(style.padding.right)
         else
@@ -1257,6 +1283,35 @@ pub const LayoutEngine = struct {
         };
     }
 };
+
+test "layers sizes to its largest child, not the sum of them" {
+    var eng = LayoutEngine.init(std.testing.allocator);
+    defer eng.deinit();
+
+    // A centered column holding a layers box (styled as zigui.layers builds it) of two
+    // children 34 wide: the stack must be 34 wide, not 68 as a row would add them up.
+    // It still grows along the column, so it is as tall as the column.
+    const col = try eng.add_node(.{
+        .display = .flex,
+        .flex_direction = .column,
+        .align_items = .center,
+        .width = .{ .px = 44 },
+        .height = .{ .px = 44 },
+    });
+    const stack = try eng.add_node(.{ .layers = true, .flex_grow = 1 });
+    const a = try eng.add_node(.{ .width = .{ .px = 34 }, .height = .{ .px = 34 } });
+    const b = try eng.add_node(.{ .width = .{ .px = 34 }, .height = .{ .px = 20 } });
+    try eng.add_child(stack, a);
+    try eng.add_child(stack, b);
+    try eng.add_child(col, stack);
+    eng.set_root(col);
+    eng.compute(.{ .width = 200, .height = 200 });
+
+    const bs = eng.get_bounds(stack);
+    try std.testing.expectEqual(@as(f32, 34), bs.size.width);
+    try std.testing.expectEqual(@as(f32, 44), bs.size.height);
+    try std.testing.expectEqual(@as(f32, 5), bs.origin.x);
+}
 
 test "LayoutEngine basic single root" {
     var eng = LayoutEngine.init(std.testing.allocator);
