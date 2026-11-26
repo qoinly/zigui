@@ -10,7 +10,8 @@
 //   desktop:  ZIGUI_DEBUG="boxes labels" ./app
 // `dump` is a one-shot: it covers every region of the next frame (body, overlay, hud) once
 // each time the toggle string changes, so re-arm it by setting a different value first
-// (e.g. "off" then "dump").
+// (e.g. "off" then "dump"). Adding `input` also dumps the frame after every click or key,
+// which is the only way to re-arm on desktop, where the environment never changes.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -28,6 +29,15 @@ var prev: [96]u8 = undefined;
 var prev_len: usize = 0;
 // The frame clock when a dump was armed; the regions of that same frame all dump.
 var dump_at: f64 = -1;
+// Clicks and keys seen, and how many had been seen at the last dump.
+var inputs: u32 = 0;
+var inputs_dumped: u32 = 0;
+
+// Called by the input dispatch for every press and key.
+pub fn note_input() void {
+    if (comptime builtin.mode != .debug) return;
+    inputs +%= 1;
+}
 
 pub inline fn overlay_on() bool {
     if (comptime builtin.mode != .debug) return false;
@@ -47,10 +57,15 @@ pub fn poll(now: ?f64) void {
     const raw = read(&buf);
     const changed = !std.mem.eql(u8, raw, prev[0..prev_len]);
     apply(raw, changed);
+    // A click or key since the last dump re-arms it.
+    if (inputs != inputs_dumped and has(raw, "input")) {
+        mode.dump = true;
+        inputs_dumped = inputs;
+    }
     if (now) |t| {
         if (mode.dump) {
             dump_at = t;
-        } else if (t == dump_at and (has(raw, "dump") or has(raw, "all"))) {
+        } else if (t == dump_at and (has(raw, "dump") or has(raw, "all") or has(raw, "input"))) {
             mode.dump = true;
         }
     }

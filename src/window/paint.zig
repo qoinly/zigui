@@ -14,6 +14,7 @@ const color = @import("../color.zig");
 const label = @import("../render/label.zig");
 const input = @import("../input.zig");
 const background = @import("../background.zig");
+const debug = @import("../debug.zig");
 
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
@@ -404,6 +405,7 @@ pub const PaintContext = struct {
     }
 
     pub fn on_key(self: *PaintContext, ev: custom_shell.KeyEvent) void {
+        debug.note_input();
         if (self.key_len < self.key_events.len) {
             self.key_events[self.key_len] = ev;
             self.key_len += 1;
@@ -657,6 +659,7 @@ pub const PaintContext = struct {
     }
 
     fn press_at(self: *PaintContext, x: f32, y: f32) void {
+        debug.note_input();
         self.mouse_x = x;
         self.mouse_y = y;
         self.mouse_inside = true;
