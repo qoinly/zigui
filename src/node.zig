@@ -465,7 +465,7 @@ pub fn text_width(b: *RenderBuilder, s: []const u8, o: Txt) f32 {
 fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(f32) {
     const n: *Node = @ptrCast(@alignCast(ctx));
     std.debug.assert(n.kind == .text);
-    const b = measure_b.?;
+    const b = measure_b orelse return approx_text(n, proposal);
     var sty = label.Style{ .font_size = n.font_size, .weight = n.weight };
     if (n.font_family.len > 0) sty.font_family = n.font_family;
     // A truncating label is a single clamped line, never wrapped: report a
@@ -490,6 +490,74 @@ fn text_measure(ctx: *anyopaque, proposal: geometry.SizeProposal) geometry.Size(
     }
     const m = label.measure(b, n.text, sty);
     return .{ .width = m.width, .height = m.ascent + m.descent };
+}
+
+// Text metrics without a font, for layout_rects: a fixed advance per byte and a fixed line
+// height. Close enough to test how boxes size around text, not to test the text itself.
+pub const APPROX_ADVANCE: f32 = 0.55; // of the font size, per byte
+pub const APPROX_LINE: f32 = 1.25; // of the font size
+fn approx_text(n: *const Node, proposal: geometry.SizeProposal) geometry.Size(f32) {
+    const adv = n.font_size * APPROX_ADVANCE;
+    const line = n.font_size * APPROX_LINE;
+    const full = adv * @as(f32, @floatFromInt(n.text.len));
+    if (n.truncate) {
+        if (proposal.min_content) return .{ .width = 0, .height = line };
+        const w = if (proposal.width) |pw| @min(full, pw) else full;
+        return .{ .width = w, .height = line };
+    }
+    if (proposal.min_content) {
+        var longest: usize = 0;
+        var it = std.mem.tokenizeScalar(u8, n.text, ' ');
+        while (it.next()) |word| longest = @max(longest, word.len);
+        const mc = adv * @as(f32, @floatFromInt(longest));
+        const lines = if (mc > 0) @ceil(full / mc) else 1;
+        return .{ .width = mc, .height = line * @max(lines, 1) };
+    }
+    if (proposal.width) |w| if (w > 0 and full > w) {
+        return .{ .width = w, .height = line * @ceil(full / w) };
+    };
+    return .{ .width = full, .height = line };
+}
+
+// One laid-out node, as layout_rects reports it.
+pub const Rect = struct {
+    name: []const u8,
+    kind: []const u8,
+    text: []const u8,
+    depth: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+};
+
+// Lay a tree out against `size` without drawing it: no window, GPU, or fonts. Text uses
+// approx_text, and kit widgets (leaves) are not measured, so they only take the size the
+// layout gives them. Positions ignore scroll offsets.
+pub fn layout_rects(eng: *LayoutEngine, a: A, root: *Node, size: SizeF, out: *std.ArrayList(Rect)) !void {
+    const prev = measure_b;
+    measure_b = null;
+    defer measure_b = prev;
+    try register_tree(eng, root, 0);
+    eng.set_root(root.id);
+    eng.compute(size);
+    try collect(eng, a, root, 0, out);
+}
+
+fn collect(eng: *LayoutEngine, a: A, n: *Node, depth: u32, out: *std.ArrayList(Rect)) !void {
+    if (depth > MAX_DEPTH) return;
+    const r = eng.get_bounds(n.id);
+    try out.append(a, .{
+        .name = n.name,
+        .kind = kind_name(@intFromEnum(n.kind)),
+        .text = n.text,
+        .depth = depth,
+        .x = r.origin.x,
+        .y = r.origin.y,
+        .w = r.size.width,
+        .h = r.size.height,
+    });
+    for (n.children) |child| try collect(eng, a, child, depth + 1, out);
 }
 
 fn register_tree(eng: *LayoutEngine, n: *Node, depth: u32) RenderError!void {

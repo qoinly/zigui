@@ -104,6 +104,9 @@ pub const render_tree_at = node.render_at;
 // lacks is a compile error only where a caller actually uses it (see napi/root.zig).
 pub const napi = @import("napi/root.zig");
 
+// Lay out a view in a unit test, without a window or GPU. See docs/debugging.md.
+pub const testing = @import("testing.zig");
+
 // Background work: run a heavy job off the UI thread, read its result back in the
 // view with a poll. Cross-platform (std.Thread); on Android a finished job nudges
 // the vsync loop to render so the poll runs.
