@@ -22,6 +22,19 @@ defer app.deinit();
 | `feel` | `Feel` | `.liquid_glass` | window chrome feel (see below) |
 | `titlebar_height` | `?f32` | `null` | custom title-band height; null uses the platform default |
 
+On desktop, `size` is the whole window, and that includes the title band zigui
+draws at the top (37 points unless you set `titlebar_height`). Your body is laid
+out below the band, so it gets less height than `size` asks for. `f.body` is the
+rect it actually gets. For a content area of exactly 1000 by 700:
+
+```zig
+const band = 37;
+var app = try zigui.App.init(.{ .title = "Members", .size = .{ 1000, 700 + band }, .titlebar_height = band });
+```
+
+Coordinates in a layout dump and in `rect_out` are window coordinates, so a body
+that starts under the band starts at `y = 37`.
+
 zigui draws the window chrome (the title band, traffic-light gutter, the rest);
 you style the content in your tree. `feel` is `.liquid_glass` (a translucent,
 blurred bar - the default), `.flat` (an opaque bar), or `.transparent` (no chrome

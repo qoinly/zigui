@@ -65,8 +65,21 @@ const dark = zigui.Theme.default_dark();   // bg #0A0A0A, fg #FAFAFA
 const light = zigui.Theme.default_light();  // bg #FFFFFF, fg #0A0A0A
 ```
 
-Both set `radius = 8`, `font_size = 14`, `font_family = ""`. To customize, start
-from one and override fields:
+Both set `radius = 8`, `font_size = 14`, `font_family = ""`.
+
+The two palettes follow shadcn/ui's zinc theme, so several tokens share one value:
+
+| Theme | Same color |
+|---|---|
+| dark | `background` and `card`; `secondary`, `muted`, `accent`, `border`, and `input` |
+| light | `background` and `card`; `secondary`, `muted`, and `accent`; `border` and `input` |
+
+That means you cannot tell states apart by switching tokens. A row that uses
+`accent` for hover and `muted` for selected looks the same in both states, and a
+`card` panel does not stand out from the page. Derive the steps instead, as shown
+in [Deriving shades](#deriving-shades).
+
+To customize, start from one and override fields:
 
 ```zig
 var t = zigui.Theme.default_dark();
@@ -193,6 +206,18 @@ a hover or elevated shade that tracks both light and dark themes.
 .bg = t.secondary,
 .hover_bg = zigui.mix(t.secondary, t.foreground, 0.12),  // lift on hover
 ```
+
+For a set of states that stay distinct in both themes, mix the background toward
+the foreground by increasing amounts:
+
+```zig
+const panel = zigui.mix(t.background, t.foreground, 0.04);    // a raised surface
+const hovered = zigui.mix(t.background, t.foreground, 0.08);  // pointer over a row
+const selected = zigui.mix(t.background, t.foreground, 0.14); // the chosen row
+```
+
+Check that anything drawn on a selected row, such as an avatar circle, still
+stands out from it.
 
 `mix` asserts `0 <= t <= 1`.
 

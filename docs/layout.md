@@ -82,7 +82,25 @@ zigui.text("Hello", .{ .size = 16, .weight = .semi_bold })
 | `font_family` | `[]const u8` | `""` | override the font family (e.g. a mono family for code/URLs); empty inherits the theme's |
 
 Text color resolves at draw time from the theme. Leave `color` null to track
-light and dark. Text wraps to the width it is handed by layout; set `truncate` for a
+light and dark.
+
+A text node keeps a reference to your string and reads it when the frame is
+drawn, after your view has returned. The string has to live that long. A string
+literal, your state, or `f.arena` all do. A buffer on the stack does not, and the
+text then draws as garbage:
+
+```zig
+// Wrong: buf is gone by the time the text is drawn.
+var buf: [64]u8 = undefined;
+const s = std.fmt.bufPrint(&buf, "Showing {d} of {d}", .{ shown, total }) catch "";
+
+// Right: the frame arena lives until the frame is drawn.
+const s = std.fmt.allocPrint(f.arena, "Showing {d} of {d}", .{ shown, total }) catch "";
+zigui.text(s, .{ .muted = true })
+```
+
+The same holds for every string you hand to a builder, such as a `name`, a
+button label, or a `hover_id`. Text wraps to the width it is handed by layout; set `truncate` for a
 single ellipsized line. Register a bundled or custom family with
 `zigui.register_font_file` before naming it here. See [Theming](theming.md).
 
