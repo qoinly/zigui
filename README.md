@@ -8,7 +8,7 @@
 
 ## Requirements
 
-- Zig 0.16.0
+- Zig 0.17.1
 - macOS (Metal), Windows (Direct3D 11), Linux (Vulkan; Wayland or X11),
   Android (Vulkan; min API 26), or iOS (Metal; min 15.0, Simulator)
 
