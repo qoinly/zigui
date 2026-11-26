@@ -107,6 +107,7 @@ full list is in `src/icon.zig`.
 | `size` | `f32` | `16` | Point size; the node reserves a square slot this wide. |
 | `color` | `Rgba` | `{ 1, 1, 1, 1 }` | Tint. Pass a theme color (e.g. `t.foreground`). |
 | `source` | `?IconSource` | `null` | Where the glyph comes from. `null` uses the engine default. |
+| `filled` | `bool` | `false` | Draw the glyph solid: closed shapes are filled and their inner strokes are cut out. Works on the bundled set. |
 
 `IconSource`:
 
@@ -116,7 +117,14 @@ full list is in `src/icon.zig`.
 | `.bundled` | Lucide, the same glyph on every platform. |
 
 A member with no glyph in the chosen source logs one dev warning and draws nothing
-(e.g. a `*_fill` member under `.bundled`, since Lucide is stroke-only).
+(e.g. a `*_fill` member under `.bundled`, since Lucide has no `*_fill` glyphs).
+
+For a solid version of a bundled icon, such as the active tab in a tab bar or a
+starred item, keep the same member and set `filled`:
+
+```zig
+zigui.icon(.star, .{ .size = 16, .color = t.primary, .filled = app.starred })
+```
 
 ## separator
 
