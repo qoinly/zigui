@@ -144,6 +144,9 @@ const WindowSet = struct {
 // handler, which runs between frames). Applied to the window at the top of the
 // next frame so f.theme reflects it immediately; a null means no change pending.
 pub var pending_theme: ?types.Theme = null;
+// The last swap that was applied, so a window rebuilt later (Android recreates it
+// when the app returns from the background) keeps it instead of the launch theme.
+pub var applied_theme: ?types.Theme = null;
 
 // The per-frame render bridge for one window, specialized on the view set. The
 // display link hands back the *Window as its context, so every callback drives
@@ -166,6 +169,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 w.theme = th;
                 w.handle.theme = th;
                 pc.handle.theme = th;
+                applied_theme = th;
                 pending_theme = null;
             }
             // High-water pool: reset both before building this frame's tree.
