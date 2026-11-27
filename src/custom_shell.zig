@@ -42,6 +42,11 @@ pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
 
+// The window took a new theme; a platform that tints system chrome to match follows it.
+pub fn theme_applied(theme: types.Theme) void {
+    if (comptime builtin.abi.isAndroid()) impl.theme_applied(theme);
+}
+
 // Raise the soft keyboard for a multi-line editor that keeps its own text; edits come back as
 // key events. Only touch platforms have a soft keyboard to raise.
 pub fn show_text_delta() bool {

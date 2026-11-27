@@ -119,6 +119,7 @@ pub const App = struct {
         // A theme picked at runtime wins over the one given to App.init, which wins over
         // the built-in dark theme.
         const theme = app_runtime.applied_theme orelse self.opts.theme orelse types.Theme.default_dark();
+        custom_shell.theme_applied(theme);
         const handle = custom_shell.open(.{
             .title = self.opts.title,
             .width = @floatCast(self.opts.size[0]),

@@ -169,6 +169,7 @@ pub fn WindowRunner(comptime State: type, comptime views: Views(State)) type {
                 w.theme = th;
                 w.handle.theme = th;
                 pc.handle.theme = th;
+                custom_shell.theme_applied(th);
                 applied_theme = th;
                 pending_theme = null;
             }

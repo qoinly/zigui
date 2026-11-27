@@ -309,6 +309,21 @@ pub fn show_text_field(
 // The id the keyboard is raised under while a multi-line editor has focus (see ime delta mode).
 const DELTA_FIELD_ID: u32 = 0xFFFF_FFFF;
 
+// Match the status and navigation bar icons to the theme: dark icons over a light background,
+// light ones over a dark background.
+pub fn theme_applied(theme: types.Theme) void {
+    const bg = theme.background;
+    const light = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b > 0.5;
+    const env = jni.thread_env() orelse return;
+    const activity = jni.thread_activity() orelse return;
+    const table = env.*;
+    const class = table.GetObjectClass(env, activity) orelse return;
+    defer table.DeleteLocalRef(env, class);
+    const method = table.GetMethodID(env, class, "setLightSystemBars", "(Z)V") orelse return;
+    var args = [_]jni.jvalue{.{ .z = @intFromBool(light) }};
+    table.CallVoidMethodA(env, activity, method, &args);
+}
+
 // Whether a multi-line editor holds the keyboard (its editing keys are handled natively).
 pub fn text_delta_active() bool {
     return g_field_id == DELTA_FIELD_ID;

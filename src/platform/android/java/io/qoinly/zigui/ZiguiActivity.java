@@ -25,6 +25,7 @@ import android.text.TextWatcher;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
@@ -185,6 +186,26 @@ public class ZiguiActivity extends NativeActivity {
         InputMethodManager imm =
             (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         imm.restartInput(edit);
+    }
+
+    // Dark status and navigation bar icons over a light app, light icons over a dark one.
+    public void setLightSystemBars(final boolean light) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController c = getWindow().getInsetsController();
+                    if (c == null) return;
+                    int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    c.setSystemBarsAppearance(light ? mask : 0, mask);
+                    return;
+                }
+                View decor = getWindow().getDecorView();
+                int bits = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                int flags = decor.getSystemUiVisibility();
+                decor.setSystemUiVisibility(light ? (flags | bits) : (flags & ~bits));
+            }
+        });
     }
 
     public void hideKeyboard() {
