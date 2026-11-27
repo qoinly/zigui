@@ -233,7 +233,9 @@ pub fn app_bar(
     _ = sep.set_background(theme.border);
     try b.append_quad(sep);
 
-    var title_x = x + 16;
+    // The title's ink, not its text box, lands on the 16pt content edge: a 17pt semibold
+    // capital starts about 1pt into its advance.
+    var title_x = x + 15;
     if (opts.show_back) {
         std.debug.assert(w >= BAR_H); // the bar must seat the square chevron slot
         if (opts.paint) |p| {
