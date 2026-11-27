@@ -336,6 +336,12 @@ pub fn toggle(on_: bool, label: []const u8, w: kit_nodes.Wire) *node.Node {
     ww.ctx = ww.ctx orelse fc.state;
     return kit_nodes.toggle(fc.arena, fc.theme, on_, label, ww);
 }
+// How far the soft keyboard reaches up from the window's bottom edge, in points; 0 when it
+// is closed or the platform has none. A bottom sheet with a text field lifts by this much.
+pub fn keyboard_inset() f32 {
+    return custom_shell.keyboard_inset();
+}
+
 pub fn kbd(keys: []const []const u8) *node.Node {
     const fc = frame_ctx.get();
     return kit_nodes.kbd(fc.arena, fc.theme, keys);
