@@ -397,6 +397,16 @@ pub fn input(
     return kit_nodes.input(fc.arena, fc.theme, value, placeholder, size, ww);
 }
 pub const TextField = kit_nodes.TextField;
+pub const CodeInputState = kit_nodes.CodeInputState;
+pub const CodeOpts = kit_nodes.CodeOpts;
+// A short code in a row of boxes (see kit/code_input.zig).
+pub fn code_input(state: *CodeInputState, o: CodeOpts) *node.Node {
+    const fc = frame_ctx.get();
+    var oo = o;
+    oo.paint = fc.paint;
+    oo.ctx = o.ctx orelse fc.state;
+    return kit_nodes.code_input(fc.arena, fc.theme, state, oo);
+}
 pub const TextInputOpts = kit_nodes.TextInputOpts;
 pub fn text_input(field: *kit_nodes.TextField, o: kit_nodes.TextInputOpts) *node.Node {
     const fc = frame_ctx.get();

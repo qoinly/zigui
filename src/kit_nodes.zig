@@ -18,6 +18,7 @@ const checkbox_kit = @import("kit/checkbox.zig");
 const radio_kit = @import("kit/radio.zig");
 const switch_kit = @import("kit/switch.zig");
 const kbd_kit = @import("kit/kbd.zig");
+const code_input_kit = @import("kit/code_input.zig");
 const toggle_button_kit = @import("kit/toggle_button.zig");
 const separator_kit = @import("kit/separator.zig");
 const skeleton_kit = @import("kit/skeleton.zig");
@@ -881,6 +882,63 @@ const TextareaSpec = struct {
         );
     }
 };
+
+pub const CodeInputState = code_input_kit.CodeInputState;
+
+pub const CodeOpts = struct {
+    paint: ?*custom_paint.PaintContext = null, // the facade fills it
+    length: usize = 6,
+    group: usize = 3,
+    accept: code_input_kit.AcceptFn = code_input_kit.alnum_upper,
+    size: code_input_kit.CodeSize = .default,
+    center: bool = false,
+    invalid: bool = false,
+    font_family: ?[]const u8 = null,
+    reveal_below: f32 = 0,
+    on_focus: ?callbacks.FocusFn = null,
+    on_change: ?callbacks.ClickFn = null,
+    on_submit: ?callbacks.ClickFn = null,
+    ctx: ?*anyopaque = null,
+};
+
+const CodeInputSpec = struct {
+    theme: *const Theme,
+    state: *CodeInputState,
+    o: CodeOpts,
+    fn measure(b: *RenderBuilder, ctx: *anyopaque) SizeF {
+        _ = b;
+        const self: *CodeInputSpec = @ptrCast(@alignCast(ctx));
+        const w = if (self.o.center) 0 else code_input_kit.width_for(self.o.size, self.o.length, self.o.group);
+        return SizeF.init(w, code_input_kit.height_for(self.o.size));
+    }
+    fn draw(b: *RenderBuilder, ctx: *anyopaque, r: BoundsF) RenderError!void {
+        const self: *CodeInputSpec = @ptrCast(@alignCast(ctx));
+        const o = self.o;
+        _ = try code_input_kit.render(b, r.origin.x, r.origin.y, r.size.width, .{
+            .state = self.state,
+            .theme = self.theme,
+            .paint = o.paint.?,
+            .length = o.length,
+            .group = o.group,
+            .accept = o.accept,
+            .size = o.size,
+            .center = o.center,
+            .invalid = o.invalid,
+            .font_family = o.font_family,
+            .reveal_below = o.reveal_below,
+            .on_focus = o.on_focus,
+            .on_change = o.on_change,
+            .on_submit = o.on_submit,
+            .ctx = o.ctx,
+        });
+    }
+};
+
+pub fn code_input(a: A, theme: *const Theme, state: *CodeInputState, o: CodeOpts) *Node {
+    const spec = a.create(CodeInputSpec) catch @panic("node arena oom");
+    spec.* = .{ .theme = theme, .state = state, .o = o };
+    return node.leaf(a, CodeInputSpec.measure, CodeInputSpec.draw, spec);
+}
 
 pub fn textarea(a: A, theme: *const Theme, state: *textarea_kit.TextAreaState, o: Ta) *Node {
     const spec = a.create(TextareaSpec) catch @panic("node arena oom");

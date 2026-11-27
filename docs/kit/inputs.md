@@ -1,6 +1,6 @@
 # Inputs
 
-Form controls: `input` / `text_input` / `text_editable`, `textarea`, `checkbox`,
+Form controls: `input` / `text_input` / `text_editable`, `textarea`, `code_input`, `checkbox`,
 `radio`, `toggle`, `toggle_group`, `slider`, `select`. They return `*zigui.Node`,
 so they nest in `col` / `row` / `grid` like any node. No allocator, theme, or paint
 to pass - the frame supplies them.
@@ -271,6 +271,47 @@ with `caret_out`.
 | `Completion` | `open`, `count`, `selected`, `commit`, `dismiss` |
 |---|---|
 | `Snippet` | `active`, `next`, `prev`, `cancel` |
+
+## Code input
+
+`code_input` takes a short code (a pairing or one-time code) in a row of boxes, one character
+each, with a dash between groups. Typing comes from the key queue like the textarea's, so a
+hardware keyboard, the Android soft keyboard and Cmd/Ctrl+V all fill it the same way. The caller
+owns a `CodeInputState`.
+
+```zig
+var code: zigui.CodeInputState = .{};
+
+fn crockford(ch: u8) ?u8 {
+    if (!std.ascii.isAlphanumeric(ch)) return null;
+    return switch (std.ascii.toUpper(ch)) {
+        'O' => '0',
+        'I', 'L' => '1',
+        else => |u| u,
+    };
+}
+
+zigui.code_input(&code, .{
+    .length = 6,
+    .group = 3, // reads ABC-123
+    .accept = crockford, // rewrite or drop each typed byte
+    .size = .lg, // .default is 36x44 boxes, .lg is 44x52
+    .center = true, // centre the boxes in the width it gets
+    .invalid = refused, // red borders
+    .reveal_below = 64, // the soft keyboard also keeps this much under the boxes in view
+    .on_submit = zigui.on(App, send), // Enter, including the Android keyboard's
+    .on_change = zigui.on(App, edited),
+});
+```
+
+- `accept` runs on every typed or pasted byte. Return the byte to store, or null to drop it.
+  The default keeps letters and digits, upper-cased. A paste like `" abc-123 "` lands as `ABC123`.
+- `code.paste(length, accept)` fills it from the clipboard for a Paste button, and returns false
+  when nothing usable was there. On Android, only read the clipboard on a tap like this.
+- Backspace deletes the last character. Cmd/Ctrl+Backspace clears all of it. Escape blurs.
+- A tap focuses it, and a press anywhere else blurs it. `code.slice()` is the code, and
+  `code = .{}` resets it and drops focus.
+- When the code is complete, the last box keeps the focus ring. Typing more is ignored.
 
 ## Checkbox, radio, toggle
 

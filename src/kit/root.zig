@@ -26,6 +26,7 @@ pub const toggle = @import("switch.zig"); // switch is a keyword, so the Switch 
 pub const toggle_button = @import("toggle_button.zig");
 pub const toggle_group = @import("toggle_group.zig");
 pub const kbd = @import("kbd.zig");
+pub const code_input = @import("code_input.zig");
 pub const sheet = @import("sheet.zig");
 pub const resizable = @import("resizable.zig");
 pub const radio = @import("radio.zig");
