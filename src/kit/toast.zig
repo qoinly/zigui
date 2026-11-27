@@ -24,7 +24,13 @@ pub const ToastOptions = struct {
     icon: ?icon.Icon = null,
     theme: *const Theme,
     opacity: f32 = 1, // for the shell's enter/exit fade
+    // A text button at the right edge (e.g. "Undo"); the shell owns its hitbox, at action_rect.
+    action: []const u8 = "",
 };
+
+// Where render drew the action label's tap area, window-absolute [x, y, w, h]; zero without one.
+pub var action_rect: [4]f32 = .{ 0, 0, 0, 0 };
+const ACTION_PAD: f32 = 12; // the action's tap area reaches this far past its ink on each side
 
 pub const HEIGHT_PLAIN: f32 = 44;
 pub const HEIGHT_DESC: f32 = 62;
@@ -97,7 +103,17 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, opts: ToastOptions) Ren
 
     // Clamp to the card's inner width so a long message ellipsizes instead of
     // bleeding past the toast edge.
-    const text_max_w = x + w - PAD - tx;
+    action_rect = .{ 0, 0, 0, 0 };
+    var right = x + w - PAD;
+    if (opts.action.len > 0) {
+        const act_sty = label.Style{ .font_size = theme.font_size, .weight = .semi_bold, .color = tr.fade(theme.primary, op) };
+        const am = label.measure(b, opts.action, act_sty);
+        const ax = x + w - PAD - am.width;
+        _ = try label.render(b, ax, title_cy - (am.ascent + am.descent) / 2, opts.action, act_sty);
+        action_rect = .{ ax - ACTION_PAD, y, am.width + ACTION_PAD + PAD, h };
+        right = ax - ACTION_PAD;
+    }
+    const text_max_w = right - tx;
     _ = try label.render_clamped(b, tx, block_top, opts.title, text_max_w, title_sty);
     if (has_desc) {
         _ = try label.render_clamped(b, tx, block_top + title_h + DESC_GAP, opts.description, text_max_w, desc_sty);

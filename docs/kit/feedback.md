@@ -64,8 +64,14 @@ card's inner width and ellipsized.
 | `start_s` | `f64` | `0` | Wall-clock start, set when `started` flips |
 | `text` | `[]const u8` | `""` | The line shown; a static literal - the slot borrows it across frames |
 | `variant` | `ToastVariant` | `.default` | `default`, `success`, or `destructive` (sets accent + leading icon) |
+| `action` | `[]const u8` | `""` | A text button at the right edge, such as `"Undo"`; borrowed like `text` |
+| `on_action` | `?ClickFn` | `null` | Fires when the action is tapped; the toast then dismisses itself |
+| `action_ctx` | `?*anyopaque` | `null` | Handed to `on_action` |
 
 `ToastVariant` = `{ default, success, destructive }`.
+
+A toast with an action stays up for 6 seconds instead of 2.6, so there is time to reach
+it. The title is clamped so it never runs under the action.
 
 ### Wiring
 

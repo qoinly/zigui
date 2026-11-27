@@ -2313,6 +2313,11 @@ pub const ToastSlot = struct {
     start_s: f64 = 0,
     text: []const u8 = "", // a static literal; the layer borrows it across frames
     variant: toast_kit.ToastVariant = .default,
+    // An action at the toast's right edge ("Undo"). Tapping it fires on_action and dismisses
+    // the toast; a toast with an action stays up longer so there is time to reach it.
+    action: []const u8 = "",
+    on_action: ?callbacks.ClickFn = null,
+    action_ctx: ?*anyopaque = null,
 };
 
 const TOAST_W: f32 = 280;
@@ -2320,6 +2325,7 @@ const TOAST_GAP: f32 = 10;
 const TOAST_MARGIN: f32 = 24;
 const TOAST_ENTER: f64 = 0.18;
 const TOAST_VIS: f64 = 2.6;
+const TOAST_VIS_ACTION: f64 = 6.0;
 const TOAST_EXIT: f64 = 0.22;
 
 fn toast_icon(v: toast_kit.ToastVariant) icon_render.Icon {
@@ -2372,6 +2378,7 @@ const ToastsSpec = struct {
                 t.started = true;
             }
             const el = pc.now_s - t.start_s;
+            const vis: f64 = if (t.on_action != null) TOAST_VIS_ACTION else TOAST_VIS;
             var opacity: f32 = 1;
             var off: f32 = 0;
             if (el < TOAST_ENTER) {
@@ -2379,10 +2386,10 @@ const ToastsSpec = struct {
                 const s = e * (2 - e);
                 opacity = s;
                 off = (1 - s) * 16;
-            } else if (el < TOAST_ENTER + TOAST_VIS) {
+            } else if (el < TOAST_ENTER + vis) {
                 opacity = 1;
-            } else if (el < TOAST_ENTER + TOAST_VIS + TOAST_EXIT) {
-                const e: f32 = @floatCast((el - TOAST_ENTER - TOAST_VIS) / TOAST_EXIT);
+            } else if (el < TOAST_ENTER + vis + TOAST_EXIT) {
+                const e: f32 = @floatCast((el - TOAST_ENTER - vis) / TOAST_EXIT);
                 const s = e * (2 - e);
                 opacity = 1 - s;
                 off = s * 8;
@@ -2400,13 +2407,26 @@ const ToastsSpec = struct {
                 .icon = toast_icon(t.variant),
                 .theme = self.theme,
                 .opacity = opacity,
+                .action = if (t.on_action != null) t.action else "",
             });
+            if (t.on_action != null) {
+                const ar = toast_kit.action_rect;
+                try pc.add_hitbox(.{ .x = ar[0], .y = ar[1], .w = ar[2], .h = ar[3], .on_click = fire_toast_action, .ctx = t });
+            }
             mask_behind(b.sprites.items[0..body_end], .{ tx, ty, sz.width, sz.height });
             stack += 1;
         }
         if (any) pc.animating = true;
     }
 };
+
+// The slot is caller-owned and lives across frames, so it is a stable click context.
+fn fire_toast_action(ctx: ?*anyopaque) void {
+    const t: *ToastSlot = @ptrCast(@alignCast(ctx.?));
+    const cb = t.on_action orelse return;
+    t.active = false;
+    cb(t.action_ctx);
+}
 
 pub fn toasts(a: A, theme: *const Theme, o: Toasts) *Node {
     const spec = a.create(ToastsSpec) catch @panic("node arena oom");
