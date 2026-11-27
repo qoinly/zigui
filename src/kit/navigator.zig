@@ -202,7 +202,15 @@ fn store_bytes(buf: []u8, len: *usize, s: []const u8) void {
 pub const AppBarOptions = struct {
     show_back: bool = false,
     paint: ?*custom_paint.PaintContext = null,
+    // Make the title a menu trigger (e.g. a workspace or account switcher): a chevron
+    // follows it and a tap on either fires this with title_ctx.
+    on_title: ?*const fn (ctx: ?*anyopaque) void = null,
+    title_ctx: ?*anyopaque = null,
 };
+
+const TITLE_CHEVRON: f32 = 16; // the down chevron after a tappable title
+const TITLE_GAP: f32 = 4; // title to chevron
+const TITLE_HIT_PAD: f32 = 8; // the tap target reaches this far past the ink
 
 // The back-chevron tap funnels through the same back request as Esc / the Android
 // Back button (handle_back pops on it), so a navigator needs no per-bar callback.
@@ -264,5 +272,21 @@ pub fn app_bar(
     const ls = label.Style{ .font_size = 17, .weight = .semi_bold, .color = theme.foreground };
     const m = label.measure(b, title, ls);
     const top = y + (BAR_H - (m.ascent + m.descent)) / 2;
+
+    if (opts.on_title) |cb| if (opts.paint) |p| {
+        const chevron_x = title_x + m.width + TITLE_GAP;
+        const hit_x = title_x - TITLE_HIT_PAD;
+        const hit_w = @min(chevron_x + TITLE_CHEVRON + TITLE_HIT_PAD, x + w) - hit_x;
+        if (p.is_hovered(hit_x, y, hit_w, BAR_H)) {
+            var wash = Quad.init(hit_x, y + 6, hit_w, BAR_H - 12);
+            _ = wash.set_background(.{ .r = 1, .g = 1, .b = 1, .a = 0.06 }).set_corner_radius(8);
+            try b.append_quad(wash);
+        }
+        try p.add_hitbox(.{ .x = hit_x, .y = y, .w = hit_w, .h = BAR_H, .on_click = cb, .ctx = opts.title_ctx });
+        _ = try icon_render.render_icon_centered_xy(b, chevron_x, y, TITLE_CHEVRON, BAR_H, .chevron_down, .{
+            .point_size = TITLE_CHEVRON,
+            .color = theme.muted_foreground,
+        });
+    };
     _ = try label.render(b, title_x, top, title, ls);
 }

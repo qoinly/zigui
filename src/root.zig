@@ -602,6 +602,7 @@ pub fn app_bar(title: []const u8, o: kit_nodes.AppBar) *node.Node {
     const fc = frame_ctx.get();
     var oo = o;
     oo.paint = fc.paint;
+    oo.title_ctx = oo.title_ctx orelse fc.state;
     return kit_nodes.app_bar(fc.arena, fc.theme, title, oo);
 }
 pub const AppBarOpts = kit_nodes.AppBar;

@@ -126,6 +126,8 @@ const ButtonSpec = struct {
 pub const AppBar = struct {
     show_back: bool = false,
     paint: ?*custom_paint.PaintContext = null,
+    on_title: ?callbacks.ClickFn = null, // a tappable title with a chevron (a switcher)
+    title_ctx: ?*anyopaque = null,
 };
 
 const AppBarSpec = struct {
@@ -147,7 +149,7 @@ const AppBarSpec = struct {
             r.size.width,
             self.title,
             self.theme,
-            .{ .show_back = self.o.show_back, .paint = self.o.paint },
+            .{ .show_back = self.o.show_back, .paint = self.o.paint, .on_title = self.o.on_title, .title_ctx = self.o.title_ctx },
         );
     }
 };
