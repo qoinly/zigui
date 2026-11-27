@@ -1218,6 +1218,16 @@ pub fn set_theme(t: Theme) void {
     app_runtime.pending_theme = t;
 }
 
+// Build part of one frame against another theme: the kit controls created until the
+// returned theme is passed back in read `t`. Set f.theme too, for your own boxes.
+// The pointer must live for the frame, so allocate it from f.arena.
+pub fn use_theme(t: *const Theme) *const Theme {
+    const fc = frame_ctx.get();
+    const prev = fc.theme;
+    fc.theme = t;
+    return prev;
+}
+
 const primitives = @import("primitives.zig");
 pub const Quad = primitives.Quad;
 pub const Primitive = primitives.Primitive;

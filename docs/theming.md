@@ -117,6 +117,30 @@ fn toggle_theme(app: *App) void {
 }
 ```
 
+### Theming one part of a frame
+
+To give one subtree different colors (an accent for a set of dialogs, a lighter
+sheet), copy the theme into the frame arena, change what you need, and build the
+subtree against it. Setting `f.theme` alone only reaches the boxes you color
+yourself. Kit controls like `zigui.button` read the frame context, so swap that too
+with `zigui.use_theme`, and restore both when the subtree is done.
+
+```zig
+fn dialogs(f: *zigui.Frame, app: *App) ?*zigui.Node {
+    const base = f.theme;
+    const t = f.arena.create(zigui.Theme) catch return build_dialogs(f, app);
+    t.* = base.*;
+    t.primary = brand;
+    f.theme = t;
+    const prev = zigui.use_theme(t);
+    defer {
+        f.theme = base;
+        _ = zigui.use_theme(prev);
+    }
+    return build_dialogs(f, app);
+}
+```
+
 ## Spacing
 
 `gap` and `pad` take a `Spacing` token, not a raw number. The token reads intent;
