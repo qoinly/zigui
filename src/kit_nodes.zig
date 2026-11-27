@@ -1523,14 +1523,15 @@ const DialogSpec = struct {
             .on_click = cb,
             .ctx = self.o.ctx,
         });
+        const h = dialog_kit.fit_height(b, self.theme, self.o.title, self.o.description, self.o.width, self.o.actions.len > 0, self.o.height);
         const cx = r.origin.x + (r.size.width - self.o.width) / 2;
-        const cy = r.origin.y + (r.size.height - self.o.height) / 2;
+        const cy = r.origin.y + (r.size.height - h) / 2;
         // Absorb clicks on the card so they don't reach the dismiss behind it.
         try pc.add_hitbox(.{
             .x = cx,
             .y = cy,
             .w = self.o.width,
-            .h = self.o.height,
+            .h = h,
             .on_click = dialog_absorb,
             .ctx = self.o.ctx,
         });
@@ -1548,7 +1549,7 @@ const DialogSpec = struct {
             .description = self.o.description,
             .actions = acts[0..n],
             .width = self.o.width,
-            .height = self.o.height,
+            .height = h,
             .theme = self.theme,
             .paint = pc,
         });

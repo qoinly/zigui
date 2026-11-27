@@ -16,7 +16,8 @@ pub const Quad = primitives.Quad;
 pub const Rect = [4]f32;
 
 const PAD: f32 = 22;
-const DESC_DY: f32 = 28; // title top to description top
+const DESC_GAP: f32 = 6; // title bottom to description top
+const BODY_GAP: f32 = 20; // description bottom to the action row
 const TITLE_DELTA: f32 = 4; // title size above base font
 const ELEVATION: f32 = 0.06;
 const ACTION_GAP: f32 = 8;
@@ -44,6 +45,24 @@ pub const DialogOptions = struct {
     paint: ?*custom_paint.PaintContext = null,
 };
 
+fn title_style(theme: *const Theme) label.Style {
+    return .{ .font_size = theme.font_size + TITLE_DELTA, .weight = .semi_bold, .color = theme.popover_foreground };
+}
+fn desc_style(theme: *const Theme) label.Style {
+    return .{ .font_size = theme.font_size, .weight = .normal, .color = theme.muted_foreground };
+}
+
+// The card height that fits the wrapped title and description above the actions, never
+// below `min_h` (the caller's height), so a short dialog keeps its usual size.
+pub fn fit_height(b: *RenderBuilder, theme: *const Theme, title: []const u8, description: ?[]const u8, width: f32, has_actions: bool, min_h: f32) f32 {
+    const text_w = @max(1, width - PAD * 2);
+    var h = PAD + label.measure_wrapped(b, title, title_style(theme), text_w).height;
+    if (description) |d| h += DESC_GAP + label.measure_wrapped(b, d, desc_style(theme), text_w).height;
+    if (has_actions) h += BODY_GAP + tr.button_geom_for(.default, theme).height;
+    h += PAD;
+    return @max(min_h, h);
+}
+
 // Caller must draw the scrim AND mask the body glyphs behind the rect: the
 // renderer flushes glyphs over all quads, so a scrim quad alone can't hide them.
 pub fn render(b: *RenderBuilder, x: f32, y: f32, opts: DialogOptions) RenderError!Rect {
@@ -57,17 +76,11 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, opts: DialogOptions) RenderErro
         .set_border_width(1);
     try b.append_quad(card);
 
-    _ = try label.render(b, x + PAD, y + PAD, opts.title, .{
-        .font_size = theme.font_size + TITLE_DELTA,
-        .weight = .semi_bold,
-        .color = theme.popover_foreground,
-    });
+    // Both wrap to the card: a long name in the title or a sentence of description stays inside.
+    const text_w = @max(1, opts.width - PAD * 2);
+    const title_h = try label.render_wrapped(b, x + PAD, y + PAD, opts.title, title_style(theme), text_w);
     if (opts.description) |desc| {
-        _ = try label.render(b, x + PAD, y + PAD + DESC_DY, desc, .{
-            .font_size = theme.font_size,
-            .weight = .normal,
-            .color = theme.muted_foreground,
-        });
+        _ = try label.render_wrapped(b, x + PAD, y + PAD + title_h + DESC_GAP, desc, desc_style(theme), text_w);
     }
 
     if (opts.actions.len > 0) {

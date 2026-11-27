@@ -432,7 +432,7 @@ zigui.dialog(.{
 | `description` | `?[]const u8` | `null` | body text |
 | `actions` | `[]const DialogAction` | `&.{}` | footer buttons (max 4) |
 | `width` | `f32` | `420` | card width |
-| `height` | `f32` | `188` | card height |
+| `height` | `f32` | `188` | minimum card height; a long title or description wraps and the card grows to fit |
 | `on_dismiss` | `?ClickFn` | `null` | wrap with `zigui.on(State, f)`; outside-click close |
 
 `DialogAction`: `label: []const u8`, `variant: Variant = .default`,
