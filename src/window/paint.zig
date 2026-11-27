@@ -246,12 +246,14 @@ pub const PaintContext = struct {
     text_focus_blur: ?*const fn (*anyopaque) void = null,
     // The focused native text field's laid-out rect + id + the time it was last shown,
     // recorded by show_text_field, so a scroll can keep the focused field visible above the
-    // soft keyboard. kbd_scrolled_id marks the last field a scroll auto-adjusted for, so it
-    // nudges once per focus (not every frame, which would fight the user's own scrolling).
+    // soft keyboard. kbd_scrolled_id/top record the field and keyboard line a scroll last
+    // adjusted for: it nudges again only when the keyboard rises past that line (it is still
+    // opening), never every frame, which would fight the user's own scrolling.
     focused_field_rect: ?[4]f32 = null,
     focused_field_id: u32 = 0,
     focused_field_t: f64 = -1,
     kbd_scrolled_id: u32 = 0,
+    kbd_scrolled_top: f32 = 1e9,
     // Absolute Y (points) where the soft keyboard starts; a huge value means no keyboard.
     // A keyboard-aware scroll keeps the focused field above this line.
     kbd_top_y: f32 = 1e9,

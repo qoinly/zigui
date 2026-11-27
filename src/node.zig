@@ -942,14 +942,21 @@ fn draw_scroll(
     // field rect is from the prior frame (show_text_field runs as a child), so it converges
     // in a frame.
     if (pc) |p| if (p.focused_field_rect) |fr| {
-        if (p.now_s - p.focused_field_t < 0.1 and p.focused_field_id != p.kbd_scrolled_id) {
-            const fcx = fr[0] + fr[2] * 0.5;
-            const field_bottom = fr[1] + fr[3];
-            const inside = fcx >= view[0] and fcx <= view[0] + vw and fr[1] >= view[1] - 1 and fr[1] <= view[1] + vh;
-            const margin: f32 = 14;
-            if (inside and field_bottom > p.kbd_top_y - margin and eff_max_y > 0) {
-                st.y = std.math.clamp(st.y + (field_bottom - (p.kbd_top_y - margin)), 0, eff_max_y);
+        const fcx = fr[0] + fr[2] * 0.5;
+        const inside = fcx >= view[0] and fcx <= view[0] + vw and fr[1] >= view[1] - 1 and fr[1] <= view[1] + vh;
+        if (inside) {
+            if (p.focused_field_id != p.kbd_scrolled_id) {
                 p.kbd_scrolled_id = p.focused_field_id;
+                p.kbd_scrolled_top = 1e9;
+            }
+            // The keyboard appeared or is still rising: keep the field just above it.
+            if (p.kbd_top_y < p.kbd_scrolled_top) {
+                const field_bottom = fr[1] + fr[3];
+                const margin: f32 = 14;
+                if (field_bottom > p.kbd_top_y - margin and eff_max_y > 0) {
+                    st.y = std.math.clamp(st.y + (field_bottom - (p.kbd_top_y - margin)), 0, eff_max_y);
+                }
+                p.kbd_scrolled_top = p.kbd_top_y;
             }
         }
     };

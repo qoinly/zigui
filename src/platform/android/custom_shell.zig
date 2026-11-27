@@ -109,7 +109,9 @@ pub fn set_insets(insets: jni.Insets) void {
 // The soft-keyboard (IME) bottom inset in pixels, pushed from Java's window-insets listener.
 var g_ime_px: i32 = 0;
 pub fn set_ime_inset(px: i32) void {
+    if (px == g_ime_px) return;
     g_ime_px = px;
+    request_redraw(); // layout follows the keyboard as it opens and closes
 }
 // The keyboard inset in points (0 when hidden), for keyboard-aware scrolling.
 pub fn keyboard_inset() f32 {

@@ -1745,6 +1745,8 @@ fn edit_native(
     // A background window does not own the editor, so it neither animates a caret
     // nor reads the value (that would pull the other window's text into this one).
     if (!shown) return;
+    // Keep the whole box above a soft keyboard, not just the text line inside it.
+    pc.focused_field_rect = .{ r.origin.x, r.origin.y, r.size.width, r.size.height };
     // Android pushes every keyboard edit and wakes the loop, so only the caret's blink needs a
     // frame. Elsewhere the value is read back from the native field, so keep polling.
     if (comptime builtin.abi.isAndroid()) {
