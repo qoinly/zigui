@@ -1126,31 +1126,27 @@ pub const LayoutEngine = struct {
         // a sibling underneath reserves too little and they overlap. Columns give every child the
         // full width (they stack), so this narrowing is row-only and never enlarges the estimate.
         var used_main: f32 = 0;
+        // A growing child also shares the row with the fixed siblings AFTER it (a label before
+        // a trailing button), so reserve their widths too when measuring it.
+        var fixed_after: f32 = 0;
+        if (is_row) {
+            for (node.children.items) |child_id| {
+                if (self.nodes.items[child_id.index].style.flex_grow > 0) continue;
+                fixed_after += self.measure_child(child_id, content_width, content_width, content_height, depth).width + gap;
+            }
+        }
 
         for (node.children.items) |child_id| {
-            var child = &self.nodes.items[child_id.index];
-            const avail_w = if (is_row) @max(content_width - used_main, 0) else content_width;
+            const grows = self.nodes.items[child_id.index].style.flex_grow > 0;
+            if (is_row and !grows) fixed_after -= self.measure_child(child_id, content_width, content_width, content_height, depth).width + gap;
+            const avail_w = if (!is_row)
+                content_width
+            else if (grows)
+                @max(content_width - used_main - @max(fixed_after, 0), 0)
+            else
+                @max(content_width - used_main, 0);
 
-            var child_size: Size(f32) = undefined;
-
-            if (child.measure_fn) |measure_fn| {
-                const prop = SizeProposal{ .width = avail_w, .height = content_height };
-                child_size = finite_size(measure_fn(child.measure_ctx.?, prop));
-                child.content_size = child_size;
-            } else if (child.children.items.len > 0) {
-                child_size = self.measure_intrinsic_size(
-                    child_id,
-                    avail_w,
-                    content_height,
-                    depth + 1,
-                );
-                child.content_size = child_size;
-            } else {
-                child_size = .{
-                    .width = self.resolve_length(child.style.width, content_width) orelse 0,
-                    .height = self.resolve_length(child.style.height, content_height) orelse 0,
-                };
-            }
+            const child_size = self.measure_child(child_id, avail_w, content_width, content_height, depth);
 
             const child_main = if (is_row) child_size.width else child_size.height;
             const child_cross = if (is_row) child_size.height else child_size.width;
@@ -1171,6 +1167,26 @@ pub const LayoutEngine = struct {
         return .{
             .width = explicit_w orelse final_width,
             .height = explicit_h orelse final_height,
+        };
+    }
+
+    // One child's intrinsic size, offered `avail_w` across (percent widths resolve against
+    // `content_width`). Records it as the child's content size, as layout expects.
+    fn measure_child(self: *LayoutEngine, child_id: LayoutId, avail_w: f32, content_width: f32, content_height: f32, depth: u32) Size(f32) {
+        const child = &self.nodes.items[child_id.index];
+        if (child.measure_fn) |measure_fn| {
+            const size = finite_size(measure_fn(child.measure_ctx.?, .{ .width = avail_w, .height = content_height }));
+            child.content_size = size;
+            return size;
+        }
+        if (child.children.items.len > 0) {
+            const size = self.measure_intrinsic_size(child_id, avail_w, content_height, depth + 1);
+            child.content_size = size;
+            return size;
+        }
+        return .{
+            .width = self.resolve_length(child.style.width, content_width) orelse 0,
+            .height = self.resolve_length(child.style.height, content_height) orelse 0,
         };
     }
 
@@ -1597,6 +1613,38 @@ test "wrap row reports stacked height so a sibling below doesn't overlap" {
     eng.compute(.{ .width = 250, .height = 400 });
 
     try std.testing.expect(eng.get_bounds(footer).origin.y == 70);
+}
+
+test "a growing row child is measured beside the fixed siblings after it" {
+    var eng = LayoutEngine.init(std.testing.allocator);
+    defer eng.deinit();
+
+    // A 300px column: a row of [growing text][100px button], then a footer. The text is
+    // 250px on one line and wraps at any narrower width into 20px lines. Beside the button
+    // it gets 300 - 100 - 10 = 190px, so it wraps to two lines and the row is 40 tall; the
+    // footer must sit at y=40, not at the one-line 20 the text would claim at full width.
+    const Text = struct {
+        fn measure(ctx: *anyopaque, p: SizeProposal) Size(f32) {
+            _ = ctx;
+            const w = p.width orelse 250;
+            const lines: f32 = if (w >= 250) 1 else 2;
+            return .{ .width = @min(w, 250), .height = 20 * lines };
+        }
+    };
+    var dummy: u8 = 0;
+    const col = try eng.add_node(.{ .flex_direction = .column, .width = .{ .px = 300 }, .height = .{ .px = 400 } });
+    const row = try eng.add_node(.{ .flex_direction = .row, .column_gap = .{ .px = 10 } });
+    try eng.add_child(col, row);
+    const text = try eng.add_node_with_measure(.{ .flex_grow = 1 }, Text.measure, &dummy);
+    try eng.add_child(row, text);
+    const button = try eng.add_node(.{ .width = .{ .px = 100 }, .height = .{ .px = 32 } });
+    try eng.add_child(row, button);
+    const footer = try eng.add_node(.{ .width = .{ .px = 300 }, .height = .{ .px = 20 } });
+    try eng.add_child(col, footer);
+    eng.set_root(col);
+    eng.compute(.{ .width = 300, .height = 400 });
+
+    try std.testing.expectEqual(@as(f32, 40), eng.get_bounds(footer).origin.y);
 }
 
 test "grid_cols packs exactly N equal tracks per row" {

@@ -26,6 +26,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.window.OnBackInvokedCallback;
@@ -66,6 +67,11 @@ public class ZiguiActivity extends NativeActivity {
         super.onCreate(state);
         setupFoldListener();
         setupImeInsetListener();
+        // The keyboard only ever opens because a field asked for it. Without this the system can
+        // bring it back with the window (seen after the app restarts while it was up), over a
+        // screen with no field focused, where nothing would hide it again.
+        int adjust = getWindow().getAttributes().softInputMode & WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST;
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN | adjust);
         edit = new EditText(this);
         edit.setFocusable(true);
         edit.setFocusableInTouchMode(true);
