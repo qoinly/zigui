@@ -42,6 +42,13 @@ pub const show_text_field = impl.show_text_field;
 pub const hide_text_field = impl.hide_text_field;
 pub const text_field_value = impl.text_field_value;
 
+// Raise the soft keyboard for a multi-line editor that keeps its own text; edits come back as
+// key events. Only touch platforms have a soft keyboard to raise.
+pub fn show_text_delta() bool {
+    if (comptime !builtin.abi.isAndroid()) return false;
+    return impl.show_text_delta();
+}
+
 // Recolor a native-painted single-line editor's text per `spans` and set `font`,
 // live while editing. Only meaningful where the native control draws the text
 // (macOS today); the overlay backends (Linux) already colorize via the kit, so

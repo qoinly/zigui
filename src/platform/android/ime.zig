@@ -7,6 +7,7 @@
 const std = @import("std");
 const jni = @import("jni.zig");
 const utf8 = @import("napi/utf8.zig");
+const custom_shell = @import("custom_shell.zig");
 
 pub const FIELD_BUF_MAX: usize = 256;
 
@@ -33,6 +34,7 @@ pub fn on_native_text(env_ptr: *anyopaque, text: ?*anyopaque, caret_index: i32) 
     g_caret = @min(clamped, g_len);
     std.debug.assert(g_len <= g_buf.len);
     std.debug.assert(g_caret <= g_len);
+    custom_shell.request_redraw();
 }
 
 // Seeds the editor with the field's current value and raises the soft keyboard.
@@ -54,6 +56,45 @@ pub fn show_keyboard(initial: []const u8) void {
     defer table.DeleteLocalRef(env, java_string);
     var args = [_]jni.jvalue{.{ .l = java_string }};
     table.CallVoidMethodA(env, activity, method, &args);
+}
+
+// Delta mode, for multi-line editors that keep their own text (a textarea can be far larger
+// than this bridge's buffer, and owns its caret, selection and undo). The hidden editor holds
+// only a fixed filler; the activity reports each edit as characters deleted before the caret
+// plus text inserted, and those arrive here as ordinary key events for the focused editor.
+pub fn show_keyboard_delta() void {
+    const env = jni.thread_env() orelse return;
+    const activity = jni.thread_activity() orelse return;
+    const table = env.*;
+    const class = table.GetObjectClass(env, activity) orelse return;
+    defer table.DeleteLocalRef(env, class);
+    const method = table.GetMethodID(env, class, "showKeyboardDelta", "()V") orelse return;
+    table.CallVoidMethodA(env, activity, method, null);
+}
+
+// The activity's nativeOnDelta forwards here (main thread, like the frame loop).
+pub fn on_native_delta(env_ptr: *anyopaque, deleted: i32, text: ?*anyopaque) void {
+    const d = custom_shell.mouse_dispatch() orelse return;
+    var n: i32 = 0;
+    while (n < deleted) : (n += 1) d.on_key(d.ctx, .{ .code = .backspace });
+    if (text) |text_ref| {
+        const env: jni.JNIEnv = @ptrCast(@alignCast(env_ptr));
+        const table = env.*;
+        const chars = table.GetStringUTFChars(env, text_ref, null) orelse return;
+        defer table.ReleaseStringUTFChars(env, text_ref, chars);
+        const view = std.unicode.Utf8View.init(std.mem.span(chars)) catch return;
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| {
+            if (cp == '\n') {
+                d.on_key(d.ctx, .{ .code = .enter });
+            } else if (cp == '\t') {
+                d.on_key(d.ctx, .{ .code = .tab });
+            } else {
+                d.on_key(d.ctx, .{ .code = .char, .ch = cp });
+            }
+        }
+    }
+    custom_shell.request_redraw();
 }
 
 pub fn hide_keyboard() void {

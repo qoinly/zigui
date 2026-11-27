@@ -156,6 +156,27 @@ fullscreen surface: no extra windows and no custom window chrome.
 
 `examples/android-app` is a full working app driving the kit and the native APIs.
 
+### Typing
+
+A focused `text_input` or `textarea` raises the soft keyboard on its own; there is
+nothing to wire. Both go through one hidden `EditText` in the shipped activity,
+in two modes:
+
+- A `text_input` mirrors the field's value into it (up to 256 bytes) and reads it
+  back as the user types, so the keyboard's suggestions and autocorrect work.
+- A `textarea` keeps its text native and uses the hidden field only as a source of
+  edits: each change arrives as characters deleted before the caret plus the text
+  inserted, delivered as ordinary key events. Its size is not limited by the
+  bridge, and its caret, selection, undo and code edits behave as on desktop. The
+  keyboard opens without suggestions, since they would rewrite text the field
+  cannot see.
+
+Backspace, Enter, Tab, the arrows, Home/End and Page Up/Down from a hardware
+keyboard reach a focused `textarea` directly.
+
+Neither mode renders continuously while focused: an edit wakes the loop, and
+otherwise the only frames are the caret's blink.
+
 ## Native APIs
 
 Platform integration lives under `zigui.napi.*`, one struct per domain. Every call

@@ -31,6 +31,17 @@ export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnText(
     ime.on_native_text(env, text, caret);
 }
 
+// Multi-line editing: characters deleted before the caret, then the inserted text.
+export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnDelta(
+    env: *anyopaque,
+    this: *anyopaque,
+    deleted: i32,
+    text: ?*anyopaque,
+) callconv(.c) void {
+    _ = this;
+    ime.on_native_delta(env, deleted, text);
+}
+
 // The back funnel: pop the route stack; the jboolean is whether the press was
 // consumed (the Java side backgrounds the app when it was not).
 export fn Java_io_qoinly_zigui_ZiguiActivity_nativeOnBack(

@@ -90,6 +90,7 @@ pub extern fn AMotionEvent_getX(*const AInputEvent, pointer_index: usize) f32;
 pub extern fn AMotionEvent_getY(*const AInputEvent, pointer_index: usize) f32;
 pub extern fn AKeyEvent_getAction(*const AInputEvent) i32;
 pub extern fn AKeyEvent_getKeyCode(*const AInputEvent) i32;
+pub extern fn AKeyEvent_getMetaState(*const AInputEvent) i32;
 
 pub const AINPUT_EVENT_TYPE_KEY: i32 = 1;
 pub const AINPUT_EVENT_TYPE_MOTION: i32 = 2;
@@ -102,6 +103,22 @@ pub const AMOTION_EVENT_ACTION_CANCEL: i32 = 3;
 pub const AKEY_EVENT_ACTION_DOWN: i32 = 0;
 pub const AKEY_EVENT_ACTION_UP: i32 = 1;
 pub const AKEYCODE_BACK: i32 = 4;
+pub const AKEYCODE_DPAD_UP: i32 = 19;
+pub const AKEYCODE_DPAD_DOWN: i32 = 20;
+pub const AKEYCODE_DPAD_LEFT: i32 = 21;
+pub const AKEYCODE_DPAD_RIGHT: i32 = 22;
+pub const AKEYCODE_TAB: i32 = 61;
+pub const AKEYCODE_ENTER: i32 = 66;
+pub const AKEYCODE_DEL: i32 = 67;
+pub const AKEYCODE_PAGE_UP: i32 = 92;
+pub const AKEYCODE_PAGE_DOWN: i32 = 93;
+pub const AKEYCODE_FORWARD_DEL: i32 = 112;
+pub const AKEYCODE_MOVE_HOME: i32 = 122;
+pub const AKEYCODE_MOVE_END: i32 = 123;
+pub const AKEYCODE_NUMPAD_ENTER: i32 = 160;
+pub const AMETA_SHIFT_ON: i32 = 0x01;
+pub const AMETA_ALT_ON: i32 = 0x02;
+pub const AMETA_CTRL_ON: i32 = 0x1000;
 
 pub const MAX_WINDOWS: u32 = 1; // one fullscreen surface per Activity
 

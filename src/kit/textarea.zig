@@ -20,6 +20,7 @@ pub const Rgba = color.Rgba;
 // Linux/Windows) and `mods.alt` as Option/Alt. So caret jumps split by OS: macOS uses Cmd+arrow for
 // line/doc and Option+arrow for word; elsewhere Ctrl(=cmd)+arrow jumps by word and Ctrl+Home/End by doc.
 const is_mac = builtin.os.tag == .macos;
+const touch_input = builtin.abi.isAndroid(); // typing arrives from the soft keyboard, raised while focused
 pub const Quad = primitives.Quad;
 pub const SizeF = @import("../geometry.zig").SizeF;
 pub const FontWeight = text_system.FontWeight;
@@ -2094,19 +2095,22 @@ pub fn render(
         p.request_redraw_after(next_blink_edge_s(st, p.now_s));
     }
 
-    // Caret rect for an overlay anchor (same geometry as draw_caret, but every focused frame, not
-    // gated on the blink). Zeroed when unfocused so a stale popup can hide.
-    if (opts.caret_out) |co| {
-        if (st.focused) {
-            const crow = vis_row_of_offset(st, st.caret);
-            const ccol = vis_col_of(st, crow, st.caret);
-            co.* = .{
-                g.text_x + @as(f32, @floatFromInt(ccol)) * st.char_w,
-                g.text_y + @as(f32, @floatFromInt(crow)) * g.line_h - st.scroll_y,
-                CARET_W,
-                g.line_h,
-            };
-        } else co.* = .{ 0, 0, 0, 0 };
+    // Caret rect (same geometry as draw_caret, but every focused frame, not gated on the blink):
+    // an overlay anchor via caret_out (zeroed when unfocused so a stale popup can hide), and on a
+    // touch screen the spot the soft keyboard must not cover.
+    const caret_rect: [4]f32 = if (st.focused) blk: {
+        const crow = vis_row_of_offset(st, st.caret);
+        const ccol = vis_col_of(st, crow, st.caret);
+        break :blk .{
+            g.text_x + @as(f32, @floatFromInt(ccol)) * st.char_w,
+            g.text_y + @as(f32, @floatFromInt(crow)) * g.line_h - st.scroll_y,
+            CARET_W,
+            g.line_h,
+        };
+    } else .{ 0, 0, 0, 0 };
+    if (opts.caret_out) |co| co.* = caret_rect;
+    if (touch_input and st.focused and !opts.read_only) {
+        p.show_text_delta(caret_rect[0], caret_rect[1], caret_rect[2], caret_rect[3]);
     }
 
     st.last_text_x = g.text_x;

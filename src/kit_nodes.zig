@@ -5,6 +5,7 @@
 // render.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const node = @import("node.zig");
 const kit = @import("kit/root.zig");
 const types = @import("window/types.zig");
@@ -863,8 +864,9 @@ const TextareaSpec = struct {
         const self: *TextareaSpec = @ptrCast(@alignCast(ctx));
         if (r.size.width <= 0) return;
         const pc = self.o.paint orelse return; // the facade always sets it
-        // Keep the loop ticking so the caret blinks between keystrokes.
-        if (self.state.focused) pc.animating = true;
+        // Keep the loop ticking so the caret blinks between keystrokes. On Android the editor
+        // schedules its blink edges itself and keyboard edits wake the loop, so it can idle.
+        if (self.state.focused and comptime !builtin.abi.isAndroid()) pc.animating = true;
         // The laid-out extent, not o.height: identical for a pinned height, but for a
         // grown editor it is the space flex just handed us — correct on the first frame.
         _ = try textarea_kit.render(
@@ -1743,7 +1745,11 @@ fn edit_native(
     // A background window does not own the editor, so it neither animates a caret
     // nor reads the value (that would pull the other window's text into this one).
     if (!shown) return;
-    pc.animating = true;
+    // Android pushes every keyboard edit and wakes the loop, so only the caret's blink needs a
+    // frame. Elsewhere the value is read back from the native field, so keep polling.
+    if (comptime builtin.abi.isAndroid()) {
+        pc.request_redraw_after(0.5 - @mod(pc.now_s, 0.5));
+    } else pc.animating = true;
     var tmp: [256]u8 = undefined;
     field.set(pc.text_field_value(&tmp));
     if (!custom_shell.text_field_native_paint) {

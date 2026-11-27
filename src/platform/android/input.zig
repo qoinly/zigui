@@ -42,6 +42,12 @@ fn drain(fd: c_int, events: c_int, data: ?*anyopaque) callconv(.c) c_int {
     var guard: u32 = 0;
     while (native.AInputQueue_getEvent(queue, &event) >= 0) : (guard += 1) {
         std.debug.assert(guard < MAX_DRAIN); // a wake's drain is always finite
+        // A multi-line editor's editing keys go straight to it. The IME would only hand them
+        // back (a soft keyboard sends Backspace and Enter as key events), seconds later.
+        if (editing_key(event)) {
+            native.AInputQueue_finishEvent(queue, event, 1);
+            continue;
+        }
         // A nonzero pre-dispatch means the queue will redeliver it (e.g. a key to
         // the IME); do not finish it here.
         if (native.AInputQueue_preDispatchEvent(queue, event) != 0) continue;
@@ -49,6 +55,37 @@ fn drain(fd: c_int, events: c_int, data: ?*anyopaque) callconv(.c) c_int {
         native.AInputQueue_finishEvent(queue, event, @intFromBool(handled));
     }
     return 1;
+}
+
+// While a multi-line editor holds the keyboard, turn an editing key into the editor's key
+// event. Returns whether the key was one (both its down and up are then consumed).
+fn editing_key(event: *native.AInputEvent) bool {
+    if (native.AInputEvent_getType(event) != native.AINPUT_EVENT_TYPE_KEY) return false;
+    if (!custom_shell.text_delta_active()) return false;
+    const code: custom_shell.KeyCode = switch (native.AKeyEvent_getKeyCode(event)) {
+        native.AKEYCODE_DEL => .backspace,
+        native.AKEYCODE_FORWARD_DEL => .delete_fwd,
+        native.AKEYCODE_ENTER, native.AKEYCODE_NUMPAD_ENTER => .enter,
+        native.AKEYCODE_TAB => .tab,
+        native.AKEYCODE_DPAD_LEFT => .left,
+        native.AKEYCODE_DPAD_RIGHT => .right,
+        native.AKEYCODE_DPAD_UP => .up,
+        native.AKEYCODE_DPAD_DOWN => .down,
+        native.AKEYCODE_MOVE_HOME => .home,
+        native.AKEYCODE_MOVE_END => .end,
+        native.AKEYCODE_PAGE_UP => .page_up,
+        native.AKEYCODE_PAGE_DOWN => .page_down,
+        else => return false,
+    };
+    if (native.AKeyEvent_getAction(event) != native.AKEY_EVENT_ACTION_DOWN) return true;
+    const d = custom_shell.mouse_dispatch() orelse return true;
+    const meta = native.AKeyEvent_getMetaState(event);
+    d.on_key(d.ctx, .{ .code = code, .mods = .{
+        .shift = meta & native.AMETA_SHIFT_ON != 0,
+        .alt = meta & native.AMETA_ALT_ON != 0,
+        .ctrl = meta & native.AMETA_CTRL_ON != 0,
+    } });
+    return true;
 }
 
 fn dispatch(event: *native.AInputEvent) bool {

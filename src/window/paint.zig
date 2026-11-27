@@ -16,6 +16,9 @@ const input = @import("../input.zig");
 const background = @import("../background.zig");
 const debug = @import("../debug.zig");
 
+// The focused-field id a multi-line editor reports while it holds the soft keyboard.
+const DELTA_FIELD_ID: u32 = 0xFFFF_FFFF;
+
 pub const CustomShellHandle = custom_shell.CustomShellHandle;
 pub const RenderBuilder = render.RenderBuilder;
 pub const HitBox = types.HitBox;
@@ -602,6 +605,18 @@ pub const PaintContext = struct {
         }
         return shown;
     }
+    // A focused multi-line editor on a touch platform: raise the soft keyboard in delta mode,
+    // whose edits come back through the key queue (see android ime). [x, y, w, h] is the caret,
+    // kept above the keyboard like a focused field. No-op where a hardware keyboard drives keys.
+    pub fn show_text_delta(self: *PaintContext, x: f32, y: f32, w: f32, h: f32) void {
+        if (comptime !builtin.abi.isAndroid()) return;
+        if (!custom_shell.show_text_delta()) return;
+        self.text_field_active = true;
+        if (self.focused_field_id != DELTA_FIELD_ID) self.focused_field_t = self.now_s;
+        self.focused_field_rect = .{ x, y, w, h };
+        self.focused_field_id = DELTA_FIELD_ID;
+    }
+
     pub fn text_field_value(self: *PaintContext, buf: []u8) []const u8 {
         _ = self;
         return custom_shell.text_field_value(buf);

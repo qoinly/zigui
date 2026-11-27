@@ -17,6 +17,7 @@ const types = @import("../../window/types.zig");
 const geometry = @import("../../geometry.zig");
 const jni = @import("jni.zig");
 const ime = @import("ime.zig");
+const display_link = @import("display_link.zig");
 const clipboard = @import("napi/clipboard.zig");
 
 pub const KeyMods = shell_types.KeyMods;
@@ -227,10 +228,17 @@ pub fn register_window_close(cb: WindowCloseFn, ctx: *anyopaque) void {
     _ = ctx;
 }
 
+var g_redraw: ?struct { cb: RedrawFn, ctx: *anyopaque } = null;
+
 pub fn register_hit_test(hit_test_cb: HitTestFn, redraw_cb: RedrawFn, ctx: *anyopaque) void {
     _ = hit_test_cb;
-    _ = redraw_cb;
-    _ = ctx;
+    g_redraw = .{ .cb = redraw_cb, .ctx = ctx };
+}
+
+// Draw a frame soon: something changed outside the frame loop (the keyboard edited a field).
+pub fn request_redraw() void {
+    if (g_redraw) |r| r.cb(r.ctx);
+    display_link.wake();
 }
 
 pub fn register_paint_now(cb: RedrawFn) void {
@@ -294,6 +302,22 @@ pub fn show_text_field(
     if (id != g_field_id) {
         g_field_id = id;
         ime.show_keyboard(initial);
+    }
+    return true;
+}
+
+// The id the keyboard is raised under while a multi-line editor has focus (see ime delta mode).
+const DELTA_FIELD_ID: u32 = 0xFFFF_FFFF;
+
+// Whether a multi-line editor holds the keyboard (its editing keys are handled natively).
+pub fn text_delta_active() bool {
+    return g_field_id == DELTA_FIELD_ID;
+}
+
+pub fn show_text_delta() bool {
+    if (g_field_id != DELTA_FIELD_ID) {
+        g_field_id = DELTA_FIELD_ID;
+        ime.show_keyboard_delta();
     }
     return true;
 }

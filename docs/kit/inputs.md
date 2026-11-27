@@ -208,6 +208,9 @@ State you read/write directly on the struct:
 | `focused` | `bool` | set it to focus; clear it (and your other areas) to blur |
 | `full` | `bool` | the last insert hit the backing capacity (show a cap hint) |
 
+On Android a focused, editable textarea raises the soft keyboard by itself; see
+[android.md](../android.md#typing).
+
 `TextBuffer`: `bytes: []u8` (your backing store), `len: usize`, `edit_seq: u64`
 (bumps on every edit - gate a re-tokenise on it). Methods: `slice()`,
 `insert_bytes(at, text)`, `delete_range(start, end)`.

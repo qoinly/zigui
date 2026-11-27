@@ -20,6 +20,7 @@ import android.os.CancellationSignal;
 import android.provider.OpenableColumns;
 import android.telephony.SmsManager;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.View;
 import android.view.ViewGroup;
@@ -45,6 +46,14 @@ import java.util.ArrayList;
 // names), so any app can declare it in its manifest and write zero Java.
 public class ZiguiActivity extends NativeActivity {
     private EditText edit;
+    private int plainInputType;
+    // Delta mode (a multi-line editor has focus): the editor holds only FILLER, each edit is
+    // reported as deletions before the caret plus inserted text, then the filler is put back.
+    private static final String FILLER = "                ";
+    private boolean delta;
+    private boolean refilling;
+    private int editDeleted;
+    private String editInserted = "";
     private Object layoutComponent; // androidx.window.extensions.layout.WindowLayoutComponent
     private Consumer<Object> layoutConsumer;
     private Method addLayoutListener;
@@ -62,11 +71,32 @@ public class ZiguiActivity extends NativeActivity {
         // 1x1 so it never visibly paints over the native surface, but still has a
         // real size + a place in the hierarchy so it can take focus and raise the IME.
         addContentView(edit, new ViewGroup.LayoutParams(1, 1));
+        plainInputType = edit.getInputType();
         edit.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
-            public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (!delta || refilling) return;
+                editDeleted += before;
+                editInserted += s.subSequence(start, start + count).toString();
+            }
             public void afterTextChanged(Editable s) {
-                nativeOnText(s.toString(), edit.getSelectionStart());
+                if (!delta) {
+                    nativeOnText(s.toString(), edit.getSelectionStart());
+                    return;
+                }
+                if (refilling) return;
+                int deleted = editDeleted;
+                String inserted = editInserted;
+                editDeleted = 0;
+                editInserted = "";
+                if (deleted > 0 || inserted.length() > 0) nativeOnDelta(deleted, inserted);
+                // Refill only after a real change: every rewrite is reported to the IME, and
+                // rewriting on its own echoes would loop.
+                if (FILLER.contentEquals(s)) return;
+                refilling = true;
+                s.replace(0, s.length(), FILLER);
+                edit.setSelection(FILLER.length());
+                refilling = false;
             }
         });
         // Predictive back (the default for targetSdk 35+) retires onBackPressed: the
@@ -112,6 +142,7 @@ public class ZiguiActivity extends NativeActivity {
     public void showKeyboard(final String initial) {
         runOnUiThread(new Runnable() {
             public void run() {
+                setDelta(false);
                 edit.setText(initial);
                 edit.setSelection(initial.length());
                 edit.requestFocus();
@@ -120,6 +151,40 @@ public class ZiguiActivity extends NativeActivity {
                 imm.showSoftInput(edit, 0);
             }
         });
+    }
+
+    // Called from native when a multi-line editor gains focus. Its text stays native; the
+    // keyboard only feeds edits. No suggestions or autocorrect: they would rewrite text the
+    // editor cannot see, and an editor holds code more often than prose.
+    public void showKeyboardDelta() {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                setDelta(true);
+                refilling = true;
+                edit.setText(FILLER);
+                edit.setSelection(FILLER.length());
+                refilling = false;
+                edit.requestFocus();
+                InputMethodManager imm =
+                    (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                imm.showSoftInput(edit, 0);
+            }
+        });
+    }
+
+    private void setDelta(boolean on) {
+        if (delta == on) return;
+        delta = on;
+        editDeleted = 0;
+        editInserted = "";
+        edit.setInputType(on
+            ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            : plainInputType);
+        InputMethodManager imm =
+            (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.restartInput(edit);
     }
 
     public void hideKeyboard() {
@@ -529,6 +594,8 @@ public class ZiguiActivity extends NativeActivity {
     private native void nativeOnFold(int state);
 
     private native void nativeOnText(String text, int caret);
+
+    private native void nativeOnDelta(int deleted, String inserted);
 
     private native boolean nativeOnBack();
 
