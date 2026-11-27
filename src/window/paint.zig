@@ -936,22 +936,9 @@ pub const PaintContext = struct {
             break :blk renderer.ClearColor.init(bg.r, bg.g, bg.b, 1);
         };
         const color_atlas_tex: ?*anyopaque = self.color_atlas.get_texture();
-        if (self.frost_count > 0) {
-            // The iOS bars marked frosted regions: the backdrop (up to the backdrop_*
-            // split) blurs under them, the bars' items draw crisp on top.
-            self.renderer.draw_frame_frost(
-                clear,
-                self.prims.items,
-                self.sprites.items,
-                self.text_system.mono_atlas_texture(),
-                self.color_sprites.items,
-                color_atlas_tex,
-                @intCast(self.backdrop_prims),
-                @intCast(self.backdrop_sprites),
-                @intCast(self.backdrop_color),
-                self.frost_rects[0..self.frost_count],
-            );
-        } else if (self.blur_modal) {
+        // An open modal wins: the whole page behind it blurs, frosted bars included, and its
+        // marker has already moved the backdrop split past them.
+        if (self.blur_modal) {
             const tbar = self.handle.titlebar;
             const crisp_top: f32 = if (tbar.enabled) @floatCast(tbar.height) else 0;
             self.renderer.draw_frame_modal(
@@ -965,6 +952,21 @@ pub const PaintContext = struct {
                 @intCast(self.backdrop_sprites),
                 @intCast(self.backdrop_color),
                 crisp_top,
+            );
+        } else if (self.frost_count > 0) {
+            // The iOS bars marked frosted regions: the backdrop (up to the backdrop_*
+            // split) blurs under them, the bars' items draw crisp on top.
+            self.renderer.draw_frame_frost(
+                clear,
+                self.prims.items,
+                self.sprites.items,
+                self.text_system.mono_atlas_texture(),
+                self.color_sprites.items,
+                color_atlas_tex,
+                @intCast(self.backdrop_prims),
+                @intCast(self.backdrop_sprites),
+                @intCast(self.backdrop_color),
+                self.frost_rects[0..self.frost_count],
             );
         } else {
             self.renderer.draw_frame(
