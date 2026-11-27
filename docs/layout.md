@@ -79,6 +79,7 @@ zigui.text("Hello", .{ .size = 16, .weight = .semi_bold })
 | `muted` | `bool` | `false` | resolve to `theme.muted_foreground` |
 | `color` | `?Rgba` | `null` | explicit override; else muted/foreground at draw |
 | `truncate` | `bool` | `false` | clamp to one line with a trailing ellipsis instead of wrapping |
+| `ink_center` | `bool` | `false` | center the glyph ink across the text's box, not its advance width; for initials or a count in a badge |
 | `font_family` | `[]const u8` | `""` | override the font family (e.g. a mono family for code/URLs); empty inherits the theme's |
 
 Text color resolves at draw time from the theme. Leave `color` null to track

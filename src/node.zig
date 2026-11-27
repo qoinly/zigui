@@ -110,6 +110,7 @@ pub const Node = struct {
     name: []const u8 = "",
     // A text node clamps to one line with a trailing ellipsis instead of wrapping.
     truncate: bool = false,
+    ink_center: bool = false, // a text node centers its glyph ink in its box (Txt.ink_center)
     // Laid-out absolute rect written at draw; lets a container anchor an overlay
     // (menu/popover) to itself, the way the kit triggers expose their rect_out.
     rect_out: ?*[4]f32 = null,
@@ -207,10 +208,29 @@ pub const Txt = struct {
     color: ?Rgba = null,
     // Clamp to one line with a trailing ellipsis instead of wrapping.
     truncate: bool = false,
+    // Center the glyph ink across the text's box instead of its advance width: for a
+    // short label centered in a badge or avatar, where side bearings would leave it off
+    // center (a "P" carries more space on its left than a "W" on its right).
+    ink_center: bool = false,
     // Override the font family for this text (e.g. a mono family for code/URLs).
     // Empty inherits the theme's font_family (resolved by the facade).
     font_family: []const u8 = "",
 };
+
+// Shift glyph sprites so their ink is centered across [x, x + w]. Each glyph's sprite pads
+// its ink by the same margin on both sides, so the sprites' span shares the ink's center.
+// Vertically the label already centers the ink (by ink ascent), so only x moves.
+fn center_ink(sprites: []primitives.MonochromeSprite, x: f32, w: f32) void {
+    if (sprites.len == 0) return;
+    var x0: f32 = std.math.inf(f32);
+    var x1: f32 = -std.math.inf(f32);
+    for (sprites) |sp| {
+        x0 = @min(x0, sp.position[0]);
+        x1 = @max(x1, sp.position[0] + sp.size[0]);
+    }
+    const dx = (x + w / 2) - (x0 + x1) / 2;
+    for (sprites) |*sp| sp.position[0] += dx;
+}
 
 fn style_of(cfg: Cfg, dir: FlexDirection) Style {
     return .{
@@ -318,6 +338,7 @@ pub fn text(a: A, s: []const u8, o: Txt) *Node {
         .muted = o.muted,
         .color = o.color,
         .truncate = o.truncate,
+        .ink_center = o.ink_center,
         .font_family = o.font_family,
     });
 }
@@ -654,11 +675,13 @@ fn draw_tree(
                 .color = text_color(theme, n),
             };
             if (n.font_family.len > 0) sty.font_family = n.font_family;
+            const spr0 = b.sprites.items.len;
             if (n.truncate) {
                 _ = try label.render_clamped(b, x, y, n.text, r.size.width, sty);
             } else {
                 _ = try label.render_wrapped(b, x, y, n.text, sty, r.size.width);
             }
+            if (n.ink_center) center_ink(b.sprites.items[spr0..], x, r.size.width);
         },
         .leaf => if (n.leaf_draw) |d| {
             try d(b, n.leaf_ctx, .{ .origin = .{ .x = x, .y = y }, .size = r.size });
