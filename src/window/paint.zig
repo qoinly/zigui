@@ -254,6 +254,7 @@ pub const PaintContext = struct {
     focused_field_t: f64 = -1,
     kbd_scrolled_id: u32 = 0,
     kbd_scrolled_top: f32 = 1e9,
+    kbd_scrolled_h: f32 = 0,
     // Absolute Y (points) where the soft keyboard starts; a huge value means no keyboard.
     // A keyboard-aware scroll keeps the focused field above this line.
     kbd_top_y: f32 = 1e9,
@@ -615,6 +616,8 @@ pub const PaintContext = struct {
         if (!custom_shell.show_text_delta()) return;
         self.text_field_active = true;
         if (self.focused_field_id != DELTA_FIELD_ID) self.focused_field_t = self.now_s;
+        // Grown since the last frame: a scroll reads this rect a frame late, so draw once more.
+        if (self.focused_field_rect) |r| if (self.focused_field_id == DELTA_FIELD_ID and h > r[3]) self.request_redraw_after(0);
         self.focused_field_rect = .{ x, y, w, h };
         self.focused_field_id = DELTA_FIELD_ID;
     }

@@ -175,7 +175,16 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, o: CodeInputOptions) Re
     const st = o.state;
     const theme = o.theme;
     const p = o.paint;
-    const m = metrics(o.size);
+    var m = metrics(o.size);
+    // Narrower than the row's natural width (a side pane on a fold): slim the boxes and the
+    // space between them to fit, keeping their height and the text size.
+    const natural = width_for(o.size, o.length, o.group);
+    if (w > 0 and natural > w) {
+        const k = w / natural;
+        m.w *= k;
+        m.gap *= k;
+        m.dash *= k;
+    }
     st.on_focus = o.on_focus;
     st.focus_ctx = o.ctx;
     if (st.len > o.length) st.len = o.length;
@@ -186,7 +195,7 @@ pub fn render(b: *RenderBuilder, x: f32, y: f32, w: f32, o: CodeInputOptions) Re
         if (!p.block_keys and drain_keys(o)) if (o.on_change) |f| f(o.ctx);
     }
 
-    const total = width_for(o.size, o.length, o.group);
+    const total = @min(natural, if (w > 0) w else natural);
     const x0 = if (o.center) x + @max(0, (w - total) / 2) else x;
     try p.add_hitbox(.{ .x = x0, .y = y, .w = total, .h = m.h, .on_click = focus_thunk, .ctx = st });
 

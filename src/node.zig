@@ -968,10 +968,13 @@ fn draw_scroll(
         const fcx = fr[0] + fr[2] * 0.5;
         const inside = fcx >= view[0] and fcx <= view[0] + vw and fr[1] >= view[1] - 1 and fr[1] <= view[1] + vh;
         if (inside) {
-            if (p.focused_field_id != p.kbd_scrolled_id) {
+            // A new field, or the same one asking for more room below it (a message
+            // appeared under a code input): adjust once more.
+            if (p.focused_field_id != p.kbd_scrolled_id or fr[3] > p.kbd_scrolled_h) {
                 p.kbd_scrolled_id = p.focused_field_id;
                 p.kbd_scrolled_top = 1e9;
             }
+            p.kbd_scrolled_h = fr[3];
             // The keyboard appeared or is still rising: keep the field just above it.
             if (p.kbd_top_y < p.kbd_scrolled_top) {
                 const field_bottom = fr[1] + fr[3];
